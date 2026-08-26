@@ -1,8 +1,10 @@
 mod app;
+mod config;
 mod logging;
 mod shutdown;
 
 
+use config::Config;
 use tracing::info;
 
 
@@ -14,6 +16,15 @@ async fn main() -> anyhow::Result<()> {
 
 
     info!("Pookie daemon starting");
+
+
+    let config = Config::default();
+
+
+    info!(
+        "Maximum history items: {}",
+        config.max_history_items
+    );
 
 
     shutdown::wait_for_shutdown()
