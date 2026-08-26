@@ -15,3 +15,7 @@ tracing-subscriber = {
 }
 
 anyhow = "1"
+
+pookie-clipboard = {
+    path = "../pookie-clipboard"
+}

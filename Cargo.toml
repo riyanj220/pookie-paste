@@ -6,6 +6,6 @@ members = [
     "crates/pookie-core",
     "crates/storage",
     "crates/ipc"
-]
+, "crates/pookie-clipboard"]
 
 resolver = "2"
