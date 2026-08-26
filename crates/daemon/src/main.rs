@@ -26,12 +26,12 @@ async fn main() -> anyhow::Result<()> {
     let app = App::new(config);
 
 
-   let daemon_task = tokio::spawn(async move {
+    let daemon_task = tokio::spawn(async move {
 
-        app.run()
-            .await;
+            app.run()
+                .await;
 
-    });
+        });
 
 
     shutdown::wait_for_shutdown()
