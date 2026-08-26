@@ -16,8 +16,8 @@ mod backend;
 mod content;
 mod error;
 mod event;
+pub mod wayland;
 pub mod x11;
-
 
 pub use backend::ClipboardBackend;
 pub use content::ClipboardContent;

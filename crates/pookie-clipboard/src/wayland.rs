@@ -1,18 +1,18 @@
 use crate::{ClipboardBackend, ClipboardError};
 
-pub struct X11Clipboard {}
+pub struct WaylandClipboard {}
 
-impl X11Clipboard {
+impl WaylandClipboard {
     pub fn new() -> Result<Self, ClipboardError> {
         Ok(Self {})
     }
 
     pub fn name(&self) -> &'static str {
-        "X11"
+        "Wayland"
     }
 }
 
-impl ClipboardBackend for X11Clipboard {
+impl ClipboardBackend for WaylandClipboard {
     fn read(&self) -> Result<String, ClipboardError> {
         let mut clipboard = arboard::Clipboard::new()
             .map_err(|error| ClipboardError::ReadFailed(error.to_string()))?;
