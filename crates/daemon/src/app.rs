@@ -1,5 +1,9 @@
+use tokio::time::{sleep, Duration};
+
+
 pub struct App {
 }
+
 
 impl App {
 
@@ -8,9 +12,20 @@ impl App {
     }
 
 
-    pub fn run(&self) {
+    pub async fn run(&self) {
 
         println!("Pookie daemon is running");
+
+
+        loop {
+
+            println!("Daemon heartbeat");
+
+
+            sleep(Duration::from_secs(10))
+                .await;
+
+        }
 
     }
 

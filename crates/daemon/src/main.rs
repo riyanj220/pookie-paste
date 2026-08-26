@@ -1,12 +1,17 @@
 mod app;
 
+
 use app::App;
 
 
-fn main() {
+#[tokio::main]
+async fn main() {
+
 
     let app = App::new();
 
-    app.run();
+
+    app.run()
+        .await;
 
 }
