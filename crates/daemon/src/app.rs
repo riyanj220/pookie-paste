@@ -1,25 +1,49 @@
-use tokio::time::{sleep, Duration};
+use crate::config::Config;
+
+use tokio::time::{
+    sleep,
+    Duration,
+};
 
 
 pub struct App {
+
+    config: Config,
+
 }
 
 
 impl App {
 
-    pub fn new() -> Self {
-        Self {}
+
+    pub fn new(config: Config) -> Self {
+
+        Self {
+            config,
+        }
+
     }
 
 
     pub async fn run(&self) {
 
-        tracing::info!("Pookie daemon is running");
+
+        tracing::info!(
+            "Pookie daemon running"
+        );
+
+
+        tracing::info!(
+            "History limit: {}",
+            self.config.max_history_items
+        );
 
 
         loop {
 
-            tracing::info!("Daemon heartbeat");
+            tracing::info!(
+                "Daemon heartbeat"
+            );
 
 
             sleep(Duration::from_secs(10))

@@ -4,8 +4,8 @@ mod logging;
 mod shutdown;
 
 
+use app::App;
 use config::Config;
-use tracing::info;
 
 
 #[tokio::main]
@@ -15,23 +15,35 @@ async fn main() -> anyhow::Result<()> {
     logging::init_logging();
 
 
-    info!("Pookie daemon starting");
+    tracing::info!(
+        "Starting Pookie daemon"
+    );
 
 
     let config = Config::default();
 
 
-    info!(
-        "Maximum history items: {}",
-        config.max_history_items
-    );
+    let app = App::new(config);
+
+
+   let daemon_task = tokio::spawn(async move {
+
+        app.run()
+            .await;
+
+    });
 
 
     shutdown::wait_for_shutdown()
         .await?;
 
 
-    info!("Pookie daemon stopped");
+    daemon_task.abort();
+
+
+    tracing::info!(
+        "Pookie daemon stopped"
+    );
 
 
     Ok(())
