@@ -1,30 +1,56 @@
-mod app;
+mod clipboard_backend;
+mod clipboard_service;
 mod config;
 mod logging;
 mod shutdown;
 
-use app::App;
+use clipboard_backend::PlatformClipboard;
+use clipboard_service::ClipboardService;
+
 use config::Config;
+
+use tokio::time::{Duration, sleep};
+
+use tracing::info;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     logging::init_logging();
 
-    tracing::info!("Starting Pookie daemon");
+    let backend = PlatformClipboard::new()?;
+
+    info!("clipboard backend: {}", backend.name());
+
+    let mut clipboard_service = ClipboardService::new(backend);
 
     let config = Config::default();
 
-    let app = App::new(config);
+    info!("history limit: {}", config.max_history_items);
 
-    let daemon_task = tokio::spawn(async move {
-        app.run().await;
-    });
+    info!("Pookie daemon running");
 
-    shutdown::wait_for_shutdown().await?;
+    loop {
+        if let Some(content) = clipboard_service.check_for_change()? {
+            info!("Clipboard changed: {}", content);
+        }
 
-    daemon_task.abort();
+        tokio::select! {
 
-    tracing::info!("Pookie daemon stopped");
+            _ = shutdown::wait_for_shutdown() => {
+
+                info!("Shutdown signal received");
+
+                break;
+
+            }
+
+            _ = sleep(
+                Duration::from_secs(2)
+            ) => {}
+
+        }
+    }
+    info!("Pookie daemon stopped");
 
     Ok(())
 }
