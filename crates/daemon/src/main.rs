@@ -1,4 +1,5 @@
 mod app;
+mod logging;
 
 
 use app::App;
@@ -6,6 +7,9 @@ use app::App;
 
 #[tokio::main]
 async fn main() {
+
+
+    logging::init_logging();
 
 
     let app = App::new();

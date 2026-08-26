@@ -14,12 +14,12 @@ impl App {
 
     pub async fn run(&self) {
 
-        println!("Pookie daemon is running");
+        tracing::info!("Pookie daemon is running");
 
 
         loop {
 
-            println!("Daemon heartbeat");
+            tracing::info!("Daemon heartbeat");
 
 
             sleep(Duration::from_secs(10))
