@@ -19,3 +19,9 @@ anyhow = "1"
 pookie-clipboard = {
     path = "../pookie-clipboard"
 }
+
+pookie-core = {
+    path = "../pookie-core"
+}
+
+chrono = "0.4"

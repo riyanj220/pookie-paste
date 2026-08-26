@@ -13,6 +13,10 @@ use tokio::time::{Duration, sleep};
 
 use tracing::info;
 
+use pookie_core::{ClipboardEvent, ClipboardProcessor};
+
+use pookie_clipboard::ClipboardContent;
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     logging::init_logging();
@@ -23,6 +27,8 @@ async fn main() -> anyhow::Result<()> {
 
     let mut clipboard_service = ClipboardService::new(backend);
 
+    let processor = ClipboardProcessor;
+
     let config = Config::default();
 
     info!("history limit: {}", config.max_history_items);
@@ -31,7 +37,14 @@ async fn main() -> anyhow::Result<()> {
 
     loop {
         if let Some(content) = clipboard_service.check_for_change()? {
-            info!("Clipboard changed: {}", content);
+            let event = ClipboardEvent {
+                content: ClipboardContent::Text(content),
+                created_at: chrono::Utc::now(),
+            };
+
+            let item = processor.process(event);
+
+            info!("Clipboard item created: {:?}", item.id);
         }
 
         tokio::select! {

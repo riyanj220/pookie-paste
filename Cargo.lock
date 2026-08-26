@@ -152,7 +152,9 @@ name = "daemon"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "pookie-clipboard",
+ "pookie-core",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -560,6 +562,11 @@ dependencies = [
 [[package]]
 name = "pookie-core"
 version = "0.1.0"
+dependencies = [
+ "chrono",
+ "pookie-clipboard",
+ "uuid",
+]
 
 [[package]]
 name = "proc-macro2"
