@@ -1,21 +1,28 @@
 mod app;
 mod logging;
+mod shutdown;
 
 
-use app::App;
+use tracing::info;
 
 
 #[tokio::main]
-async fn main() {
+async fn main() -> anyhow::Result<()> {
 
 
     logging::init_logging();
 
 
-    let app = App::new();
+    info!("Pookie daemon starting");
 
 
-    app.run()
-        .await;
+    shutdown::wait_for_shutdown()
+        .await?;
+
+
+    info!("Pookie daemon stopped");
+
+
+    Ok(())
 
 }
