@@ -1,0 +1,11 @@
+[workspace]
+
+members = [
+    "crates/daemon",
+    "crates/ui",
+    "crates/pookie-core",
+    "crates/storage",
+    "crates/ipc"
+]
+
+resolver = "2"

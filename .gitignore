@@ -1,0 +1,19 @@
+# Rust
+target/
+
+# IDE
+.vscode/
+.idea/
+
+# Operating System
+.DS_Store
+
+# Environment
+.env
+
+# Logs
+*.log
+
+# Database
+*.db
+*.sqlite
