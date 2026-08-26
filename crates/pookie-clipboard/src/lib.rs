@@ -1,19 +1,24 @@
 //! # Pookie Clipboard
 //!
-//! Clipboard infrastructure layer for Pookie Paste.
+//! Infrastructure layer for clipboard operations in Pookie Paste.
 //!
-//! This crate provides:
+//! This crate defines:
 //!
-//! - Platform-independent clipboard abstraction
-//! - Clipboard backend interface
-//! - Clipboard-specific error handling
+//! - Clipboard backend abstraction
+//! - Clipboard content types
+//! - Clipboard events
+//! - Clipboard-specific errors
 //!
-//! Implementations such as X11 and Wayland backends
-//! will live behind the [`ClipboardBackend`] trait.
+//! This crate does not implement platform-specific clipboard logic.
+//! X11 and Wayland implementations will use these abstractions.
 
 mod backend;
+mod content;
 mod error;
+mod event;
 
 
 pub use backend::ClipboardBackend;
+pub use content::ClipboardContent;
 pub use error::ClipboardError;
+pub use event::ClipboardEvent;
