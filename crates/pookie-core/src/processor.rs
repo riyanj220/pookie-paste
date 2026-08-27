@@ -1,4 +1,4 @@
-use crate::{ClipboardEvent, ClipboardItem, ContentAnalyzer, ContentNormalizer};
+use crate::{ClipboardEvent, ClipboardItem, ContentAnalyzer, ContentHasher, ContentNormalizer};
 
 #[derive(Default)]
 pub struct ClipboardProcessor;
@@ -13,6 +13,8 @@ impl ClipboardProcessor {
             return None;
         }
 
-        Some(ClipboardItem::new(content))
+        let hash = ContentHasher::hash(&content);
+
+        Some(ClipboardItem::new(content, hash))
     }
 }

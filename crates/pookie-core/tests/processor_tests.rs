@@ -14,9 +14,9 @@ fn processes_valid_clipboard_event() {
         created_at: Utc::now(),
     };
 
-    let item = processor.process(event);
+    let item = processor.process(event).expect("Expected clipboard item");
 
-    assert!(item.is_some());
+    assert!(!item.hash.is_empty());
 }
 
 #[test]
