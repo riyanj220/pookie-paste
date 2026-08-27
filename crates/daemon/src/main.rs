@@ -27,7 +27,7 @@ async fn main() -> anyhow::Result<()> {
 
     let mut clipboard_service = ClipboardService::new(backend);
 
-    let processor = ClipboardProcessor;
+    let mut processor = ClipboardProcessor::new();
 
     let config = Config::default();
 
