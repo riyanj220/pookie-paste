@@ -42,9 +42,11 @@ async fn main() -> anyhow::Result<()> {
                 created_at: chrono::Utc::now(),
             };
 
-            let item = processor.process(event);
-
-            info!("Clipboard item created: {:?}", item.id);
+            if let Some(item) = processor.process(event) {
+                info!("Clipboard item created: {:?}", item.id);
+            } else {
+                info!("Clipboard content ignored");
+            }
         }
 
         tokio::select! {

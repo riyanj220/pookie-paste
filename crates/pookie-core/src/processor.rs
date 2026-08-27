@@ -1,10 +1,16 @@
-use crate::{ClipboardEvent, ClipboardItem};
+use crate::{ClipboardEvent, ClipboardItem, ContentAnalyzer};
 
 #[derive(Default)]
 pub struct ClipboardProcessor;
 
 impl ClipboardProcessor {
-    pub fn process(&self, event: ClipboardEvent) -> ClipboardItem {
-        ClipboardItem::new(event.content)
+    pub fn process(&self, event: ClipboardEvent) -> Option<ClipboardItem> {
+        let metadata = ContentAnalyzer::analyze(&event.content);
+
+        if metadata.is_empty {
+            return None;
+        }
+
+        Some(ClipboardItem::new(event.content))
     }
 }
