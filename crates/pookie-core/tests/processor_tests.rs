@@ -33,3 +33,24 @@ fn ignores_empty_clipboard_event() {
 
     assert!(item.is_none());
 }
+
+#[test]
+fn normalizes_content_before_creating_item() {
+    let processor = ClipboardProcessor;
+
+    let event = ClipboardEvent {
+        content: ClipboardContent::Text("   Hello   ".to_string()),
+
+        created_at: Utc::now(),
+    };
+
+    let item = processor.process(event).expect("Expected clipboard item");
+
+    match item.content {
+        ClipboardContent::Text(value) => {
+            assert_eq!(value, "Hello");
+        }
+
+        _ => panic!("Expected text"),
+    }
+}
