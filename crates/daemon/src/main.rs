@@ -3,7 +3,6 @@ mod clipboard_service;
 mod config;
 mod logging;
 mod shutdown;
-mod storage_mapper;
 
 use clipboard_backend::PlatformClipboard;
 use clipboard_service::ClipboardService;
@@ -18,8 +17,8 @@ use pookie_core::{ClipboardEvent, ClipboardProcessor};
 
 use pookie_clipboard::ClipboardContent;
 
-use storage::{Database, StorageRepository};
-use storage_mapper::to_stored_item;
+use history::ClipboardHistoryService;
+use storage::Database;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -31,16 +30,11 @@ async fn main() -> anyhow::Result<()> {
 
     info!("database initialized");
 
-    let repository = StorageRepository::new(&database);
+    let repository = storage::StorageRepository::new(&database);
 
-    info!("storage repository initialized");
+    let history_service = ClipboardHistoryService::new(repository);
 
-    let existing_items = repository.get_all().await?;
-
-    info!(
-        "Loaded {} clipboard items from storage",
-        existing_items.len()
-    );
+    info!("history service initialized");
 
     let backend = PlatformClipboard::new()?;
 
@@ -60,12 +54,11 @@ async fn main() -> anyhow::Result<()> {
                 content: ClipboardContent::Text(content),
                 created_at: chrono::Utc::now(),
             };
+
             if let Some(item) = processor.process(event) {
                 info!("Clipboard item created: {:?}", item.id);
 
-                let stored_item = to_stored_item(item);
-
-                repository.insert(&stored_item).await?;
+                history_service.save(item).await?;
 
                 info!("Clipboard item saved");
             } else {

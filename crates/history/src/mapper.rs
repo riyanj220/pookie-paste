@@ -1,7 +1,5 @@
 use pookie_clipboard::ClipboardContent;
-
 use pookie_core::ClipboardItem;
-
 use storage::StoredClipboardItem;
 
 pub fn to_stored_item(item: ClipboardItem) -> StoredClipboardItem {
