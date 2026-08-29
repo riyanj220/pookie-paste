@@ -107,4 +107,30 @@ impl<'a> StorageRepository<'a> {
 
         Ok(())
     }
+
+    pub async fn delete_by_id(&self, id: &str) -> Result<bool, sqlx::Error> {
+        let result = sqlx::query(
+            "
+        DELETE FROM clipboard_items
+        WHERE id = ?
+        ",
+        )
+        .bind(id)
+        .execute(self.database.pool())
+        .await?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
+    pub async fn clear(&self) -> Result<u64, sqlx::Error> {
+        let result = sqlx::query(
+            "
+        DELETE FROM clipboard_items
+        ",
+        )
+        .execute(self.database.pool())
+        .await?;
+
+        Ok(result.rows_affected())
+    }
 }

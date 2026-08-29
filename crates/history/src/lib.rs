@@ -1,5 +1,7 @@
+mod mapper;
+
 pub mod config;
-pub mod mapper;
 pub mod service;
 
+pub use config::HistoryConfig;
 pub use service::ClipboardHistoryService;

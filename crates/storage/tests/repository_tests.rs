@@ -81,3 +81,68 @@ async fn deletes_items() {
 
     assert_eq!(count, 0);
 }
+
+#[tokio::test]
+async fn deletes_single_item_by_id() {
+    let repository = create_repository().await;
+
+    let item_a = StoredClipboardItem {
+        id: "item-a".to_string(),
+        content_type: "text".to_string(),
+        text_content: Some("Item A".to_string()),
+        file_path: None,
+        content_hash: "hash-a".to_string(),
+        created_at: "2026-08-29T00:00:01Z".to_string(),
+    };
+
+    let item_b = StoredClipboardItem {
+        id: "item-b".to_string(),
+        content_type: "text".to_string(),
+        text_content: Some("Item B".to_string()),
+        file_path: None,
+        content_hash: "hash-b".to_string(),
+        created_at: "2026-08-29T00:00:02Z".to_string(),
+    };
+
+    repository.insert(&item_a).await.unwrap();
+    repository.insert(&item_b).await.unwrap();
+
+    let deleted = repository.delete_by_id("item-a").await.unwrap();
+
+    assert!(deleted);
+
+    let deleted_again = repository.delete_by_id("item-a").await.unwrap();
+
+    assert!(!deleted_again);
+
+    let items = repository.get_all().await.unwrap();
+
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].id, "item-b");
+}
+
+#[tokio::test]
+async fn clears_all_items() {
+    let repository = create_repository().await;
+
+    for index in 1..=3 {
+        let item = StoredClipboardItem {
+            id: format!("item-{index}"),
+            content_type: "text".to_string(),
+            text_content: Some(format!("Item {index}")),
+            file_path: None,
+            content_hash: format!("hash-{index}"),
+            created_at: format!("2026-08-29T00:00:0{index}Z"),
+        };
+
+        repository.insert(&item).await.unwrap();
+    }
+
+    let deleted_count = repository.clear().await.unwrap();
+
+    assert_eq!(deleted_count, 3);
+
+    let count = repository.count().await.unwrap();
+
+    assert_eq!(count, 0);
+}

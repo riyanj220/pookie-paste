@@ -17,8 +17,7 @@ use pookie_core::{ClipboardEvent, ClipboardProcessor};
 
 use pookie_clipboard::ClipboardContent;
 
-use history::ClipboardHistoryService;
-use history::config::HistoryConfig;
+use history::{ClipboardHistoryService, HistoryConfig};
 use storage::Database;
 
 #[tokio::main]

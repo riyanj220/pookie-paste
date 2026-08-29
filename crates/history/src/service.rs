@@ -1,5 +1,5 @@
 use pookie_core::ClipboardItem;
-use storage::StorageRepository;
+use storage::{StorageRepository, StoredClipboardItem};
 
 use crate::config::HistoryConfig;
 use crate::mapper::to_stored_item;
@@ -43,5 +43,17 @@ impl<'a> ClipboardHistoryService<'a> {
         self.repository.delete_by_ids(ids).await?;
 
         Ok(())
+    }
+
+    pub async fn get_all(&self) -> Result<Vec<StoredClipboardItem>, sqlx::Error> {
+        self.repository.get_all().await
+    }
+
+    pub async fn delete(&self, id: &str) -> Result<bool, sqlx::Error> {
+        self.repository.delete_by_id(id).await
+    }
+
+    pub async fn clear(&self) -> Result<u64, sqlx::Error> {
+        self.repository.clear().await
     }
 }
