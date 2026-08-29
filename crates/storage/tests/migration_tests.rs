@@ -1,22 +1,24 @@
 use storage::Database;
 
 #[tokio::test]
-async fn creates_clipboard_items_table() {
+async fn creates_clipboard_items_schema() {
     let database = Database::new("sqlite::memory:")
         .await
         .expect("database initialization failed");
 
-    let table = sqlx::query_scalar::<_, String>(
+    let columns = sqlx::query_scalar::<_, String>(
         "
             SELECT name
-            FROM sqlite_master
-            WHERE type = 'table'
-            AND name = 'clipboard_items'
+            FROM pragma_table_info(
+                'clipboard_items'
+            )
             ",
     )
-    .fetch_one(database.pool())
+    .fetch_all(database.pool())
     .await
-    .expect("clipboard_items table should exist");
+    .expect("failed reading schema");
 
-    assert_eq!(table, "clipboard_items");
+    assert!(columns.contains(&"text_content".to_string()));
+
+    assert!(columns.contains(&"file_path".to_string()));
 }

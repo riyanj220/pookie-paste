@@ -16,18 +16,20 @@ impl<'a> StorageRepository<'a> {
             INSERT INTO clipboard_items
             (
                 id,
-                content,
-                content_hash,
                 content_type,
+                text_content,
+                file_path,
+                content_hash,
                 created_at
             )
-            VALUES (?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?)
             ",
         )
         .bind(&item.id)
-        .bind(&item.content)
-        .bind(&item.content_hash)
         .bind(&item.content_type)
+        .bind(&item.text_content)
+        .bind(&item.file_path)
+        .bind(&item.content_hash)
         .bind(&item.created_at)
         .execute(self.database.pool())
         .await?;
@@ -40,9 +42,10 @@ impl<'a> StorageRepository<'a> {
             "
                 SELECT
                     id,
-                    content,
-                    content_hash,
                     content_type,
+                    text_content,
+                    file_path,
+                    content_hash,
                     created_at
                 FROM clipboard_items
                 ORDER BY created_at DESC

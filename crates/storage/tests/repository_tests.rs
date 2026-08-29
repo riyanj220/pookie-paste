@@ -11,11 +11,13 @@ async fn inserts_and_reads_clipboard_item() {
     let item = StoredClipboardItem {
         id: "123".to_string(),
 
-        content: "Hello Pookie".to_string(),
+        content_type: "text".to_string(),
+
+        text_content: Some("Hello Pookie".to_string()),
+
+        file_path: None,
 
         content_hash: "hash123".to_string(),
-
-        content_type: "text".to_string(),
 
         created_at: "2026-08-29T00:00:00Z".to_string(),
     };
@@ -26,5 +28,5 @@ async fn inserts_and_reads_clipboard_item() {
 
     assert_eq!(items.len(), 1);
 
-    assert_eq!(items[0].content, "Hello Pookie");
+    assert_eq!(items[0].text_content.as_deref(), Some("Hello Pookie"));
 }

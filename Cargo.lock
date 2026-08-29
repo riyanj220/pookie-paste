@@ -255,6 +255,7 @@ dependencies = [
  "chrono",
  "pookie-clipboard",
  "pookie-core",
+ "storage",
  "tokio",
  "tracing",
  "tracing-subscriber",

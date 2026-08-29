@@ -25,3 +25,7 @@ pookie-core = {
 }
 
 chrono = "0.4"
+
+storage = {
+    path = "../storage"
+}

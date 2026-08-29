@@ -7,11 +7,13 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
 
             id TEXT PRIMARY KEY,
 
-            content TEXT NOT NULL,
+            content_type TEXT NOT NULL,
+
+            text_content TEXT,
+
+            file_path TEXT,
 
             content_hash TEXT NOT NULL,
-
-            content_type TEXT NOT NULL,
 
             created_at TEXT NOT NULL
 
