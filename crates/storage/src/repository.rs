@@ -56,4 +56,55 @@ impl<'a> StorageRepository<'a> {
 
         Ok(items)
     }
+
+    pub async fn count(&self) -> Result<i64, sqlx::Error> {
+        let count = sqlx::query_scalar::<_, i64>(
+            "
+            SELECT COUNT(*)
+            FROM clipboard_items
+            ",
+        )
+        .fetch_one(self.database.pool())
+        .await?;
+
+        Ok(count)
+    }
+
+    pub async fn get_oldest(&self, limit: i64) -> Result<Vec<StoredClipboardItem>, sqlx::Error> {
+        let items = sqlx::query_as::<_, StoredClipboardItem>(
+            "
+            SELECT
+                id,
+                content_type,
+                text_content,
+                file_path,
+                content_hash,
+                created_at
+            FROM clipboard_items
+            ORDER BY created_at ASC
+            LIMIT ?
+            ",
+        )
+        .bind(limit)
+        .fetch_all(self.database.pool())
+        .await?;
+
+        Ok(items)
+    }
+
+    pub async fn delete_by_ids(&self, ids: Vec<String>) -> Result<(), sqlx::Error> {
+        for id in ids {
+            sqlx::query(
+                "
+            DELETE FROM clipboard_items
+            WHERE id = ?
+            ",
+            )
+            .bind(id)
+            .execute(self.database.pool())
+            .await?;
+        }
+
+        Ok(())
+    }
 }

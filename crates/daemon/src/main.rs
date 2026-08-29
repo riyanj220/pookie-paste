@@ -18,6 +18,7 @@ use pookie_core::{ClipboardEvent, ClipboardProcessor};
 use pookie_clipboard::ClipboardContent;
 
 use history::ClipboardHistoryService;
+use history::config::HistoryConfig;
 use storage::Database;
 
 #[tokio::main]
@@ -32,7 +33,7 @@ async fn main() -> anyhow::Result<()> {
 
     let repository = storage::StorageRepository::new(&database);
 
-    let history_service = ClipboardHistoryService::new(repository);
+    let history_service = ClipboardHistoryService::new(repository, HistoryConfig::default());
 
     info!("history service initialized");
 

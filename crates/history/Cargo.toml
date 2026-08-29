@@ -23,3 +23,13 @@ sqlx = {
         "sqlite"
     ]
 }
+
+chrono = "0.4"
+
+uuid = {
+    version = "1",
+    features = ["v4"]
+}
+
+
+tokio = { version = "1", features = ["full"] }
