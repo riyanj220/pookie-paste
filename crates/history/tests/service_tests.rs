@@ -346,3 +346,49 @@ async fn supports_complete_history_lifecycle() {
 
     assert!(items.is_empty());
 }
+
+#[tokio::test]
+async fn moves_repeated_content_to_most_recent() {
+    let database = Database::new("sqlite::memory:")
+        .await
+        .expect("database initialization failed");
+
+    let repository = StorageRepository::new(&database);
+
+    let service = ClipboardHistoryService::new(repository, HistoryConfig { max_items: 30 });
+
+    let base_time = Utc::now();
+
+    let first_a = ClipboardItem {
+        id: uuid::Uuid::new_v4(),
+        content: ClipboardContent::Text("A".to_string()),
+        hash: "hash-a".to_string(),
+        created_at: base_time,
+    };
+
+    let b = ClipboardItem {
+        id: uuid::Uuid::new_v4(),
+        content: ClipboardContent::Text("B".to_string()),
+        hash: "hash-b".to_string(),
+        created_at: base_time + chrono::Duration::seconds(1),
+    };
+
+    let second_a = ClipboardItem {
+        id: uuid::Uuid::new_v4(),
+        content: ClipboardContent::Text("A".to_string()),
+        hash: "hash-a".to_string(),
+        created_at: base_time + chrono::Duration::seconds(2),
+    };
+
+    service.save(first_a).await.unwrap();
+    service.save(b).await.unwrap();
+    service.save(second_a).await.unwrap();
+
+    let items = service.get_all().await.unwrap();
+
+    assert_eq!(items.len(), 2);
+
+    assert_eq!(items[0].text_content.as_deref(), Some("A"),);
+
+    assert_eq!(items[1].text_content.as_deref(), Some("B"),);
+}

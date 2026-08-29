@@ -133,4 +133,27 @@ impl<'a> StorageRepository<'a> {
 
         Ok(result.rows_affected())
     }
+
+    pub async fn find_by_hash(
+        &self,
+        hash: &str,
+    ) -> Result<Option<StoredClipboardItem>, sqlx::Error> {
+        sqlx::query_as::<_, StoredClipboardItem>(
+            "
+        SELECT
+            id,
+            content_type,
+            text_content,
+            file_path,
+            content_hash,
+            created_at
+        FROM clipboard_items
+        WHERE content_hash = ?
+        LIMIT 1
+        ",
+        )
+        .bind(hash)
+        .fetch_optional(self.database.pool())
+        .await
+    }
 }

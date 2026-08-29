@@ -42,7 +42,7 @@ async fn main() -> anyhow::Result<()> {
 
     let mut clipboard_service = ClipboardService::new(backend);
 
-    let mut processor = ClipboardProcessor::new();
+    let processor = ClipboardProcessor::new();
 
     info!("history limit: {}", config.max_history_items);
 

@@ -146,3 +146,38 @@ async fn clears_all_items() {
 
     assert_eq!(count, 0);
 }
+
+#[tokio::test]
+async fn finds_item_by_existing_hash() {
+    let repository = create_repository().await;
+
+    let item = StoredClipboardItem {
+        id: "item-a".to_string(),
+        content_type: "text".to_string(),
+        text_content: Some("Item A".to_string()),
+        file_path: None,
+        content_hash: "hash-a".to_string(),
+        created_at: "2026-08-29T00:00:01Z".to_string(),
+    };
+
+    repository.insert(&item).await.unwrap();
+
+    let found = repository.find_by_hash("hash-a").await.unwrap();
+
+    assert!(found.is_some());
+
+    let found = found.unwrap();
+
+    assert_eq!(found.id, "item-a");
+    assert_eq!(found.content_hash, "hash-a");
+    assert_eq!(found.text_content.as_deref(), Some("Item A"));
+}
+
+#[tokio::test]
+async fn returns_none_for_missing_hash() {
+    let repository = create_repository().await;
+
+    let found = repository.find_by_hash("missing-hash").await.unwrap();
+
+    assert!(found.is_none());
+}

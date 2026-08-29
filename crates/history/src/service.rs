@@ -16,6 +16,12 @@ impl<'a> ClipboardHistoryService<'a> {
     }
 
     pub async fn save(&self, item: ClipboardItem) -> Result<(), sqlx::Error> {
+        let hash = item.hash.clone();
+
+        if let Some(existing) = self.repository.find_by_hash(&hash).await? {
+            self.repository.delete_by_id(&existing.id).await?;
+        }
+
         let stored_item = to_stored_item(item);
 
         self.repository.insert(&stored_item).await?;
