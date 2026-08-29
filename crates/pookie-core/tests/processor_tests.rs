@@ -1,6 +1,6 @@
 use chrono::Utc;
 
-use pookie_core::{ClipboardEvent, ClipboardProcessor};
+use pookie_core::{ClipboardEvent, ClipboardPolicy, ClipboardProcessor};
 
 use pookie_clipboard::ClipboardContent;
 
@@ -103,4 +103,19 @@ fn accepts_different_clipboard_content() {
     assert!(first.is_some());
 
     assert!(second.is_some());
+}
+
+#[test]
+fn rejects_content_by_policy() {
+    let mut processor = ClipboardProcessor::new();
+
+    let event = ClipboardEvent {
+        content: ClipboardContent::Text("a".repeat(ClipboardPolicy::MAX_TEXT_SIZE + 1)),
+
+        created_at: chrono::Utc::now(),
+    };
+
+    let result = processor.process(event);
+
+    assert!(result.is_none());
 }

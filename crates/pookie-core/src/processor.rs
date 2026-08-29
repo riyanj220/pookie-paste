@@ -1,6 +1,6 @@
 use crate::{
-    ClipboardEvent, ClipboardHistory, ClipboardItem, ContentAnalyzer, ContentHasher,
-    ContentNormalizer,
+    ClipboardEvent, ClipboardHistory, ClipboardItem, ClipboardPolicy, ContentAnalyzer,
+    ContentHasher, ContentNormalizer,
 };
 
 /// Processes clipboard events into validated clipboard items.
@@ -26,9 +26,10 @@ impl ClipboardProcessor {
 
         let metadata = ContentAnalyzer::analyze(&content);
 
-        if metadata.is_empty {
+        if !ClipboardPolicy::accept(&metadata) {
             return None;
         }
+
         let hash = ContentHasher::hash(&content);
 
         if !self.history.check_and_insert(hash.clone()) {
@@ -36,5 +37,11 @@ impl ClipboardProcessor {
         }
 
         Some(ClipboardItem::new(content, hash))
+    }
+}
+
+impl Default for ClipboardProcessor {
+    fn default() -> Self {
+        Self::new()
     }
 }
