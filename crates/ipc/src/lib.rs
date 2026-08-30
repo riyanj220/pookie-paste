@@ -1,14 +1,11 @@
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
-}
+pub mod client;
+pub mod codec;
+pub mod protocol;
+pub mod server;
+pub mod socket_path;
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
-}
+pub use client::{ClientError, IpcClient};
+pub use codec::{CodecError, decode, encode};
+pub use protocol::{HistoryItem, IpcRequest, IpcResponse};
+pub use server::{IpcConnection, IpcServer, ServerError};
+pub use socket_path::socket_path;
