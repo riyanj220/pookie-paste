@@ -1,6 +1,7 @@
 mod clipboard_backend;
 mod clipboard_service;
 mod config;
+mod ipc_server;
 mod logging;
 mod shutdown;
 
@@ -44,6 +45,10 @@ async fn main() -> anyhow::Result<()> {
 
     let processor = ClipboardProcessor::new();
 
+    let mut ipc_task = tokio::spawn(async { ipc_server::run().await });
+
+    info!("IPC server task started");
+
     info!("history limit: {}", config.max_history_items);
 
     info!("Pookie daemon running");
@@ -67,21 +72,40 @@ async fn main() -> anyhow::Result<()> {
         }
 
         tokio::select! {
-
             _ = shutdown::wait_for_shutdown() => {
-
                 info!("Shutdown signal received");
 
-                break;
+                ipc_task.abort();
 
+                let _ = ipc_task.await;
+
+                break;
             }
 
-            _ = sleep(
-                Duration::from_secs(2)
-            ) => {}
+            result = &mut ipc_task => {
+                match result {
+                    Ok(Ok(())) => {
+                        return Err(anyhow::anyhow!(
+                            "IPC server stopped unexpectedly"
+                        ));
+                    }
 
+                    Ok(Err(error)) => {
+                        return Err(error);
+                    }
+
+                    Err(error) => {
+                        return Err(anyhow::anyhow!(
+                            "IPC server task failed: {error}"
+                        ));
+                    }
+                }
+            }
+
+            _ = sleep(Duration::from_secs(2)) => {}
         }
     }
+
     info!("Pookie daemon stopped");
 
     Ok(())

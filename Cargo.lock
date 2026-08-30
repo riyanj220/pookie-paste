@@ -254,6 +254,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "history",
+ "ipc",
  "pookie-clipboard",
  "pookie-core",
  "storage",

@@ -15,6 +15,7 @@ tokio = {
         "net",
         "io-util",
         "rt",
+        "rt-multi-thread",
         "macros"
     ]
 }

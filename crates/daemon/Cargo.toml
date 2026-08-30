@@ -33,3 +33,7 @@ storage = {
 history = {
     path = "../history"
 }
+
+ipc = {
+    path = "../ipc"
+}
