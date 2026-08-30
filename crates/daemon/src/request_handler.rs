@@ -5,7 +5,7 @@ use crate::ipc_mapper::to_history_item;
 
 pub async fn handle_request(
     request: IpcRequest,
-    history_service: &ClipboardHistoryService<'_>,
+    history_service: &ClipboardHistoryService,
 ) -> IpcResponse {
     match request {
         IpcRequest::Ping => IpcResponse::Pong,

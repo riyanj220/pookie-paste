@@ -1,13 +1,17 @@
 use crate::Database;
 use crate::StoredClipboardItem;
 
-pub struct StorageRepository<'a> {
-    database: &'a Database,
+use sqlx::SqlitePool;
+
+pub struct StorageRepository {
+    pool: SqlitePool,
 }
 
-impl<'a> StorageRepository<'a> {
-    pub fn new(database: &'a Database) -> Self {
-        Self { database }
+impl StorageRepository {
+    pub fn new(database: &Database) -> Self {
+        Self {
+            pool: database.pool().clone(),
+        }
     }
 
     pub async fn insert(&self, item: &StoredClipboardItem) -> Result<(), sqlx::Error> {
@@ -31,7 +35,7 @@ impl<'a> StorageRepository<'a> {
         .bind(&item.file_path)
         .bind(&item.content_hash)
         .bind(&item.created_at)
-        .execute(self.database.pool())
+        .execute(&self.pool)
         .await?;
 
         Ok(())
@@ -51,7 +55,7 @@ impl<'a> StorageRepository<'a> {
                 ORDER BY created_at DESC
                 ",
         )
-        .fetch_all(self.database.pool())
+        .fetch_all(&self.pool)
         .await?;
 
         Ok(items)
@@ -64,7 +68,7 @@ impl<'a> StorageRepository<'a> {
             FROM clipboard_items
             ",
         )
-        .fetch_one(self.database.pool())
+        .fetch_one(&self.pool)
         .await?;
 
         Ok(count)
@@ -86,7 +90,7 @@ impl<'a> StorageRepository<'a> {
             ",
         )
         .bind(limit)
-        .fetch_all(self.database.pool())
+        .fetch_all(&self.pool)
         .await?;
 
         Ok(items)
@@ -101,7 +105,7 @@ impl<'a> StorageRepository<'a> {
             ",
             )
             .bind(id)
-            .execute(self.database.pool())
+            .execute(&self.pool)
             .await?;
         }
 
@@ -116,7 +120,7 @@ impl<'a> StorageRepository<'a> {
         ",
         )
         .bind(id)
-        .execute(self.database.pool())
+        .execute(&self.pool)
         .await?;
 
         Ok(result.rows_affected() > 0)
@@ -128,7 +132,7 @@ impl<'a> StorageRepository<'a> {
         DELETE FROM clipboard_items
         ",
         )
-        .execute(self.database.pool())
+        .execute(&self.pool)
         .await?;
 
         Ok(result.rows_affected())
@@ -153,7 +157,7 @@ impl<'a> StorageRepository<'a> {
         ",
         )
         .bind(hash)
-        .fetch_optional(self.database.pool())
+        .fetch_optional(&self.pool)
         .await
     }
 }

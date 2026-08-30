@@ -31,7 +31,7 @@ async fn inserts_and_reads_clipboard_item() {
     assert_eq!(items[0].text_content.as_deref(), Some("Hello Pookie"));
 }
 
-async fn create_repository() -> StorageRepository<'static> {
+async fn create_repository() -> StorageRepository {
     let database = Box::new(
         Database::new("sqlite::memory:")
             .await
@@ -180,4 +180,19 @@ async fn returns_none_for_missing_hash() {
     let found = repository.find_by_hash("missing-hash").await.unwrap();
 
     assert!(found.is_none());
+}
+
+#[tokio::test]
+async fn repository_owns_database_pool_handle() {
+    let repository = {
+        let database = Database::new("sqlite::memory:")
+            .await
+            .expect("database initialization failed");
+
+        StorageRepository::new(&database)
+    };
+
+    let count = repository.count().await.expect("count failed");
+
+    assert_eq!(count, 0);
 }

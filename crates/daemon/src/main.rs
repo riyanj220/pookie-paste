@@ -7,6 +7,8 @@ mod logging;
 mod request_handler;
 mod shutdown;
 
+use std::sync::Arc;
+
 use clipboard_backend::PlatformClipboard;
 use clipboard_service::ClipboardService;
 use config::Config;
@@ -35,7 +37,10 @@ async fn main() -> anyhow::Result<()> {
 
     let repository = storage::StorageRepository::new(&database);
 
-    let history_service = ClipboardHistoryService::new(repository, HistoryConfig::default());
+    let history_service = Arc::new(ClipboardHistoryService::new(
+        repository,
+        HistoryConfig::default(),
+    ));
 
     info!("history service initialized");
 
@@ -47,7 +52,7 @@ async fn main() -> anyhow::Result<()> {
 
     let processor = ClipboardProcessor::new();
 
-    let ipc_future = ipc_server::run(&history_service);
+    let ipc_future = ipc_server::run(Arc::clone(&history_service));
 
     tokio::pin!(ipc_future);
 

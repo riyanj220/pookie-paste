@@ -4,14 +4,14 @@ use storage::{StorageRepository, StoredClipboardItem};
 use crate::config::HistoryConfig;
 use crate::mapper::to_stored_item;
 
-pub struct ClipboardHistoryService<'a> {
-    repository: StorageRepository<'a>,
+pub struct ClipboardHistoryService {
+    repository: StorageRepository,
 
     config: HistoryConfig,
 }
 
-impl<'a> ClipboardHistoryService<'a> {
-    pub fn new(repository: StorageRepository<'a>, config: HistoryConfig) -> Self {
+impl ClipboardHistoryService {
+    pub fn new(repository: StorageRepository, config: HistoryConfig) -> Self {
         Self { repository, config }
     }
 

@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use chrono::Utc;
 use history::{ClipboardHistoryService, HistoryConfig};
 use pookie_clipboard::ClipboardContent;
@@ -36,7 +38,7 @@ async fn enforces_history_limit() {
     assert!(
         items
             .iter()
-            .all(|item| item.text_content.as_deref() != Some("Item 1"))
+            .all(|item| { item.text_content.as_deref() != Some("Item 1") })
     );
 }
 
@@ -288,6 +290,7 @@ async fn supports_complete_history_lifecycle() {
     let service = ClipboardHistoryService::new(repository, HistoryConfig { max_items: 30 });
 
     let first_id = uuid::Uuid::new_v4();
+
     let second_id = uuid::Uuid::new_v4();
 
     let first = ClipboardItem {
@@ -312,7 +315,7 @@ async fn supports_complete_history_lifecycle() {
 
     assert_eq!(items.len(), 2);
 
-    assert_eq!(items[0].text_content.as_deref(), Some("Second item"));
+    assert_eq!(items[0].text_content.as_deref(), Some("Second item"),);
 
     let deleted = service
         .delete(&first_id.to_string())
@@ -332,7 +335,7 @@ async fn supports_complete_history_lifecycle() {
 
     assert_eq!(items.len(), 1);
 
-    assert_eq!(items[0].text_content.as_deref(), Some("Second item"));
+    assert_eq!(items[0].text_content.as_deref(), Some("Second item"),);
 
     let cleared = service.clear().await.expect("clear failed");
 
@@ -391,4 +394,220 @@ async fn moves_repeated_content_to_most_recent() {
     assert_eq!(items[0].text_content.as_deref(), Some("A"),);
 
     assert_eq!(items[1].text_content.as_deref(), Some("B"),);
+}
+
+#[tokio::test]
+async fn supports_concurrent_history_reads() {
+    let database = Database::new("sqlite::memory:")
+        .await
+        .expect("database initialization failed");
+
+    let repository = StorageRepository::new(&database);
+
+    let service = Arc::new(ClipboardHistoryService::new(
+        repository,
+        HistoryConfig { max_items: 30 },
+    ));
+
+    let first_item = ClipboardItem {
+        id: uuid::Uuid::new_v4(),
+        content: ClipboardContent::Text("First".to_string()),
+        hash: "concurrent-read-first".to_string(),
+        created_at: Utc::now(),
+    };
+
+    let second_item = ClipboardItem {
+        id: uuid::Uuid::new_v4(),
+        content: ClipboardContent::Text("Second".to_string()),
+        hash: "concurrent-read-second".to_string(),
+        created_at: Utc::now() + chrono::Duration::seconds(1),
+    };
+
+    service.save(first_item).await.expect("first save failed");
+
+    service.save(second_item).await.expect("second save failed");
+
+    let first_service = Arc::clone(&service);
+
+    let second_service = Arc::clone(&service);
+
+    let third_service = Arc::clone(&service);
+
+    let first =
+        tokio::spawn(async move { first_service.get_all().await.expect("first read failed") });
+
+    let second =
+        tokio::spawn(async move { second_service.get_all().await.expect("second read failed") });
+
+    let third =
+        tokio::spawn(async move { third_service.get_all().await.expect("third read failed") });
+
+    let first = first.await.expect("first task failed");
+
+    let second = second.await.expect("second task failed");
+
+    let third = third.await.expect("third task failed");
+
+    assert_eq!(first.len(), 2);
+    assert_eq!(second.len(), 2);
+    assert_eq!(third.len(), 2);
+}
+
+#[tokio::test]
+async fn supports_concurrent_history_deletes() {
+    let database = Database::new("sqlite::memory:")
+        .await
+        .expect("database initialization failed");
+
+    let repository = StorageRepository::new(&database);
+
+    let service = Arc::new(ClipboardHistoryService::new(
+        repository,
+        HistoryConfig { max_items: 30 },
+    ));
+
+    let a_id = uuid::Uuid::new_v4();
+
+    let b_id = uuid::Uuid::new_v4();
+
+    let c_id = uuid::Uuid::new_v4();
+
+    let a = ClipboardItem {
+        id: a_id,
+        content: ClipboardContent::Text("A".to_string()),
+        hash: "concurrent-delete-a".to_string(),
+        created_at: Utc::now(),
+    };
+
+    let b = ClipboardItem {
+        id: b_id,
+        content: ClipboardContent::Text("B".to_string()),
+        hash: "concurrent-delete-b".to_string(),
+        created_at: Utc::now() + chrono::Duration::seconds(1),
+    };
+
+    let c = ClipboardItem {
+        id: c_id,
+        content: ClipboardContent::Text("C".to_string()),
+        hash: "concurrent-delete-c".to_string(),
+        created_at: Utc::now() + chrono::Duration::seconds(2),
+    };
+
+    service.save(a).await.expect("save A failed");
+
+    service.save(b).await.expect("save B failed");
+
+    service.save(c).await.expect("save C failed");
+
+    let a_id = a_id.to_string();
+
+    let b_id = b_id.to_string();
+
+    let c_id = c_id.to_string();
+
+    let delete_a = {
+        let service = Arc::clone(&service);
+
+        tokio::spawn(async move { service.delete(&a_id).await.expect("delete A failed") })
+    };
+
+    let delete_b = {
+        let service = Arc::clone(&service);
+
+        tokio::spawn(async move { service.delete(&b_id).await.expect("delete B failed") })
+    };
+
+    let delete_c = {
+        let service = Arc::clone(&service);
+
+        tokio::spawn(async move { service.delete(&c_id).await.expect("delete C failed") })
+    };
+
+    assert!(delete_a.await.expect("delete A task failed"));
+
+    assert!(delete_b.await.expect("delete B task failed"));
+
+    assert!(delete_c.await.expect("delete C task failed"));
+
+    let items = service.get_all().await.expect("history retrieval failed");
+
+    assert!(items.is_empty());
+}
+
+#[tokio::test]
+async fn supports_mixed_concurrent_operations() {
+    let database = Database::new("sqlite::memory:")
+        .await
+        .expect("database initialization failed");
+
+    let repository = StorageRepository::new(&database);
+
+    let service = Arc::new(ClipboardHistoryService::new(
+        repository,
+        HistoryConfig { max_items: 30 },
+    ));
+
+    let first_id = uuid::Uuid::new_v4();
+
+    let second_id = uuid::Uuid::new_v4();
+
+    let first = ClipboardItem {
+        id: first_id,
+        content: ClipboardContent::Text("First".to_string()),
+        hash: "mixed-first".to_string(),
+        created_at: Utc::now(),
+    };
+
+    let second = ClipboardItem {
+        id: second_id,
+        content: ClipboardContent::Text("Second".to_string()),
+        hash: "mixed-second".to_string(),
+        created_at: Utc::now() + chrono::Duration::seconds(1),
+    };
+
+    service.save(first).await.expect("first save failed");
+
+    service.save(second).await.expect("second save failed");
+
+    let read_task = {
+        let service = Arc::clone(&service);
+
+        tokio::spawn(async move { service.get_all().await })
+    };
+
+    let delete_task = {
+        let service = Arc::clone(&service);
+
+        let id = first_id.to_string();
+
+        tokio::spawn(async move { service.delete(&id).await })
+    };
+
+    let second_read_task = {
+        let service = Arc::clone(&service);
+
+        tokio::spawn(async move { service.get_all().await })
+    };
+
+    assert!(read_task.await.expect("read task failed").is_ok());
+
+    assert!(delete_task.await.expect("delete task failed").is_ok());
+
+    assert!(
+        second_read_task
+            .await
+            .expect("second read task failed")
+            .is_ok()
+    );
+
+    let items = service
+        .get_all()
+        .await
+        .expect("final history retrieval failed");
+
+    assert_eq!(items.len(), 1);
+
+    assert_eq!(items[0].id, second_id.to_string(),);
+
+    assert_eq!(items[0].text_content.as_deref(), Some("Second"),);
 }

@@ -6,7 +6,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            max_history_items: 100,
+            max_history_items: 30,
         }
     }
 }
