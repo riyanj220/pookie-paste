@@ -37,3 +37,5 @@ history = {
 ipc = {
     path = "../ipc"
 }
+
+uuid = { version = "1", features = ["v4"] }

@@ -1,7 +1,10 @@
-use ipc::{IpcRequest, IpcResponse, IpcServer, socket_path};
+use history::ClipboardHistoryService;
+use ipc::{IpcServer, socket_path};
 use tracing::{error, info};
 
-pub async fn run() -> anyhow::Result<()> {
+use crate::request_handler::handle_request;
+
+pub async fn run(history_service: &ClipboardHistoryService<'_>) -> anyhow::Result<()> {
     let path = socket_path();
 
     let server = IpcServer::bind(&path)
@@ -21,22 +24,11 @@ pub async fn run() -> anyhow::Result<()> {
         };
 
         match connection.read_request().await {
-            Ok(IpcRequest::Ping) => {
-                if let Err(error) = connection.send_response(&IpcResponse::Pong).await {
-                    error!("failed to send IPC response: {:?}", error);
-                }
-            }
-
             Ok(request) => {
-                error!("unsupported IPC request: {:?}", request);
+                let response = handle_request(request, history_service).await;
 
-                if let Err(error) = connection
-                    .send_response(&IpcResponse::Error {
-                        message: "request not implemented".to_string(),
-                    })
-                    .await
-                {
-                    error!("failed to send IPC error response: {:?}", error);
+                if let Err(error) = connection.send_response(&response).await {
+                    error!("failed to send IPC response: {:?}", error);
                 }
             }
 

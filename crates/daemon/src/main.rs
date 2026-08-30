@@ -1,13 +1,14 @@
 mod clipboard_backend;
 mod clipboard_service;
 mod config;
+mod ipc_mapper;
 mod ipc_server;
 mod logging;
+mod request_handler;
 mod shutdown;
 
 use clipboard_backend::PlatformClipboard;
 use clipboard_service::ClipboardService;
-
 use config::Config;
 
 use tokio::time::{Duration, sleep};
@@ -19,6 +20,7 @@ use pookie_core::{ClipboardEvent, ClipboardProcessor};
 use pookie_clipboard::ClipboardContent;
 
 use history::{ClipboardHistoryService, HistoryConfig};
+
 use storage::Database;
 
 #[tokio::main]
@@ -45,9 +47,11 @@ async fn main() -> anyhow::Result<()> {
 
     let processor = ClipboardProcessor::new();
 
-    let mut ipc_task = tokio::spawn(async { ipc_server::run().await });
+    let ipc_future = ipc_server::run(&history_service);
 
-    info!("IPC server task started");
+    tokio::pin!(ipc_future);
+
+    info!("IPC server initialized");
 
     info!("history limit: {}", config.max_history_items);
 
@@ -75,29 +79,21 @@ async fn main() -> anyhow::Result<()> {
             _ = shutdown::wait_for_shutdown() => {
                 info!("Shutdown signal received");
 
-                ipc_task.abort();
-
-                let _ = ipc_task.await;
-
                 break;
             }
 
-            result = &mut ipc_task => {
+            result = &mut ipc_future => {
                 match result {
-                    Ok(Ok(())) => {
-                        return Err(anyhow::anyhow!(
-                            "IPC server stopped unexpectedly"
-                        ));
-                    }
-
-                    Ok(Err(error)) => {
-                        return Err(error);
+                    Ok(()) => {
+                        return Err(
+                            anyhow::anyhow!(
+                                "IPC server stopped unexpectedly"
+                            )
+                        );
                     }
 
                     Err(error) => {
-                        return Err(anyhow::anyhow!(
-                            "IPC server task failed: {error}"
-                        ));
+                        return Err(error);
                     }
                 }
             }
