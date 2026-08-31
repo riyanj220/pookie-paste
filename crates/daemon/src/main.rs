@@ -20,7 +20,7 @@ use history::{ClipboardHistoryService, HistoryConfig};
 
 use storage::Database;
 
-use daemon::paste_backend::ClipboardOnlyPasteBackend;
+use daemon::x11_paste_backend::X11PasteBackend;
 use daemon::{activation_service::ClipboardActivationService, clipboard_service::ClipboardService};
 
 #[tokio::main]
@@ -47,14 +47,21 @@ async fn main() -> anyhow::Result<()> {
 
     let clipboard_service = Arc::new(Mutex::new(ClipboardService::new(backend)));
 
-    let _activation_service = ClipboardActivationService::new(
+    let paste_backend = X11PasteBackend::new()
+        .map_err(|error| anyhow::anyhow!("failed to initialize X11 paste backend: {error:?}"))?;
+
+    let activation_service = Arc::new(ClipboardActivationService::new(
         Arc::clone(&history_service),
         Arc::clone(&clipboard_service),
-        ClipboardOnlyPasteBackend,
-    );
+        paste_backend,
+    ));
+
     let processor = ClipboardProcessor::new();
 
-    let ipc_future = ipc_server::run(Arc::clone(&history_service));
+    let ipc_future = ipc_server::run(
+        Arc::clone(&history_service),
+        Arc::clone(&activation_service),
+    );
 
     tokio::pin!(ipc_future);
 

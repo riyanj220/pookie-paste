@@ -1,15 +1,30 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use daemon::activation_service::ClipboardActivationService;
+use daemon::paste_backend::PasteBackend;
 use daemon::request_handler::handle_request;
+
 use history::ClipboardHistoryService;
+
 use ipc::{IpcConnection, IpcServer, socket_path};
+
+use pookie_clipboard::ClipboardBackend;
+
 use tokio::time::timeout;
+
 use tracing::{error, info};
 
 const IPC_READ_TIMEOUT: Duration = Duration::from_secs(30);
 
-pub async fn run(history_service: Arc<ClipboardHistoryService>) -> anyhow::Result<()> {
+pub async fn run<B, P>(
+    history_service: Arc<ClipboardHistoryService>,
+    activation_service: Arc<ClipboardActivationService<B, P>>,
+) -> anyhow::Result<()>
+where
+    B: ClipboardBackend + Send + Sync + 'static,
+    P: PasteBackend + Send + Sync + 'static,
+{
     let path = socket_path();
 
     let server = IpcServer::bind(&path).map_err(|error| match error {
@@ -40,24 +55,40 @@ pub async fn run(history_service: Arc<ClipboardHistoryService>) -> anyhow::Resul
 
         let history_service = Arc::clone(&history_service);
 
+        let activation_service = Arc::clone(&activation_service);
+
         tokio::spawn(async move {
-            handle_connection(connection, history_service).await;
+            handle_connection(connection, history_service, activation_service).await;
         });
     }
 }
 
-async fn handle_connection(
+async fn handle_connection<B, P>(
     connection: IpcConnection,
     history_service: Arc<ClipboardHistoryService>,
-) {
-    handle_connection_with_timeout(connection, history_service, IPC_READ_TIMEOUT).await;
+    activation_service: Arc<ClipboardActivationService<B, P>>,
+) where
+    B: ClipboardBackend + Send + Sync + 'static,
+    P: PasteBackend + Send + Sync + 'static,
+{
+    handle_connection_with_timeout(
+        connection,
+        history_service,
+        activation_service,
+        IPC_READ_TIMEOUT,
+    )
+    .await;
 }
 
-async fn handle_connection_with_timeout(
+async fn handle_connection_with_timeout<B, P>(
     mut connection: IpcConnection,
     history_service: Arc<ClipboardHistoryService>,
+    activation_service: Arc<ClipboardActivationService<B, P>>,
     read_timeout: Duration,
-) {
+) where
+    B: ClipboardBackend + Send + Sync + 'static,
+    P: PasteBackend + Send + Sync + 'static,
+{
     loop {
         let request = match timeout(read_timeout, connection.read_request()).await {
             Ok(Ok(request)) => request,
@@ -79,7 +110,12 @@ async fn handle_connection_with_timeout(
             }
         };
 
-        let response = handle_request(request, history_service.as_ref()).await;
+        let response = handle_request(
+            request,
+            history_service.as_ref(),
+            activation_service.as_ref(),
+        )
+        .await;
 
         if let Err(error) = connection.send_response(&response).await {
             error!("failed to send IPC response: {:?}", error);
@@ -95,9 +131,18 @@ mod tests {
 
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::{Arc, Mutex as StdMutex};
+
+    use daemon::clipboard_service::ClipboardService;
+    use daemon::paste_backend::ClipboardOnlyPasteBackend;
 
     use history::{ClipboardHistoryService, HistoryConfig};
+
+    use pookie_clipboard::{ClipboardBackend, ClipboardError};
+
     use storage::{Database, StorageRepository};
+
+    use tokio::sync::Mutex;
 
     static SOCKET_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -109,6 +154,35 @@ mod tests {
             std::process::id(),
             counter,
         ))
+    }
+
+    #[derive(Clone)]
+    struct FakeClipboardBackend {
+        content: Arc<StdMutex<String>>,
+    }
+
+    impl FakeClipboardBackend {
+        fn new() -> Self {
+            Self {
+                content: Arc::new(StdMutex::new(String::new())),
+            }
+        }
+    }
+
+    impl ClipboardBackend for FakeClipboardBackend {
+        fn read(&self) -> Result<String, ClipboardError> {
+            Ok(self
+                .content
+                .lock()
+                .expect("fake clipboard mutex poisoned")
+                .clone())
+        }
+
+        fn write(&self, content: &str) -> Result<(), ClipboardError> {
+            *self.content.lock().expect("fake clipboard mutex poisoned") = content.to_string();
+
+            Ok(())
+        }
     }
 
     #[tokio::test]
@@ -124,16 +198,34 @@ mod tests {
             HistoryConfig { max_items: 30 },
         ));
 
+        let clipboard_backend = FakeClipboardBackend::new();
+
+        let clipboard_service = Arc::new(Mutex::new(ClipboardService::new(clipboard_backend)));
+
+        let activation_service = Arc::new(ClipboardActivationService::new(
+            Arc::clone(&history_service),
+            clipboard_service,
+            ClipboardOnlyPasteBackend,
+        ));
+
         let socket_path = temporary_socket_path();
 
         let server = IpcServer::bind(&socket_path).expect("server bind failed");
 
         let service = Arc::clone(&history_service);
 
+        let activation = Arc::clone(&activation_service);
+
         let connection_task = tokio::spawn(async move {
             let connection = server.accept().await.expect("accept failed");
 
-            handle_connection_with_timeout(connection, service, Duration::from_millis(50)).await;
+            handle_connection_with_timeout(
+                connection,
+                service,
+                activation,
+                Duration::from_millis(50),
+            )
+            .await;
         });
 
         let _idle_client = tokio::net::UnixStream::connect(&socket_path)

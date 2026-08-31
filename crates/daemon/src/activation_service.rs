@@ -382,7 +382,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn paste_failure_returns_error_after_clipboard_update_and_promotion() {
+    async fn paste_failure_returns_partial_failure_after_clipboard_update_and_promotion() {
         let history_service = create_history_service().await;
 
         let written = StdArc::new(StdMutex::new(None));

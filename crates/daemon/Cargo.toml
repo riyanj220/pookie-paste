@@ -39,3 +39,8 @@ ipc = {
 }
 
 uuid = { version = "1", features = ["v4"] }
+
+x11rb = {
+    version = "0.13",
+    features = ["xtest"],
+}
