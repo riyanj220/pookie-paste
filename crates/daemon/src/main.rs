@@ -1,9 +1,7 @@
 mod clipboard_backend;
 mod clipboard_service;
-mod ipc_mapper;
 mod ipc_server;
 mod logging;
-mod request_handler;
 mod shutdown;
 
 use std::sync::Arc;

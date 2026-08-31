@@ -1,12 +1,11 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use daemon::request_handler::handle_request;
 use history::ClipboardHistoryService;
 use ipc::{IpcConnection, IpcServer, socket_path};
 use tokio::time::timeout;
 use tracing::{error, info};
-
-use crate::request_handler::handle_request;
 
 const IPC_READ_TIMEOUT: Duration = Duration::from_secs(30);
 
