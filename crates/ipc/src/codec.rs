@@ -29,3 +29,5 @@ where
 
     serde_json::from_slice(&frame[..frame.len() - 1]).map_err(CodecError::Deserialization)
 }
+
+pub const MAX_FRAME_SIZE: usize = 1024 * 1024;

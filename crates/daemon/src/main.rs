@@ -1,6 +1,5 @@
 mod clipboard_backend;
 mod clipboard_service;
-mod config;
 mod ipc_mapper;
 mod ipc_server;
 mod logging;
@@ -11,7 +10,6 @@ use std::sync::Arc;
 
 use clipboard_backend::PlatformClipboard;
 use clipboard_service::ClipboardService;
-use config::Config;
 
 use tokio::time::{Duration, sleep};
 
@@ -29,18 +27,17 @@ use storage::Database;
 async fn main() -> anyhow::Result<()> {
     logging::init_logging();
 
-    let config = Config::default();
-
     let database = Database::new("sqlite:./pookie-paste.db").await?;
 
     info!("database initialized");
 
     let repository = storage::StorageRepository::new(&database);
 
-    let history_service = Arc::new(ClipboardHistoryService::new(
-        repository,
-        HistoryConfig::default(),
-    ));
+    let history_config = HistoryConfig::default();
+
+    info!("history limit: {}", history_config.max_items);
+
+    let history_service = Arc::new(ClipboardHistoryService::new(repository, history_config));
 
     info!("history service initialized");
 
@@ -55,10 +52,6 @@ async fn main() -> anyhow::Result<()> {
     let ipc_future = ipc_server::run(Arc::clone(&history_service));
 
     tokio::pin!(ipc_future);
-
-    info!("IPC server initialized");
-
-    info!("history limit: {}", config.max_history_items);
 
     info!("Pookie daemon running");
 
@@ -82,7 +75,9 @@ async fn main() -> anyhow::Result<()> {
 
         tokio::select! {
             _ = shutdown::wait_for_shutdown() => {
-                info!("Shutdown signal received");
+                info!(
+                    "Shutdown signal received"
+                );
 
                 break;
             }
@@ -103,7 +98,9 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
 
-            _ = sleep(Duration::from_secs(2)) => {}
+            _ = sleep(
+                Duration::from_secs(2)
+            ) => {}
         }
     }
 
