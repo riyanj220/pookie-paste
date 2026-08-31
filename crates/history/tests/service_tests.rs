@@ -611,3 +611,125 @@ async fn supports_mixed_concurrent_operations() {
 
     assert_eq!(items[0].text_content.as_deref(), Some("Second"),);
 }
+
+#[tokio::test]
+async fn gets_history_item_by_id() {
+    let database = Database::new("sqlite::memory:")
+        .await
+        .expect("database initialization failed");
+
+    let repository = StorageRepository::new(&database);
+
+    let service = ClipboardHistoryService::new(repository, HistoryConfig { max_items: 30 });
+
+    let item_id = uuid::Uuid::new_v4();
+
+    let item = ClipboardItem {
+        id: item_id,
+        content: ClipboardContent::Text("Selected item".to_string()),
+        hash: "selected-hash".to_string(),
+        created_at: Utc::now(),
+    };
+
+    service.save(item).await.expect("save failed");
+
+    let found = service
+        .get_by_id(&item_id.to_string())
+        .await
+        .expect("lookup failed");
+
+    let found = found.expect("item not found");
+
+    assert_eq!(found.text_content.as_deref(), Some("Selected item"),);
+}
+
+#[tokio::test]
+async fn returns_none_for_missing_history_item() {
+    let database = Database::new("sqlite::memory:")
+        .await
+        .expect("database initialization failed");
+
+    let repository = StorageRepository::new(&database);
+
+    let service = ClipboardHistoryService::new(repository, HistoryConfig { max_items: 30 });
+
+    let found = service.get_by_id("missing").await.expect("lookup failed");
+
+    assert!(found.is_none());
+}
+
+#[tokio::test]
+async fn promotes_history_item_to_most_recent() {
+    let database = Database::new("sqlite::memory:")
+        .await
+        .expect("database initialization failed");
+
+    let repository = StorageRepository::new(&database);
+
+    let service = ClipboardHistoryService::new(repository, HistoryConfig { max_items: 30 });
+
+    let base_time = Utc::now() - chrono::Duration::seconds(10);
+
+    let a_id = uuid::Uuid::new_v4();
+    let b_id = uuid::Uuid::new_v4();
+    let c_id = uuid::Uuid::new_v4();
+
+    let a = ClipboardItem {
+        id: a_id,
+        content: ClipboardContent::Text("A".to_string()),
+        hash: "promote-a".to_string(),
+        created_at: base_time,
+    };
+
+    let b = ClipboardItem {
+        id: b_id,
+        content: ClipboardContent::Text("B".to_string()),
+        hash: "promote-b".to_string(),
+        created_at: base_time + chrono::Duration::seconds(1),
+    };
+
+    let c = ClipboardItem {
+        id: c_id,
+        content: ClipboardContent::Text("C".to_string()),
+        hash: "promote-c".to_string(),
+        created_at: base_time + chrono::Duration::seconds(2),
+    };
+
+    service.save(a).await.expect("save A failed");
+    service.save(b).await.expect("save B failed");
+    service.save(c).await.expect("save C failed");
+
+    let promoted = service
+        .promote(&b_id.to_string())
+        .await
+        .expect("promotion failed");
+
+    assert!(promoted);
+
+    let items = service.get_all().await.expect("history retrieval failed");
+
+    assert_eq!(items.len(), 3);
+
+    assert_eq!(items[0].id, b_id.to_string());
+    assert_eq!(items[1].id, c_id.to_string());
+    assert_eq!(items[2].id, a_id.to_string());
+}
+
+#[tokio::test]
+async fn promote_returns_false_for_missing_history_item() {
+    let database = Database::new("sqlite::memory:")
+        .await
+        .expect("database initialization failed");
+
+    let repository = StorageRepository::new(&database);
+
+    let service = ClipboardHistoryService::new(repository, HistoryConfig { max_items: 30 });
+
+    let promoted = service.promote("missing").await.expect("promotion failed");
+
+    assert!(!promoted);
+
+    let items = service.get_all().await.expect("history retrieval failed");
+
+    assert!(items.is_empty());
+}

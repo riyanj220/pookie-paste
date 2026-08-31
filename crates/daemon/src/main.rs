@@ -1,5 +1,4 @@
 mod clipboard_backend;
-mod clipboard_service;
 mod ipc_server;
 mod logging;
 mod shutdown;
@@ -7,8 +6,8 @@ mod shutdown;
 use std::sync::Arc;
 
 use clipboard_backend::PlatformClipboard;
-use clipboard_service::ClipboardService;
 
+use tokio::sync::Mutex;
 use tokio::time::{Duration, sleep};
 
 use tracing::info;
@@ -20,6 +19,8 @@ use pookie_clipboard::ClipboardContent;
 use history::{ClipboardHistoryService, HistoryConfig};
 
 use storage::Database;
+
+use daemon::{activation_service::ClipboardActivationService, clipboard_service::ClipboardService};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -43,7 +44,12 @@ async fn main() -> anyhow::Result<()> {
 
     info!("clipboard backend: {}", backend.name());
 
-    let mut clipboard_service = ClipboardService::new(backend);
+    let clipboard_service = Arc::new(Mutex::new(ClipboardService::new(backend)));
+
+    let _activation_service = ClipboardActivationService::new(
+        Arc::clone(&history_service),
+        Arc::clone(&clipboard_service),
+    );
 
     let processor = ClipboardProcessor::new();
 
@@ -54,7 +60,13 @@ async fn main() -> anyhow::Result<()> {
     info!("Pookie daemon running");
 
     loop {
-        if let Some(content) = clipboard_service.check_for_change()? {
+        let clipboard_change = {
+            let mut clipboard = clipboard_service.lock().await;
+
+            clipboard.check_for_change()?
+        };
+
+        if let Some(content) = clipboard_change {
             let event = ClipboardEvent {
                 content: ClipboardContent::Text(content),
                 created_at: chrono::Utc::now(),

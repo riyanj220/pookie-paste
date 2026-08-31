@@ -160,4 +160,40 @@ impl StorageRepository {
         .fetch_optional(&self.pool)
         .await
     }
+
+    pub async fn get_by_id(&self, id: &str) -> Result<Option<StoredClipboardItem>, sqlx::Error> {
+        sqlx::query_as::<_, StoredClipboardItem>(
+            "
+        SELECT
+            id,
+            content_type,
+            text_content,
+            file_path,
+            content_hash,
+            created_at
+        FROM clipboard_items
+        WHERE id = ?
+        LIMIT 1
+        ",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+    }
+
+    pub async fn update_created_at(&self, id: &str, created_at: &str) -> Result<bool, sqlx::Error> {
+        let result = sqlx::query(
+            "
+        UPDATE clipboard_items
+        SET created_at = ?
+        WHERE id = ?
+        ",
+        )
+        .bind(created_at)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(result.rows_affected() > 0)
+    }
 }

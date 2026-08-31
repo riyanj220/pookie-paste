@@ -196,3 +196,99 @@ async fn repository_owns_database_pool_handle() {
 
     assert_eq!(count, 0);
 }
+
+#[tokio::test]
+async fn gets_item_by_existing_id() {
+    let database = Database::new("sqlite::memory:")
+        .await
+        .expect("database initialization failed");
+
+    let repository = StorageRepository::new(&database);
+
+    let item = StoredClipboardItem {
+        id: "item-123".to_string(),
+        content_type: "text".to_string(),
+        text_content: Some("hello".to_string()),
+        file_path: None,
+        content_hash: "hash-123".to_string(),
+        created_at: "2026-08-31T10:00:00Z".to_string(),
+    };
+
+    repository.insert(&item).await.expect("insert failed");
+
+    let found = repository
+        .get_by_id("item-123")
+        .await
+        .expect("lookup failed");
+
+    let found = found.expect("item not found");
+
+    assert_eq!(found.id, "item-123");
+
+    assert_eq!(found.text_content.as_deref(), Some("hello"),);
+}
+
+#[tokio::test]
+async fn returns_none_for_missing_id() {
+    let database = Database::new("sqlite::memory:")
+        .await
+        .expect("database initialization failed");
+
+    let repository = StorageRepository::new(&database);
+
+    let found = repository
+        .get_by_id("missing")
+        .await
+        .expect("lookup failed");
+
+    assert!(found.is_none());
+}
+
+#[tokio::test]
+async fn update_created_at_promotes_item_to_newest() {
+    let repository = create_repository().await;
+
+    let item_a = StoredClipboardItem {
+        id: "item-a".to_string(),
+        content_type: "text".to_string(),
+        text_content: Some("A".to_string()),
+        file_path: None,
+        content_hash: "hash-a".to_string(),
+        created_at: "2026-08-31T10:00:01Z".to_string(),
+    };
+
+    let item_b = StoredClipboardItem {
+        id: "item-b".to_string(),
+        content_type: "text".to_string(),
+        text_content: Some("B".to_string()),
+        file_path: None,
+        content_hash: "hash-b".to_string(),
+        created_at: "2026-08-31T10:00:02Z".to_string(),
+    };
+
+    let item_c = StoredClipboardItem {
+        id: "item-c".to_string(),
+        content_type: "text".to_string(),
+        text_content: Some("C".to_string()),
+        file_path: None,
+        content_hash: "hash-c".to_string(),
+        created_at: "2026-08-31T10:00:03Z".to_string(),
+    };
+
+    repository.insert(&item_a).await.unwrap();
+    repository.insert(&item_b).await.unwrap();
+    repository.insert(&item_c).await.unwrap();
+
+    let updated = repository
+        .update_created_at("item-b", "2026-08-31T10:00:04Z")
+        .await
+        .expect("timestamp update failed");
+
+    assert!(updated);
+
+    let items = repository.get_all().await.expect("failed to load items");
+
+    let ids: Vec<&str> = items.iter().map(|item| item.id.as_str()).collect();
+
+    assert_eq!(ids, vec!["item-b", "item-c", "item-a"],);
+}

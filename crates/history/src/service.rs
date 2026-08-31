@@ -62,4 +62,14 @@ impl ClipboardHistoryService {
     pub async fn clear(&self) -> Result<u64, sqlx::Error> {
         self.repository.clear().await
     }
+
+    pub async fn get_by_id(&self, id: &str) -> Result<Option<StoredClipboardItem>, sqlx::Error> {
+        self.repository.get_by_id(id).await
+    }
+
+    pub async fn promote(&self, id: &str) -> Result<bool, sqlx::Error> {
+        let created_at = chrono::Utc::now().to_rfc3339();
+
+        self.repository.update_created_at(id, &created_at).await
+    }
 }
