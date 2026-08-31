@@ -1,13 +1,13 @@
 use std::path::PathBuf;
-
-use std::sync::{Arc, Mutex as StdMutex};
-
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex as StdMutex};
 
 use chrono::{Duration as ChronoDuration, Utc};
 
 use daemon::activation_service::ClipboardActivationService;
 use daemon::clipboard_service::ClipboardService;
+use daemon::focus_backend::{FocusBackend, FocusError, FocusTarget};
+use daemon::focus_service::FocusService;
 use daemon::paste_backend::ClipboardOnlyPasteBackend;
 use daemon::request_handler::handle_request;
 
@@ -73,8 +73,33 @@ impl ClipboardBackend for FakeClipboardBackend {
     }
 }
 
-type TestActivationService =
-    ClipboardActivationService<FakeClipboardBackend, ClipboardOnlyPasteBackend>;
+/*
+ * IPC integration tests do not need a real
+ * window manager or X11 focus implementation.
+ *
+ * This backend immediately confirms focus.
+ */
+struct ImmediateFocusBackend;
+
+impl FocusBackend for ImmediateFocusBackend {
+    fn active_target(&self) -> Result<FocusTarget, FocusError> {
+        Ok(FocusTarget::new(1))
+    }
+
+    fn restore(&self, _target: FocusTarget) -> Result<(), FocusError> {
+        Ok(())
+    }
+
+    fn is_active(&self, _target: FocusTarget) -> Result<bool, FocusError> {
+        Ok(true)
+    }
+}
+
+type TestActivationService = ClipboardActivationService<
+    FakeClipboardBackend,
+    ClipboardOnlyPasteBackend,
+    ImmediateFocusBackend,
+>;
 
 struct TestIpcApp {
     socket_path: PathBuf,
@@ -104,11 +129,14 @@ impl TestIpcApp {
         let clipboard_service =
             Arc::new(Mutex::new(ClipboardService::new(clipboard_backend.clone())));
 
+        let focus_service = FocusService::new(ImmediateFocusBackend);
+
         let activation_service: Arc<TestActivationService> =
             Arc::new(ClipboardActivationService::new(
                 Arc::clone(&history_service),
                 clipboard_service,
                 ClipboardOnlyPasteBackend,
+                focus_service,
             ));
 
         let socket_path = temporary_socket_path();
@@ -168,9 +196,7 @@ impl TestIpcApp {
 
 async fn handle_test_connection(
     mut connection: ipc::IpcConnection,
-
     history_service: Arc<ClipboardHistoryService>,
-
     activation_service: Arc<TestActivationService>,
 ) {
     loop {
@@ -230,7 +256,21 @@ async fn ping_round_trips_through_daemon_ipc_stack() {
         .await
         .expect("Ping request failed");
 
-    assert_eq!(response, IpcResponse::Pong,);
+    assert_eq!(response, IpcResponse::Pong);
+}
+
+#[tokio::test]
+async fn capture_focus_target_round_trips_through_daemon_ipc_stack() {
+    let app = TestIpcApp::start().await;
+
+    let mut client = app.client().await;
+
+    let response = client
+        .send(&IpcRequest::CaptureFocusTarget)
+        .await
+        .expect("CaptureFocusTarget request failed");
+
+    assert_eq!(response, IpcResponse::FocusTarget { target_id: Some(1) },);
 }
 
 #[tokio::test]
@@ -258,7 +298,7 @@ async fn get_history_returns_items_newest_first() {
 
     match response {
         IpcResponse::History { items } => {
-            assert_eq!(items.len(), 2,);
+            assert_eq!(items.len(), 2);
 
             assert_eq!(items[0].text_content.as_deref(), Some("Second"),);
 
@@ -297,7 +337,7 @@ async fn activate_item_updates_clipboard_and_promotes_history_item() {
 
     let before = service.get_all().await.expect("history read failed");
 
-    assert_eq!(before.len(), 2,);
+    assert_eq!(before.len(), 2);
 
     assert_eq!(before[0].text_content.as_deref(), Some("A"),);
 
@@ -306,7 +346,10 @@ async fn activate_item_updates_clipboard_and_promotes_history_item() {
     let mut client = app.client().await;
 
     let response = client
-        .send(&IpcRequest::ActivateItem { id: b_id.clone() })
+        .send(&IpcRequest::ActivateItem {
+            id: b_id.clone(),
+            target_id: None,
+        })
         .await
         .expect("ActivateItem request failed");
 
@@ -317,16 +360,16 @@ async fn activate_item_updates_clipboard_and_promotes_history_item() {
         },
     );
 
-    assert_eq!(app.clipboard_content(), "B",);
+    assert_eq!(app.clipboard_content(), "B");
 
     let after = service
         .get_all()
         .await
         .expect("history read failed after activation");
 
-    assert_eq!(after.len(), 2,);
+    assert_eq!(after.len(), 2);
 
-    assert_eq!(after[0].id, b_id,);
+    assert_eq!(after[0].id, b_id);
 
     assert_eq!(after[0].text_content.as_deref(), Some("B"),);
 
@@ -342,6 +385,7 @@ async fn activate_missing_item_returns_not_found() {
     let response = client
         .send(&IpcRequest::ActivateItem {
             id: "missing-item".to_string(),
+            target_id: None,
         })
         .await
         .expect("ActivateItem request failed");
@@ -353,7 +397,7 @@ async fn activate_missing_item_returns_not_found() {
         },
     );
 
-    assert_eq!(app.clipboard_content(), "",);
+    assert_eq!(app.clipboard_content(), "");
 }
 
 #[tokio::test]
@@ -379,7 +423,7 @@ async fn delete_item_removes_history_entry() {
 
     let items = service.get_all().await.expect("history retrieval failed");
 
-    assert!(items.is_empty(),);
+    assert!(items.is_empty());
 }
 
 #[tokio::test]
@@ -426,7 +470,7 @@ async fn clear_history_removes_all_entries() {
 
     let items = service.get_all().await.expect("history retrieval failed");
 
-    assert!(items.is_empty(),);
+    assert!(items.is_empty());
 }
 
 #[tokio::test]
@@ -459,7 +503,7 @@ async fn supports_multiple_requests_on_same_connection() {
 
     let ping = client.send(&IpcRequest::Ping).await.expect("Ping failed");
 
-    assert_eq!(ping, IpcResponse::Pong,);
+    assert_eq!(ping, IpcResponse::Pong);
 
     let history = client
         .send(&IpcRequest::GetHistory)
@@ -468,7 +512,7 @@ async fn supports_multiple_requests_on_same_connection() {
 
     match history {
         IpcResponse::History { items } => {
-            assert_eq!(items.len(), 1,);
+            assert_eq!(items.len(), 1);
         }
 
         other => {
@@ -490,7 +534,7 @@ async fn supports_multiple_requests_on_same_connection() {
 
     match history {
         IpcResponse::History { items } => {
-            assert!(items.is_empty(),);
+            assert!(items.is_empty());
         }
 
         other => {
@@ -555,7 +599,7 @@ async fn handles_multiple_clients_concurrently() {
 
     match second.unwrap() {
         IpcResponse::History { items } => {
-            assert_eq!(items.len(), 1,);
+            assert_eq!(items.len(), 1);
         }
 
         other => {
@@ -603,11 +647,11 @@ async fn handles_concurrent_read_and_delete() {
     assert!(read_result.unwrap().is_ok(),);
 
     assert_eq!(
-        delete_result.unwrap().expect("delete request failed",),
+        delete_result.unwrap().expect("delete request failed"),
         IpcResponse::Deleted { deleted: true },
     );
 
     let items = service.get_all().await.expect("final history read failed");
 
-    assert!(items.is_empty(),);
+    assert!(items.is_empty());
 }

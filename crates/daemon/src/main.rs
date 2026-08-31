@@ -20,7 +20,10 @@ use history::{ClipboardHistoryService, HistoryConfig};
 
 use storage::Database;
 
+use daemon::focus_service::FocusService;
+use daemon::x11_focus_backend::X11FocusBackend;
 use daemon::x11_paste_backend::X11PasteBackend;
+
 use daemon::{activation_service::ClipboardActivationService, clipboard_service::ClipboardService};
 
 #[tokio::main]
@@ -50,10 +53,16 @@ async fn main() -> anyhow::Result<()> {
     let paste_backend = X11PasteBackend::new()
         .map_err(|error| anyhow::anyhow!("failed to initialize X11 paste backend: {error:?}"))?;
 
+    let focus_backend = X11FocusBackend::new()
+        .map_err(|error| anyhow::anyhow!("failed to initialize X11 focus backend: {error:?}"))?;
+
+    let focus_service = FocusService::new(focus_backend);
+
     let activation_service = Arc::new(ClipboardActivationService::new(
         Arc::clone(&history_service),
         Arc::clone(&clipboard_service),
         paste_backend,
+        focus_service,
     ));
 
     let processor = ClipboardProcessor::new();

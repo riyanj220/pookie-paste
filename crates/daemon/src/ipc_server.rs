@@ -2,6 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use daemon::activation_service::ClipboardActivationService;
+use daemon::focus_backend::FocusBackend;
 use daemon::paste_backend::PasteBackend;
 use daemon::request_handler::handle_request;
 
@@ -17,13 +18,14 @@ use tracing::{error, info};
 
 const IPC_READ_TIMEOUT: Duration = Duration::from_secs(30);
 
-pub async fn run<B, P>(
+pub async fn run<B, P, F>(
     history_service: Arc<ClipboardHistoryService>,
-    activation_service: Arc<ClipboardActivationService<B, P>>,
+    activation_service: Arc<ClipboardActivationService<B, P, F>>,
 ) -> anyhow::Result<()>
 where
     B: ClipboardBackend + Send + Sync + 'static,
     P: PasteBackend + Send + Sync + 'static,
+    F: FocusBackend + Send + Sync + 'static,
 {
     let path = socket_path();
 
@@ -63,13 +65,14 @@ where
     }
 }
 
-async fn handle_connection<B, P>(
+async fn handle_connection<B, P, F>(
     connection: IpcConnection,
     history_service: Arc<ClipboardHistoryService>,
-    activation_service: Arc<ClipboardActivationService<B, P>>,
+    activation_service: Arc<ClipboardActivationService<B, P, F>>,
 ) where
     B: ClipboardBackend + Send + Sync + 'static,
     P: PasteBackend + Send + Sync + 'static,
+    F: FocusBackend + Send + Sync + 'static,
 {
     handle_connection_with_timeout(
         connection,
@@ -80,14 +83,15 @@ async fn handle_connection<B, P>(
     .await;
 }
 
-async fn handle_connection_with_timeout<B, P>(
+async fn handle_connection_with_timeout<B, P, F>(
     mut connection: IpcConnection,
     history_service: Arc<ClipboardHistoryService>,
-    activation_service: Arc<ClipboardActivationService<B, P>>,
+    activation_service: Arc<ClipboardActivationService<B, P, F>>,
     read_timeout: Duration,
 ) where
     B: ClipboardBackend + Send + Sync + 'static,
     P: PasteBackend + Send + Sync + 'static,
+    F: FocusBackend + Send + Sync + 'static,
 {
     loop {
         let request = match timeout(read_timeout, connection.read_request()).await {
@@ -134,6 +138,8 @@ mod tests {
     use std::sync::{Arc, Mutex as StdMutex};
 
     use daemon::clipboard_service::ClipboardService;
+    use daemon::focus_backend::{FocusBackend, FocusError, FocusTarget};
+    use daemon::focus_service::FocusService;
     use daemon::paste_backend::ClipboardOnlyPasteBackend;
 
     use history::{ClipboardHistoryService, HistoryConfig};
@@ -185,6 +191,27 @@ mod tests {
         }
     }
 
+    /*
+     * IPC tests are not testing real window focus.
+     * This fake immediately accepts restoration and
+     * reports the requested target as active.
+     */
+    struct ImmediateFocusBackend;
+
+    impl FocusBackend for ImmediateFocusBackend {
+        fn active_target(&self) -> Result<FocusTarget, FocusError> {
+            Ok(FocusTarget::new(1))
+        }
+
+        fn restore(&self, _target: FocusTarget) -> Result<(), FocusError> {
+            Ok(())
+        }
+
+        fn is_active(&self, _target: FocusTarget) -> Result<bool, FocusError> {
+            Ok(true)
+        }
+    }
+
     #[tokio::test]
     async fn closes_idle_connection_after_timeout() {
         let database = Database::new("sqlite::memory:")
@@ -202,10 +229,13 @@ mod tests {
 
         let clipboard_service = Arc::new(Mutex::new(ClipboardService::new(clipboard_backend)));
 
+        let focus_service = FocusService::new(ImmediateFocusBackend);
+
         let activation_service = Arc::new(ClipboardActivationService::new(
             Arc::clone(&history_service),
             clipboard_service,
             ClipboardOnlyPasteBackend,
+            focus_service,
         ));
 
         let socket_path = temporary_socket_path();

@@ -9,6 +9,8 @@ use tokio::sync::Mutex;
 use daemon::{
     activation_service::{ActivationResult, ClipboardActivationService},
     clipboard_service::ClipboardService,
+    focus_backend::{FocusBackend, FocusError, FocusTarget},
+    focus_service::FocusService,
     paste_backend::{PasteBackend, PasteCapability, PasteError},
 };
 
@@ -88,6 +90,29 @@ impl PasteBackend for FakePasteBackend {
     }
 }
 
+/*
+ * These integration tests are not testing
+ * real X11 focus restoration.
+ *
+ * This backend immediately reports focus
+ * restoration as successful.
+ */
+struct ImmediateFocusBackend;
+
+impl FocusBackend for ImmediateFocusBackend {
+    fn active_target(&self) -> Result<FocusTarget, FocusError> {
+        Ok(FocusTarget::new(1))
+    }
+
+    fn restore(&self, _target: FocusTarget) -> Result<(), FocusError> {
+        Ok(())
+    }
+
+    fn is_active(&self, _target: FocusTarget) -> Result<bool, FocusError> {
+        Ok(true)
+    }
+}
+
 fn test_item(text: &str, hash: &str, created_at: DateTime<Utc>) -> ClipboardItem {
     ClipboardItem {
         id: Uuid::new_v4(),
@@ -110,15 +135,22 @@ async fn create_history_service() -> Arc<ClipboardHistoryService> {
     ))
 }
 
+type TestActivationService =
+    ClipboardActivationService<FakeClipboardBackend, FakePasteBackend, ImmediateFocusBackend>;
+
+type TestClipboardService = Arc<Mutex<ClipboardService<FakeClipboardBackend>>>;
+
+type ActivationStack = (
+    TestActivationService,
+    TestClipboardService,
+    FakeClipboardBackend,
+);
+
 fn create_activation_stack(
     history_service: Arc<ClipboardHistoryService>,
     initial_clipboard: &str,
     pasted: Arc<AtomicBool>,
-) -> (
-    ClipboardActivationService<FakeClipboardBackend, FakePasteBackend>,
-    Arc<Mutex<ClipboardService<FakeClipboardBackend>>>,
-    FakeClipboardBackend,
-) {
+) -> ActivationStack {
     let backend = FakeClipboardBackend::new(initial_clipboard);
 
     let backend_handle = backend.clone();
@@ -127,10 +159,13 @@ fn create_activation_stack(
 
     let paste_backend = FakePasteBackend::direct(pasted);
 
+    let focus_service = FocusService::new(ImmediateFocusBackend);
+
     let activation_service = ClipboardActivationService::new(
         history_service,
         Arc::clone(&clipboard_service),
         paste_backend,
+        focus_service,
     );
 
     (activation_service, clipboard_service, backend_handle)
@@ -159,7 +194,9 @@ async fn activation_writes_clipboard_promotes_item_and_suppresses_self_write() {
     let c = test_item("C", "hash-c", base_time + Duration::seconds(2));
 
     let a_id = a.id.to_string();
+
     let b_id = b.id.to_string();
+
     let c_id = c.id.to_string();
 
     history_service.save(a).await.expect("save A failed");
@@ -175,9 +212,13 @@ async fn activation_writes_clipboard_promotes_item_and_suppresses_self_write() {
 
     /*
         Activate B.
+
+        No focus target is supplied here
+        because this test is specifically
+        testing clipboard/history behavior.
     */
     let result = activation_service
-        .activate_to_clipboard(&b_id)
+        .activate(&b_id, None)
         .await
         .expect("activation failed");
 
@@ -188,7 +229,7 @@ async fn activation_writes_clipboard_promotes_item_and_suppresses_self_write() {
         have been triggered.
     */
     assert!(
-        pasted.load(Ordering::SeqCst),
+        pasted.load(Ordering::SeqCst,),
         "direct paste backend was not triggered"
     );
 
@@ -211,7 +252,7 @@ async fn activation_writes_clipboard_promotes_item_and_suppresses_self_write() {
         .await
         .expect("history retrieval failed");
 
-    assert_eq!(items.len(), 3);
+    assert_eq!(items.len(), 3,);
 
     assert_eq!(items[0].id, b_id,);
 
@@ -267,7 +308,7 @@ async fn missing_activation_does_not_change_clipboard() {
         create_activation_stack(Arc::clone(&history_service), "", Arc::clone(&pasted));
 
     let result = activation_service
-        .activate_to_clipboard("missing")
+        .activate("missing", None)
         .await
         .expect("activation failed");
 
@@ -278,7 +319,7 @@ async fn missing_activation_does_not_change_clipboard() {
         trigger direct paste.
     */
     assert!(
-        !pasted.load(Ordering::SeqCst),
+        !pasted.load(Ordering::SeqCst,),
         "paste backend was triggered for a missing item"
     );
 
@@ -296,7 +337,7 @@ async fn missing_activation_does_not_change_clipboard() {
         .await
         .expect("history retrieval failed");
 
-    assert!(items.is_empty());
+    assert!(items.is_empty(),);
 
     /*
         Keep the complete activation stack

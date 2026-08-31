@@ -3,17 +3,19 @@ use ipc::{ActivationOutcome, IpcRequest, IpcResponse};
 use pookie_clipboard::ClipboardBackend;
 
 use crate::activation_service::{ActivationResult, ClipboardActivationService};
+use crate::focus_backend::{FocusBackend, FocusError, FocusTarget};
 use crate::ipc_mapper::to_history_item;
 use crate::paste_backend::PasteBackend;
 
-pub async fn handle_request<B, P>(
+pub async fn handle_request<B, P, F>(
     request: IpcRequest,
     history_service: &ClipboardHistoryService,
-    activation_service: &ClipboardActivationService<B, P>,
+    activation_service: &ClipboardActivationService<B, P, F>,
 ) -> IpcResponse
 where
     B: ClipboardBackend,
     P: PasteBackend,
+    F: FocusBackend,
 {
     match request {
         IpcRequest::Ping => IpcResponse::Pong,
@@ -30,18 +32,16 @@ where
             },
         },
 
-        IpcRequest::ActivateItem { id } => {
-            match activation_service.activate_to_clipboard(&id).await {
+        IpcRequest::ActivateItem { id, target_id } => {
+            let target = target_id.map(FocusTarget::new);
+
+            match activation_service.activate(&id, target).await {
                 Ok(result) => {
                     let outcome = match result {
                         ActivationResult::Pasted => ActivationOutcome::Pasted,
-
                         ActivationResult::ClipboardUpdated => ActivationOutcome::ClipboardUpdated,
-
                         ActivationResult::PasteFailed => ActivationOutcome::PasteFailed,
-
                         ActivationResult::NotFound => ActivationOutcome::NotFound,
-
                         ActivationResult::UnsupportedContent => {
                             ActivationOutcome::UnsupportedContent
                         }
@@ -54,6 +54,7 @@ where
                     tracing::error!(
                         error = %error,
                         item_id = %id,
+                        target_id = ?target_id,
                         "clipboard activation failed"
                     );
 
@@ -79,6 +80,25 @@ where
                 message: format!("failed to clear clipboard history: {error}"),
             },
         },
+
+        IpcRequest::CaptureFocusTarget => match activation_service.capture_target() {
+            Ok(target) => IpcResponse::FocusTarget {
+                target_id: Some(target.id()),
+            },
+
+            Err(FocusError::Unavailable) => IpcResponse::FocusTarget { target_id: None },
+
+            Err(error) => {
+                tracing::error!(
+                    error = ?error,
+                    "failed to capture focus target"
+                );
+
+                IpcResponse::Error {
+                    message: "failed to capture focus target".to_string(),
+                }
+            }
+        },
     }
 }
 
@@ -100,7 +120,12 @@ mod tests {
 
     use super::*;
 
-    use crate::{clipboard_service::ClipboardService, paste_backend::ClipboardOnlyPasteBackend};
+    use crate::{
+        clipboard_service::ClipboardService,
+        focus_backend::{FocusBackend, FocusError, FocusTarget},
+        focus_service::FocusService,
+        paste_backend::ClipboardOnlyPasteBackend,
+    };
 
     #[derive(Clone)]
     struct FakeClipboardBackend {
@@ -138,6 +163,22 @@ mod tests {
         }
     }
 
+    struct FakeFocusBackend;
+
+    impl FocusBackend for FakeFocusBackend {
+        fn active_target(&self) -> Result<FocusTarget, FocusError> {
+            Ok(FocusTarget::new(42))
+        }
+
+        fn restore(&self, _target: FocusTarget) -> Result<(), FocusError> {
+            Ok(())
+        }
+
+        fn is_active(&self, _target: FocusTarget) -> Result<bool, FocusError> {
+            Ok(true)
+        }
+    }
+
     async fn create_history_service() -> Arc<ClipboardHistoryService> {
         let database = Database::new("sqlite::memory:")
             .await
@@ -154,7 +195,11 @@ mod tests {
     fn create_activation_service(
         history_service: Arc<ClipboardHistoryService>,
     ) -> (
-        ClipboardActivationService<FakeClipboardBackend, ClipboardOnlyPasteBackend>,
+        ClipboardActivationService<
+            FakeClipboardBackend,
+            ClipboardOnlyPasteBackend,
+            FakeFocusBackend,
+        >,
         FakeClipboardBackend,
     ) {
         let backend = FakeClipboardBackend::new("");
@@ -163,10 +208,13 @@ mod tests {
 
         let clipboard_service = Arc::new(Mutex::new(ClipboardService::new(backend)));
 
+        let focus_service = FocusService::new(FakeFocusBackend);
+
         let activation_service = ClipboardActivationService::new(
             history_service,
             clipboard_service,
             ClipboardOnlyPasteBackend,
+            focus_service,
         );
 
         (activation_service, backend_handle)
@@ -181,7 +229,28 @@ mod tests {
         let response =
             handle_request(IpcRequest::Ping, service.as_ref(), &activation_service).await;
 
-        assert_eq!(response, IpcResponse::Pong,);
+        assert_eq!(response, IpcResponse::Pong);
+    }
+
+    #[tokio::test]
+    async fn captures_focus_target() {
+        let service = create_history_service().await;
+
+        let (activation_service, _backend_handle) = create_activation_service(Arc::clone(&service));
+
+        let response = handle_request(
+            IpcRequest::CaptureFocusTarget,
+            service.as_ref(),
+            &activation_service,
+        )
+        .await;
+
+        assert_eq!(
+            response,
+            IpcResponse::FocusTarget {
+                target_id: Some(42),
+            },
+        );
     }
 
     #[tokio::test]
@@ -203,7 +272,6 @@ mod tests {
         };
 
         service.save(first).await.expect("first save failed");
-
         service.save(second).await.expect("second save failed");
 
         let (activation_service, _backend_handle) = create_activation_service(Arc::clone(&service));
@@ -217,11 +285,9 @@ mod tests {
 
         match response {
             IpcResponse::History { items } => {
-                assert_eq!(items.len(), 2,);
-
-                assert_eq!(items[0].text_content.as_deref(), Some("Second"),);
-
-                assert_eq!(items[1].text_content.as_deref(), Some("First"),);
+                assert_eq!(items.len(), 2);
+                assert_eq!(items[0].text_content.as_deref(), Some("Second"));
+                assert_eq!(items[1].text_content.as_deref(), Some("First"));
             }
 
             other => {
@@ -231,7 +297,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn activates_existing_clipboard_history_item() {
+    async fn activates_existing_clipboard_history_item_without_target() {
         let service = create_history_service().await;
 
         let item_id = uuid::Uuid::new_v4();
@@ -250,6 +316,7 @@ mod tests {
         let response = handle_request(
             IpcRequest::ActivateItem {
                 id: item_id.to_string(),
+                target_id: None,
             },
             service.as_ref(),
             &activation_service,
@@ -263,7 +330,44 @@ mod tests {
             },
         );
 
-        assert_eq!(backend_handle.content(), "Paste me",);
+        assert_eq!(backend_handle.content(), "Paste me");
+    }
+
+    #[tokio::test]
+    async fn activates_existing_clipboard_history_item_with_target() {
+        let service = create_history_service().await;
+
+        let item_id = uuid::Uuid::new_v4();
+
+        let item = ClipboardItem {
+            id: item_id,
+            content: ClipboardContent::Text("Paste me".to_string()),
+            hash: "paste-me-target-hash".to_string(),
+            created_at: Utc::now(),
+        };
+
+        service.save(item).await.expect("history save failed");
+
+        let (activation_service, backend_handle) = create_activation_service(Arc::clone(&service));
+
+        let response = handle_request(
+            IpcRequest::ActivateItem {
+                id: item_id.to_string(),
+                target_id: Some(12345),
+            },
+            service.as_ref(),
+            &activation_service,
+        )
+        .await;
+
+        assert_eq!(
+            response,
+            IpcResponse::Activated {
+                outcome: ActivationOutcome::ClipboardUpdated,
+            },
+        );
+
+        assert_eq!(backend_handle.content(), "Paste me");
     }
 
     #[tokio::test]
@@ -275,6 +379,7 @@ mod tests {
         let response = handle_request(
             IpcRequest::ActivateItem {
                 id: "does-not-exist".to_string(),
+                target_id: None,
             },
             service.as_ref(),
             &activation_service,
@@ -288,7 +393,7 @@ mod tests {
             },
         );
 
-        assert_eq!(backend_handle.content(), "",);
+        assert_eq!(backend_handle.content(), "");
     }
 
     #[tokio::test]
@@ -317,7 +422,7 @@ mod tests {
         )
         .await;
 
-        assert_eq!(response, IpcResponse::Deleted { deleted: true },);
+        assert_eq!(response, IpcResponse::Deleted { deleted: true });
 
         let items = service.get_all().await.expect("history retrieval failed");
 
@@ -339,7 +444,7 @@ mod tests {
         )
         .await;
 
-        assert_eq!(response, IpcResponse::Deleted { deleted: false },);
+        assert_eq!(response, IpcResponse::Deleted { deleted: false });
     }
 
     #[tokio::test]
@@ -368,9 +473,7 @@ mod tests {
         };
 
         service.save(first).await.expect("first save failed");
-
         service.save(second).await.expect("second save failed");
-
         service.save(third).await.expect("third save failed");
 
         let (activation_service, _backend_handle) = create_activation_service(Arc::clone(&service));
@@ -382,7 +485,7 @@ mod tests {
         )
         .await;
 
-        assert_eq!(response, IpcResponse::Cleared { count: 3 },);
+        assert_eq!(response, IpcResponse::Cleared { count: 3 });
 
         let items = service.get_all().await.expect("history retrieval failed");
 
@@ -402,10 +505,10 @@ mod tests {
         )
         .await;
 
-        assert_eq!(response, IpcResponse::Cleared { count: 0 },);
+        assert_eq!(response, IpcResponse::Cleared { count: 0 });
 
         let items = service.get_all().await.expect("history retrieval failed");
 
-        assert!(items.is_empty(),);
+        assert!(items.is_empty());
     }
 }
