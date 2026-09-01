@@ -11,7 +11,18 @@ const CURSOR_OFFSET: f32 = 12.0;
 const MAX_PREVIEW_LINES: usize = 3;
 const MAX_CHARS_PER_LINE: usize = 70;
 
+fn capture_initial_focus_target() -> Option<u64> {
+    let runtime = tokio::runtime::Runtime::new().ok()?;
+
+    runtime
+        .block_on(ipc_client::capture_focus_target())
+        .ok()
+        .flatten()
+}
+
 fn main() -> eframe::Result<()> {
+    let target_id = capture_initial_focus_target();
+
     let mut viewport = egui::ViewportBuilder::default()
         .with_inner_size([POPUP_WIDTH, POPUP_HEIGHT])
         .with_resizable(false)
@@ -30,7 +41,7 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "Pookie Paste",
         options,
-        Box::new(|_cc| Ok(Box::new(PookieApp::new()))),
+        Box::new(move |_cc| Ok(Box::new(PookieApp::new(target_id)))),
     )
 }
 
@@ -48,10 +59,16 @@ struct PookieApp {
     selected_index: Option<usize>,
 
     focus_requested: bool,
+
+    target_id: Option<u64>,
+
+    activation_receiver: Option<oneshot::Receiver<Result<ipc::ActivationOutcome, String>>>,
+
+    activation_in_progress: bool,
 }
 
 impl PookieApp {
-    fn new() -> Self {
+    fn new(target_id: Option<u64>) -> Self {
         let (sender, receiver) = oneshot::channel();
 
         std::thread::spawn(move || {
@@ -68,6 +85,9 @@ impl PookieApp {
             history_receiver: Some(receiver),
             selected_index: None,
             focus_requested: false,
+            target_id,
+            activation_receiver: None,
+            activation_in_progress: false,
         }
     }
 
@@ -150,11 +170,90 @@ impl PookieApp {
 
         changed
     }
+
+    fn start_activation_for_index(&mut self, ctx: &egui::Context, index: usize) {
+        if self.activation_in_progress {
+            return;
+        }
+
+        let HistoryState::Loaded(items) = &self.history else {
+            return;
+        };
+
+        let Some(item) = items.get(index) else {
+            return;
+        };
+
+        let id = item.id.clone();
+
+        let target_id = self.target_id;
+
+        let (sender, receiver) = oneshot::channel();
+
+        self.activation_in_progress = true;
+
+        self.activation_receiver = Some(receiver);
+
+        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+
+        std::thread::spawn(move || {
+            let runtime =
+                tokio::runtime::Runtime::new().expect("failed to create activation runtime");
+
+            let result = runtime.block_on(ipc_client::activate_item(id, target_id));
+
+            let _ = sender.send(result);
+        });
+    }
+
+    fn start_selected_activation(&mut self, ctx: &egui::Context) {
+        let Some(index) = self.selected_index else {
+            return;
+        };
+
+        self.start_activation_for_index(ctx, index);
+    }
+
+    fn poll_activation(&mut self, ctx: &egui::Context) {
+        let result = match self.activation_receiver.as_mut() {
+            Some(receiver) => match receiver.try_recv() {
+                Ok(result) => Some(result),
+
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty) => None,
+
+                Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+                    Some(Err("activation worker stopped unexpectedly".to_string()))
+                }
+            },
+
+            None => None,
+        };
+
+        let Some(result) = result else {
+            return;
+        };
+
+        self.activation_receiver = None;
+
+        match result {
+            Ok(ipc::ActivationOutcome::Pasted) | Ok(ipc::ActivationOutcome::ClipboardUpdated) => {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+
+            Ok(ipc::ActivationOutcome::PasteFailed)
+            | Ok(ipc::ActivationOutcome::NotFound)
+            | Ok(ipc::ActivationOutcome::UnsupportedContent)
+            | Err(_) => {
+                self.activation_in_progress = false;
+
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+            }
+        }
+    }
 }
 
 fn preview_text(text: &str) -> String {
     let mut preview = String::new();
-
     let mut truncated = false;
 
     let mut lines = text.lines().peekable();
@@ -204,11 +303,19 @@ impl eframe::App for PookieApp {
 
         self.poll_history();
 
+        self.poll_activation(ui.ctx());
+
         let move_up = ui.input(|input| input.key_pressed(egui::Key::ArrowUp));
 
         let move_down = ui.input(|input| input.key_pressed(egui::Key::ArrowDown));
 
+        let activate = ui.input(|input| input.key_pressed(egui::Key::Enter));
+
         let keyboard_selection_changed = self.handle_keyboard_navigation(move_up, move_down);
+
+        if activate {
+            self.start_selected_activation(ui.ctx());
+        }
 
         ui.heading("Clipboard");
 
@@ -260,6 +367,8 @@ impl eframe::App for PookieApp {
 
         if let Some(index) = clicked_index {
             self.selected_index = Some(index);
+
+            self.start_activation_for_index(ui.ctx(), index);
         }
     }
 }
