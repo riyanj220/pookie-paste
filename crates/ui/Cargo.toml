@@ -4,3 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+eframe = { version = "0.36.1", default-features = false, features = ["glow", "x11", "wayland", "default_fonts"] }
+ipc = { version = "0.1.0", path = "../ipc" }
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "sync"] }
+x11rb = "0.14.0"
