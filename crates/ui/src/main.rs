@@ -60,6 +60,8 @@ struct PookieApp {
 
     focus_requested: bool,
 
+    has_received_focus: bool,
+
     target_id: Option<u64>,
 
     activation_receiver: Option<oneshot::Receiver<Result<ipc::ActivationOutcome, String>>>,
@@ -85,6 +87,7 @@ impl PookieApp {
             history_receiver: Some(receiver),
             selected_index: None,
             focus_requested: false,
+            has_received_focus: false,
             target_id,
             activation_receiver: None,
             activation_in_progress: false,
@@ -305,6 +308,26 @@ impl eframe::App for PookieApp {
 
         self.poll_activation(ui.ctx());
 
+        let viewport_focused = ui.input(|input| input.viewport().focused.unwrap_or(false));
+
+        if viewport_focused {
+            self.has_received_focus = true;
+        }
+
+        if self.has_received_focus && !viewport_focused && !self.activation_in_progress {
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+
+            return;
+        }
+
+        let close_requested = ui.input(|input| input.key_pressed(egui::Key::Escape));
+
+        if close_requested {
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+
+            return;
+        }
+
         let move_up = ui.input(|input| input.key_pressed(egui::Key::ArrowUp));
 
         let move_down = ui.input(|input| input.key_pressed(egui::Key::ArrowDown));
@@ -317,7 +340,15 @@ impl eframe::App for PookieApp {
             self.start_selected_activation(ui.ctx());
         }
 
-        ui.heading("Clipboard");
+        ui.horizontal(|ui| {
+            ui.heading("Clipboard");
+
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.small_button("×").clicked() {
+                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+            });
+        });
 
         ui.separator();
 
