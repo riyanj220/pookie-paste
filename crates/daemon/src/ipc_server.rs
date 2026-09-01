@@ -8,7 +8,7 @@ use daemon::request_handler::handle_request;
 
 use history::ClipboardHistoryService;
 
-use ipc::{IpcConnection, IpcServer, socket_path};
+use ipc::{IpcConnection, IpcServer, ServerError, socket_path};
 
 use pookie_clipboard::ClipboardBackend;
 
@@ -18,19 +18,11 @@ use tracing::{error, info};
 
 const IPC_READ_TIMEOUT: Duration = Duration::from_secs(30);
 
-pub async fn run<B, P, F>(
-    history_service: Arc<ClipboardHistoryService>,
-    activation_service: Arc<ClipboardActivationService<B, P, F>>,
-) -> anyhow::Result<()>
-where
-    B: ClipboardBackend + Send + Sync + 'static,
-    P: PasteBackend + Send + Sync + 'static,
-    F: FocusBackend + Send + Sync + 'static,
-{
+pub fn bind() -> anyhow::Result<IpcServer> {
     let path = socket_path();
 
     let server = IpcServer::bind(&path).map_err(|error| match error {
-        ipc::ServerError::AlreadyRunning { path } => {
+        ServerError::AlreadyRunning { path } => {
             anyhow::anyhow!(
                 "another Pookie Paste daemon is already running at {}",
                 path.display()
@@ -44,6 +36,19 @@ where
 
     info!("IPC server listening at {}", path.display());
 
+    Ok(server)
+}
+
+pub async fn run<B, P, F>(
+    server: IpcServer,
+    history_service: Arc<ClipboardHistoryService>,
+    activation_service: Arc<ClipboardActivationService<B, P, F>>,
+) -> anyhow::Result<()>
+where
+    B: ClipboardBackend + Send + Sync + 'static,
+    P: PasteBackend + Send + Sync + 'static,
+    F: FocusBackend + Send + Sync + 'static,
+{
     loop {
         let connection = match server.accept().await {
             Ok(connection) => connection,

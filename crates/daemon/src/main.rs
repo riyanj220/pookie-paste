@@ -21,14 +21,16 @@ use history::{ClipboardHistoryService, HistoryConfig};
 use storage::Database;
 
 use daemon::focus_service::FocusService;
-use daemon::x11_focus_backend::X11FocusBackend;
-use daemon::x11_paste_backend::X11PasteBackend;
+use daemon::paste_backend::PlatformPasteBackend;
+use daemon::platform_focus_backend::PlatformFocusBackend;
 
 use daemon::{activation_service::ClipboardActivationService, clipboard_service::ClipboardService};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     logging::init_logging();
+
+    let ipc_listener = ipc_server::bind()?;
 
     let database = Database::new("sqlite:./pookie-paste.db").await?;
 
@@ -50,11 +52,15 @@ async fn main() -> anyhow::Result<()> {
 
     let clipboard_service = Arc::new(Mutex::new(ClipboardService::new(backend)));
 
-    let paste_backend = X11PasteBackend::new()
-        .map_err(|error| anyhow::anyhow!("failed to initialize X11 paste backend: {error:?}"))?;
+    let paste_backend = PlatformPasteBackend::new()
+        .map_err(|error| anyhow::anyhow!("failed to initialize paste backend: {error:?}"))?;
 
-    let focus_backend = X11FocusBackend::new()
-        .map_err(|error| anyhow::anyhow!("failed to initialize X11 focus backend: {error:?}"))?;
+    info!("paste backend: {}", paste_backend.name());
+
+    let focus_backend = PlatformFocusBackend::new()
+        .map_err(|error| anyhow::anyhow!("failed to initialize focus backend: {error:?}"))?;
+
+    info!("focus backend: {}", focus_backend.name());
 
     let focus_service = FocusService::new(focus_backend);
 
@@ -68,6 +74,7 @@ async fn main() -> anyhow::Result<()> {
     let processor = ClipboardProcessor::new();
 
     let ipc_future = ipc_server::run(
+        ipc_listener,
         Arc::clone(&history_service),
         Arc::clone(&activation_service),
     );

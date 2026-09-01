@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 
 use chrono::{Duration as ChronoDuration, Utc};
@@ -8,7 +8,7 @@ use daemon::activation_service::ClipboardActivationService;
 use daemon::clipboard_service::ClipboardService;
 use daemon::focus_backend::{FocusBackend, FocusError, FocusTarget};
 use daemon::focus_service::FocusService;
-use daemon::paste_backend::ClipboardOnlyPasteBackend;
+use daemon::paste_backend::{ClipboardOnlyPasteBackend, PasteBackend, PasteCapability, PasteError};
 use daemon::request_handler::handle_request;
 
 use history::{ClipboardHistoryService, HistoryConfig};
@@ -79,11 +79,16 @@ impl ClipboardBackend for FakeClipboardBackend {
  *
  * This backend immediately confirms focus.
  */
-struct ImmediateFocusBackend;
+struct FakeFocusBackend {
+    target_id: Option<u64>,
+}
 
-impl FocusBackend for ImmediateFocusBackend {
+impl FocusBackend for FakeFocusBackend {
     fn active_target(&self) -> Result<FocusTarget, FocusError> {
-        Ok(FocusTarget::new(1))
+        match self.target_id {
+            Some(id) => Ok(FocusTarget::new(id)),
+            None => Err(FocusError::Unavailable),
+        }
     }
 
     fn restore(&self, _target: FocusTarget) -> Result<(), FocusError> {
@@ -95,11 +100,27 @@ impl FocusBackend for ImmediateFocusBackend {
     }
 }
 
-type TestActivationService = ClipboardActivationService<
-    FakeClipboardBackend,
-    ClipboardOnlyPasteBackend,
-    ImmediateFocusBackend,
->;
+struct FakeDirectPasteBackend {
+    pasted: Arc<AtomicBool>,
+}
+
+impl PasteBackend for FakeDirectPasteBackend {
+    fn capability(&self) -> PasteCapability {
+        PasteCapability::Direct
+    }
+
+    fn paste(&self) -> Result<(), PasteError> {
+        self.pasted.store(true, Ordering::SeqCst);
+
+        Ok(())
+    }
+}
+
+type TestActivationService =
+    ClipboardActivationService<FakeClipboardBackend, ClipboardOnlyPasteBackend, FakeFocusBackend>;
+
+type X11TestActivationService =
+    ClipboardActivationService<FakeClipboardBackend, FakeDirectPasteBackend, FakeFocusBackend>;
 
 struct TestIpcApp {
     socket_path: PathBuf,
@@ -113,6 +134,10 @@ struct TestIpcApp {
 
 impl TestIpcApp {
     async fn start() -> Self {
+        Self::start_with_focus_target(Some(42)).await
+    }
+
+    async fn start_with_focus_target(target_id: Option<u64>) -> Self {
         let database = Database::new("sqlite::memory:")
             .await
             .expect("database initialization failed");
@@ -129,7 +154,7 @@ impl TestIpcApp {
         let clipboard_service =
             Arc::new(Mutex::new(ClipboardService::new(clipboard_backend.clone())));
 
-        let focus_service = FocusService::new(ImmediateFocusBackend);
+        let focus_service = FocusService::new(FakeFocusBackend { target_id });
 
         let activation_service: Arc<TestActivationService> =
             Arc::new(ClipboardActivationService::new(
@@ -194,11 +219,13 @@ impl TestIpcApp {
     }
 }
 
-async fn handle_test_connection(
+async fn handle_test_connection<P>(
     mut connection: ipc::IpcConnection,
     history_service: Arc<ClipboardHistoryService>,
-    activation_service: Arc<TestActivationService>,
-) {
+    activation_service: Arc<ClipboardActivationService<FakeClipboardBackend, P, FakeFocusBackend>>,
+) where
+    P: PasteBackend + Send + Sync + 'static,
+{
     loop {
         let request = match connection.read_request().await {
             Ok(request) => request,
@@ -270,7 +297,26 @@ async fn capture_focus_target_round_trips_through_daemon_ipc_stack() {
         .await
         .expect("CaptureFocusTarget request failed");
 
-    assert_eq!(response, IpcResponse::FocusTarget { target_id: Some(1) },);
+    assert_eq!(
+        response,
+        IpcResponse::FocusTarget {
+            target_id: Some(42),
+        },
+    );
+}
+
+#[tokio::test]
+async fn unavailable_focus_target_returns_none_through_daemon_ipc_stack() {
+    let app = TestIpcApp::start_with_focus_target(None).await;
+
+    let mut client = app.client().await;
+
+    let response = client
+        .send(&IpcRequest::CaptureFocusTarget)
+        .await
+        .expect("CaptureFocusTarget request failed");
+
+    assert_eq!(response, IpcResponse::FocusTarget { target_id: None },);
 }
 
 #[tokio::test]
@@ -312,8 +358,8 @@ async fn get_history_returns_items_newest_first() {
 }
 
 #[tokio::test]
-async fn activate_item_updates_clipboard_and_promotes_history_item() {
-    let app = TestIpcApp::start().await;
+async fn wayland_style_clipboard_only_activation_round_trips_through_ipc() {
+    let app = TestIpcApp::start_with_focus_target(None).await;
 
     let service = app.history_service();
 
@@ -654,4 +700,102 @@ async fn handles_concurrent_read_and_delete() {
     let items = service.get_all().await.expect("final history read failed");
 
     assert!(items.is_empty());
+}
+
+#[tokio::test]
+async fn x11_style_direct_activation_round_trips_through_ipc() {
+    let database = Database::new("sqlite::memory:")
+        .await
+        .expect("database initialization failed");
+
+    let repository = StorageRepository::new(&database);
+
+    let history_service = Arc::new(ClipboardHistoryService::new(
+        repository,
+        HistoryConfig { max_items: 30 },
+    ));
+
+    let item = test_item("X11 IPC item", "x11-ipc-hash", -10);
+
+    let item_id = item.id.to_string();
+
+    history_service
+        .save(item)
+        .await
+        .expect("history save failed");
+
+    let clipboard_backend = FakeClipboardBackend::new("");
+
+    let clipboard_handle = clipboard_backend.clone();
+
+    let clipboard_service = Arc::new(Mutex::new(ClipboardService::new(clipboard_backend)));
+
+    let pasted = Arc::new(AtomicBool::new(false));
+
+    let paste_backend = FakeDirectPasteBackend {
+        pasted: Arc::clone(&pasted),
+    };
+
+    let focus_service = FocusService::new(FakeFocusBackend {
+        target_id: Some(42),
+    });
+
+    let activation_service: Arc<X11TestActivationService> =
+        Arc::new(ClipboardActivationService::new(
+            Arc::clone(&history_service),
+            clipboard_service,
+            paste_backend,
+            focus_service,
+        ));
+
+    let socket_path = temporary_socket_path();
+
+    let server = IpcServer::bind(&socket_path).expect("IPC server bind failed");
+
+    let service = Arc::clone(&history_service);
+
+    let activation = Arc::clone(&activation_service);
+
+    let server_task = tokio::spawn(async move {
+        let connection = server.accept().await.expect("accept failed");
+
+        handle_test_connection(connection, service, activation).await;
+    });
+
+    let mut client = IpcClient::connect(&socket_path)
+        .await
+        .expect("IPC client connection failed");
+
+    let response = client
+        .send(&IpcRequest::ActivateItem {
+            id: item_id.clone(),
+            target_id: Some(42),
+        })
+        .await
+        .expect("ActivateItem request failed");
+
+    assert_eq!(
+        response,
+        IpcResponse::Activated {
+            outcome: ActivationOutcome::Pasted,
+        },
+    );
+
+    assert_eq!(clipboard_handle.content(), "X11 IPC item",);
+
+    assert!(
+        pasted.load(Ordering::SeqCst),
+        "direct paste backend should have been called",
+    );
+
+    let items = history_service
+        .get_all()
+        .await
+        .expect("history read failed");
+
+    assert_eq!(items[0].id, item_id);
+
+    server_task.abort();
+
+    let _ = std::fs::remove_file(&socket_path);
 }

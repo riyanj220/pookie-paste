@@ -9,9 +9,9 @@ use tokio::sync::Mutex;
 use daemon::{
     activation_service::{ActivationResult, ClipboardActivationService},
     clipboard_service::ClipboardService,
-    focus_backend::{FocusBackend, FocusError, FocusTarget},
+    focus_backend::{FocusBackend, FocusError, FocusTarget, UnavailableFocusBackend},
     focus_service::FocusService,
-    paste_backend::{PasteBackend, PasteCapability, PasteError},
+    paste_backend::{ClipboardOnlyPasteBackend, PasteBackend, PasteCapability, PasteError},
 };
 
 use history::{ClipboardHistoryService, HistoryConfig};
@@ -110,6 +110,22 @@ impl FocusBackend for ImmediateFocusBackend {
 
     fn is_active(&self, _target: FocusTarget) -> Result<bool, FocusError> {
         Ok(true)
+    }
+}
+
+struct FailingFocusBackend;
+
+impl FocusBackend for FailingFocusBackend {
+    fn active_target(&self) -> Result<FocusTarget, FocusError> {
+        Ok(FocusTarget::new(42))
+    }
+
+    fn restore(&self, _target: FocusTarget) -> Result<(), FocusError> {
+        Err(FocusError::Failed("restore failed".to_string()))
+    }
+
+    fn is_active(&self, _target: FocusTarget) -> Result<bool, FocusError> {
+        Ok(false)
     }
 }
 
@@ -344,4 +360,253 @@ async fn missing_activation_does_not_change_clipboard() {
         alive for the duration of the test.
     */
     let _ = clipboard_service;
+}
+
+#[tokio::test]
+async fn clipboard_only_activation_succeeds_without_focus_target() {
+    let history_service = create_history_service().await;
+
+    /*
+        Keep the initial history in the past
+        because promote() uses Utc::now().
+
+        Initial order:
+        C
+        B
+        A
+    */
+    let base_time = Utc::now() - Duration::seconds(10);
+
+    let a = test_item("A", "wayland-hash-a", base_time);
+
+    let b = test_item(
+        "Wayland fallback item",
+        "wayland-hash-b",
+        base_time + Duration::seconds(1),
+    );
+
+    let c = test_item("C", "wayland-hash-c", base_time + Duration::seconds(2));
+
+    let a_id = a.id.to_string();
+    let b_id = b.id.to_string();
+    let c_id = c.id.to_string();
+
+    history_service.save(a).await.expect("save A failed");
+    history_service.save(b).await.expect("save B failed");
+    history_service.save(c).await.expect("save C failed");
+
+    let backend = FakeClipboardBackend::new("");
+
+    let backend_handle = backend.clone();
+
+    let clipboard_service = Arc::new(Mutex::new(ClipboardService::new(backend)));
+
+    /*
+        This represents the Wayland fallback:
+
+        - no focus target support
+        - no direct paste support
+        - clipboard functionality remains available
+    */
+    let focus_service = FocusService::new(UnavailableFocusBackend);
+
+    let activation_service = ClipboardActivationService::new(
+        Arc::clone(&history_service),
+        Arc::clone(&clipboard_service),
+        ClipboardOnlyPasteBackend,
+        focus_service,
+    );
+
+    /*
+        No target is supplied.
+
+        Therefore focus restoration must
+        not be required for activation.
+    */
+    let result = activation_service
+        .activate(&b_id, None)
+        .await
+        .expect("Wayland fallback activation failed");
+
+    assert_eq!(result, ActivationResult::ClipboardUpdated,);
+
+    /*
+        Even without direct paste support,
+        the selected content must still be
+        written to the clipboard.
+    */
+    assert_eq!(backend_handle.content(), "Wayland fallback item",);
+
+    /*
+        Successful clipboard activation
+        must still promote B.
+
+        Expected:
+        B
+        C
+        A
+    */
+    let items = history_service
+        .get_all()
+        .await
+        .expect("history retrieval failed");
+
+    assert_eq!(items.len(), 3);
+
+    assert_eq!(items[0].id, b_id);
+    assert_eq!(
+        items[0].text_content.as_deref(),
+        Some("Wayland fallback item"),
+    );
+
+    assert_eq!(items[1].id, c_id);
+    assert_eq!(items[1].text_content.as_deref(), Some("C"),);
+
+    assert_eq!(items[2].id, a_id);
+    assert_eq!(items[2].text_content.as_deref(), Some("A"),);
+}
+
+#[tokio::test]
+async fn x11_style_focus_safe_activation_restores_focus_and_pastes() {
+    let history_service = create_history_service().await;
+
+    let base_time = Utc::now() - Duration::seconds(10);
+
+    let a = test_item("A", "x11-hash-a", base_time);
+
+    let b = test_item(
+        "X11 focused item",
+        "x11-hash-b",
+        base_time + Duration::seconds(1),
+    );
+
+    let c = test_item("C", "x11-hash-c", base_time + Duration::seconds(2));
+
+    let a_id = a.id.to_string();
+    let b_id = b.id.to_string();
+    let c_id = c.id.to_string();
+
+    history_service.save(a).await.expect("save A failed");
+    history_service.save(b).await.expect("save B failed");
+    history_service.save(c).await.expect("save C failed");
+
+    let backend = FakeClipboardBackend::new("");
+    let backend_handle = backend.clone();
+
+    let clipboard_service = Arc::new(Mutex::new(ClipboardService::new(backend)));
+
+    let pasted = Arc::new(AtomicBool::new(false));
+
+    let paste_backend = FakePasteBackend::direct(Arc::clone(&pasted));
+
+    let focus_service = FocusService::new(ImmediateFocusBackend);
+
+    let activation_service = ClipboardActivationService::new(
+        Arc::clone(&history_service),
+        clipboard_service,
+        paste_backend,
+        focus_service,
+    );
+
+    let result = activation_service
+        .activate(&b_id, Some(FocusTarget::new(42)))
+        .await
+        .expect("X11-style activation failed");
+
+    assert_eq!(result, ActivationResult::Pasted);
+
+    assert_eq!(backend_handle.content(), "X11 focused item",);
+
+    assert!(
+        pasted.load(Ordering::SeqCst),
+        "direct paste backend should have been called",
+    );
+
+    let items = history_service
+        .get_all()
+        .await
+        .expect("history retrieval failed");
+
+    assert_eq!(items.len(), 3);
+
+    assert_eq!(items[0].id, b_id);
+    assert_eq!(items[0].text_content.as_deref(), Some("X11 focused item"),);
+
+    assert_eq!(items[1].id, c_id);
+    assert_eq!(items[2].id, a_id);
+}
+
+#[tokio::test]
+async fn focus_failure_prevents_direct_paste_but_keeps_clipboard_and_promotion() {
+    let history_service = create_history_service().await;
+
+    let base_time = Utc::now() - Duration::seconds(10);
+
+    let a = test_item("A", "focus-failure-a", base_time);
+
+    let b = test_item(
+        "Focus failure item",
+        "focus-failure-b",
+        base_time + Duration::seconds(1),
+    );
+
+    let c = test_item("C", "focus-failure-c", base_time + Duration::seconds(2));
+
+    let a_id = a.id.to_string();
+    let b_id = b.id.to_string();
+    let c_id = c.id.to_string();
+
+    history_service.save(a).await.expect("save A failed");
+    history_service.save(b).await.expect("save B failed");
+    history_service.save(c).await.expect("save C failed");
+
+    let backend = FakeClipboardBackend::new("");
+    let backend_handle = backend.clone();
+
+    let clipboard_service = Arc::new(Mutex::new(ClipboardService::new(backend)));
+
+    let pasted = Arc::new(AtomicBool::new(false));
+
+    let paste_backend = FakePasteBackend::direct(Arc::clone(&pasted));
+
+    let focus_service = FocusService::new(FailingFocusBackend);
+
+    let activation_service = ClipboardActivationService::new(
+        Arc::clone(&history_service),
+        clipboard_service,
+        paste_backend,
+        focus_service,
+    );
+
+    let result = activation_service
+        .activate(&b_id, Some(FocusTarget::new(42)))
+        .await
+        .expect("activation should return an application outcome");
+
+    assert_eq!(result, ActivationResult::PasteFailed,);
+
+    assert_eq!(
+        backend_handle.content(),
+        "Focus failure item",
+        "clipboard should already be updated",
+    );
+
+    assert!(
+        !pasted.load(Ordering::SeqCst),
+        "paste must not execute after focus restoration failure",
+    );
+
+    let items = history_service
+        .get_all()
+        .await
+        .expect("history retrieval failed");
+
+    assert_eq!(items.len(), 3);
+
+    assert_eq!(items[0].id, b_id, "item should still be promoted",);
+
+    assert_eq!(items[0].text_content.as_deref(), Some("Focus failure item"),);
+
+    assert_eq!(items[1].id, c_id);
+    assert_eq!(items[2].id, a_id);
 }

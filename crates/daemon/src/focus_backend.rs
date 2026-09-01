@@ -26,3 +26,19 @@ pub trait FocusBackend: Send + Sync {
 
     fn is_active(&self, target: FocusTarget) -> Result<bool, FocusError>;
 }
+
+pub struct UnavailableFocusBackend;
+
+impl FocusBackend for UnavailableFocusBackend {
+    fn active_target(&self) -> Result<FocusTarget, FocusError> {
+        Err(FocusError::Unavailable)
+    }
+
+    fn restore(&self, _target: FocusTarget) -> Result<(), FocusError> {
+        Err(FocusError::Unavailable)
+    }
+
+    fn is_active(&self, _target: FocusTarget) -> Result<bool, FocusError> {
+        Err(FocusError::Unavailable)
+    }
+}

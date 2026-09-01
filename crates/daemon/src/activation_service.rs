@@ -743,4 +743,68 @@ mod tests {
 
         assert_eq!(items[0].text_content.as_deref(), Some("B"),);
     }
+
+    #[tokio::test]
+    async fn unsupported_content_does_not_change_clipboard_or_trigger_paste() {
+        let history_service = create_history_service().await;
+
+        let written = StdArc::new(StdMutex::new(None));
+
+        let pasted = StdArc::new(AtomicBool::new(false));
+
+        let paste_backend = FakePasteBackend::direct(StdArc::clone(&pasted));
+
+        let activation_service = create_activation_service(
+            StdArc::clone(&history_service),
+            StdArc::clone(&written),
+            paste_backend,
+        );
+
+        let item = ClipboardItem {
+            id: uuid::Uuid::new_v4(),
+            content: ClipboardContent::Image(vec![1, 2, 3, 4]),
+            hash: "unsupported-image".to_string(),
+            created_at: chrono::Utc::now(),
+        };
+
+        let item_id = item.id.to_string();
+
+        history_service
+            .save(item)
+            .await
+            .expect("history save failed");
+
+        let result = activation_service
+            .activate(&item_id, None)
+            .await
+            .expect("activation failed");
+
+        assert_eq!(result, ActivationResult::UnsupportedContent,);
+
+        assert!(
+            !pasted.load(Ordering::SeqCst),
+            "paste backend must not be called for unsupported content",
+        );
+
+        assert_eq!(
+            written
+                .lock()
+                .expect("fake clipboard mutex poisoned")
+                .as_deref(),
+            None,
+            "clipboard must remain unchanged for unsupported content",
+        );
+
+        let items = history_service
+            .get_all()
+            .await
+            .expect("history retrieval failed");
+
+        assert_eq!(items.len(), 1);
+
+        assert_eq!(
+            items[0].id, item_id,
+            "unsupported item must not be promoted or replaced",
+        );
+    }
 }
