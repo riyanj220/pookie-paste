@@ -10,7 +10,7 @@ use clipboard_backend::PlatformClipboard;
 use tokio::sync::Mutex;
 use tokio::time::{Duration, sleep};
 
-use tracing::info;
+use tracing::{info, warn};
 
 use pookie_core::{ClipboardEvent, ClipboardProcessor};
 
@@ -26,6 +26,8 @@ use daemon::platform_focus_backend::PlatformFocusBackend;
 use daemon::shortcut_listener::ShortcutListener;
 
 use daemon::{activation_service::ClipboardActivationService, clipboard_service::ClipboardService};
+
+use daemon::ui_launcher;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -148,6 +150,15 @@ async fn main() -> anyhow::Result<()> {
                         info!(
                             "global shortcut activated"
                         );
+
+                        if let Err(error) =
+                            ui_launcher::launch_ui()
+                        {
+                            warn!(
+                                error = ?error,
+                                "failed to launch Pookie UI"
+                            );
+                        }
                     }
 
                     None => {
