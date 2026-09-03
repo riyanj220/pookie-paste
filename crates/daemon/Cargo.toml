@@ -44,3 +44,6 @@ x11rb = {
     version = "0.13",
     features = ["xtest"],
 }
+
+zbus = "5.19"
+futures-util = "0.3"

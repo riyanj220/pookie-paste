@@ -1,5 +1,5 @@
 use crate::shortcut_backend::{Shortcut, ShortcutBackend, ShortcutError};
-
+use crate::wayland_shortcut_backend::WaylandShortcutBackend;
 use crate::x11_shortcut_backend::X11ShortcutBackend;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -11,6 +11,7 @@ enum SessionType {
 
 pub enum PlatformShortcutBackend {
     X11(Box<X11ShortcutBackend>),
+    Wayland(Box<WaylandShortcutBackend>),
     Unavailable,
 }
 
@@ -21,15 +22,7 @@ impl PlatformShortcutBackend {
         match classify_session_type(&session_type) {
             SessionType::X11 => Ok(Self::X11(Box::new(X11ShortcutBackend::new()?))),
 
-            /*
-             * Wayland global shortcuts will later use
-             * the XDG Desktop Portal GlobalShortcuts API.
-             *
-             * For now we explicitly report the capability
-             * as unavailable instead of falling back to
-             * XWayland/X11 grabs.
-             */
-            SessionType::Wayland => Ok(Self::Unavailable),
+            SessionType::Wayland => Ok(Self::Wayland(Box::new(WaylandShortcutBackend::new()?))),
 
             SessionType::Other => Ok(Self::Unavailable),
         }
@@ -38,6 +31,8 @@ impl PlatformShortcutBackend {
     pub fn name(&self) -> &'static str {
         match self {
             Self::X11(_) => "X11 global shortcut",
+
+            Self::Wayland(_) => "Wayland portal global shortcut",
 
             Self::Unavailable => "unavailable",
         }
@@ -49,6 +44,8 @@ impl ShortcutBackend for PlatformShortcutBackend {
         match self {
             Self::X11(backend) => backend.register(shortcut),
 
+            Self::Wayland(backend) => backend.register(shortcut),
+
             Self::Unavailable => Err(ShortcutError::Unavailable),
         }
     }
@@ -56,6 +53,8 @@ impl ShortcutBackend for PlatformShortcutBackend {
     fn wait_for_activation(&mut self) -> Result<(), ShortcutError> {
         match self {
             Self::X11(backend) => backend.wait_for_activation(),
+
+            Self::Wayland(backend) => backend.wait_for_activation(),
 
             Self::Unavailable => Err(ShortcutError::Unavailable),
         }
@@ -78,28 +77,28 @@ mod tests {
 
     #[test]
     fn identifies_x11() {
-        assert_eq!(classify_session_type("x11",), SessionType::X11,);
+        assert_eq!(classify_session_type("x11"), SessionType::X11,);
     }
 
     #[test]
     fn identifies_wayland() {
-        assert_eq!(classify_session_type("wayland",), SessionType::Wayland,);
+        assert_eq!(classify_session_type("wayland"), SessionType::Wayland,);
     }
 
     #[test]
     fn unknown_session_is_other() {
-        assert_eq!(classify_session_type("tty",), SessionType::Other,);
+        assert_eq!(classify_session_type("tty"), SessionType::Other,);
     }
 
     #[test]
     fn classification_is_case_insensitive() {
-        assert_eq!(classify_session_type("X11",), SessionType::X11,);
+        assert_eq!(classify_session_type("X11"), SessionType::X11,);
 
-        assert_eq!(classify_session_type("WAYLAND",), SessionType::Wayland,);
+        assert_eq!(classify_session_type("WAYLAND"), SessionType::Wayland,);
     }
 
     #[test]
     fn classification_ignores_whitespace() {
-        assert_eq!(classify_session_type("  x11  ",), SessionType::X11,);
+        assert_eq!(classify_session_type("  x11  "), SessionType::X11,);
     }
 }
