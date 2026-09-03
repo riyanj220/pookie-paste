@@ -24,10 +24,9 @@ use daemon::focus_service::FocusService;
 use daemon::paste_backend::PlatformPasteBackend;
 use daemon::platform_focus_backend::PlatformFocusBackend;
 use daemon::shortcut_listener::ShortcutListener;
+use daemon::ui_launcher::{UiLaunchOutcome, UiLauncher};
 
 use daemon::{activation_service::ClipboardActivationService, clipboard_service::ClipboardService};
-
-use daemon::ui_launcher;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -71,6 +70,12 @@ async fn main() -> anyhow::Result<()> {
 
     let mut shortcut_available = true;
 
+    /*
+     * One launcher instance lives for the full daemon
+     * lifetime and owns the popup singleton state.
+     */
+    let ui_launcher = UiLauncher::new();
+
     let activation_service = Arc::new(ClipboardActivationService::new(
         Arc::clone(&history_service),
         Arc::clone(&clipboard_service),
@@ -100,6 +105,7 @@ async fn main() -> anyhow::Result<()> {
         if let Some(content) = clipboard_change {
             let event = ClipboardEvent {
                 content: ClipboardContent::Text(content),
+
                 created_at: chrono::Utc::now(),
             };
 
@@ -151,13 +157,34 @@ async fn main() -> anyhow::Result<()> {
                             "global shortcut activated"
                         );
 
-                        if let Err(error) =
-                            ui_launcher::launch_ui()
-                        {
-                            warn!(
-                                error = ?error,
-                                "failed to launch Pookie UI"
-                            );
+                        match ui_launcher.launch() {
+                            Ok(
+                                UiLaunchOutcome::Launched,
+                            ) => {
+                                /*
+                                 * Nothing else needed.
+                                 *
+                                 * The UI launcher owns the
+                                 * child lifecycle.
+                                 */
+                            }
+
+                            Ok(
+                                UiLaunchOutcome::AlreadyRunning,
+                            ) => {
+                                /*
+                                 * Intentionally ignore
+                                 * repeated Super+V presses
+                                 * while the popup is alive.
+                                 */
+                            }
+
+                            Err(error) => {
+                                warn!(
+                                    error = ?error,
+                                    "failed to launch Pookie UI"
+                                );
+                            }
                         }
                     }
 
