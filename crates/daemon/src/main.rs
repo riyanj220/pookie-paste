@@ -54,6 +54,21 @@ async fn main() -> anyhow::Result<()> {
 
     let clipboard_service = Arc::new(Mutex::new(ClipboardService::new(backend)));
 
+    /*
+     * Establish the clipboard state that existed before
+     * Pookie started as the initial monitoring baseline.
+     *
+     * This prevents the daemon from treating the user's
+     * pre-existing clipboard contents as a new copy event.
+     */
+    {
+        let mut clipboard = clipboard_service.lock().await;
+
+        clipboard.initialize_baseline()?;
+    }
+
+    info!("clipboard baseline initialized");
+
     let paste_backend = PlatformPasteBackend::new()
         .map_err(|error| anyhow::anyhow!("failed to initialize paste backend: {error:?}"))?;
 
@@ -70,10 +85,6 @@ async fn main() -> anyhow::Result<()> {
 
     let mut shortcut_available = true;
 
-    /*
-     * One launcher instance lives for the full daemon
-     * lifetime and owns the popup singleton state.
-     */
     let ui_launcher = UiLauncher::new();
 
     let activation_service = Arc::new(ClipboardActivationService::new(
@@ -160,24 +171,11 @@ async fn main() -> anyhow::Result<()> {
                         match ui_launcher.launch() {
                             Ok(
                                 UiLaunchOutcome::Launched,
-                            ) => {
-                                /*
-                                 * Nothing else needed.
-                                 *
-                                 * The UI launcher owns the
-                                 * child lifecycle.
-                                 */
-                            }
+                            ) => {}
 
                             Ok(
                                 UiLaunchOutcome::AlreadyRunning,
-                            ) => {
-                                /*
-                                 * Intentionally ignore
-                                 * repeated Super+V presses
-                                 * while the popup is alive.
-                                 */
-                            }
+                            ) => {}
 
                             Err(error) => {
                                 warn!(

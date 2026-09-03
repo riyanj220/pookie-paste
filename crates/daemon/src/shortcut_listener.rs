@@ -1,9 +1,9 @@
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
-use crate::shortcut_backend::{Shortcut, ShortcutBackend, ShortcutError};
+use crate::platform_shortcut_backend::PlatformShortcutBackend;
 
-use crate::x11_shortcut_backend::X11ShortcutBackend;
+use crate::shortcut_backend::{Shortcut, ShortcutBackend, ShortcutError};
 
 pub struct ShortcutListener {
     receiver: mpsc::UnboundedReceiver<()>,
@@ -14,7 +14,7 @@ impl ShortcutListener {
         let (sender, receiver) = mpsc::unbounded_channel();
 
         std::thread::spawn(move || {
-            let mut backend = match X11ShortcutBackend::new() {
+            let mut backend = match PlatformShortcutBackend::new() {
                 Ok(backend) => backend,
 
                 Err(error) => {
@@ -27,6 +27,8 @@ impl ShortcutListener {
                 }
             };
 
+            info!("shortcut backend: {}", backend.name());
+
             if let Err(error) = backend.register(Shortcut::super_v()) {
                 match error {
                     ShortcutError::Conflict(message) => {
@@ -34,6 +36,10 @@ impl ShortcutListener {
                             %message,
                             "global shortcut is already in use"
                         );
+                    }
+
+                    ShortcutError::Unavailable => {
+                        warn!("global shortcuts are unavailable on this session");
                     }
 
                     other => {
@@ -55,6 +61,12 @@ impl ShortcutListener {
                         if sender.send(()).is_err() {
                             break;
                         }
+                    }
+
+                    Err(ShortcutError::Unavailable) => {
+                        warn!("global shortcuts became unavailable");
+
+                        break;
                     }
 
                     Err(error) => {

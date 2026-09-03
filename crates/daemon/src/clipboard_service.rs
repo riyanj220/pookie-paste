@@ -21,6 +21,14 @@ where
         }
     }
 
+    pub fn initialize_baseline(&mut self) -> Result<()> {
+        let content = self.backend.read()?;
+
+        self.last_content = Some(content);
+
+        Ok(())
+    }
+
     pub fn read(&self) -> Result<String> {
         let content = self.backend.read()?;
 
@@ -30,6 +38,14 @@ where
     pub fn write(&mut self, content: &str) -> Result<()> {
         self.backend.write(content)?;
 
+        /*
+         * A clipboard write performed by Pookie itself
+         * becomes the new baseline immediately.
+         *
+         * This prevents our monitor from seeing our own
+         * activation write as a fresh external clipboard
+         * event.
+         */
         self.last_content = Some(content.to_string());
 
         Ok(())
@@ -93,6 +109,43 @@ mod tests {
 
             Ok(())
         }
+    }
+
+    #[test]
+    fn initial_clipboard_is_not_reported_after_baseline_initialization() {
+        let backend = FakeClipboardBackend::new("already copied");
+
+        let mut service = ClipboardService::new(backend);
+
+        service
+            .initialize_baseline()
+            .expect("baseline initialization failed");
+
+        let change = service.check_for_change().expect("change check failed");
+
+        assert!(
+            change.is_none(),
+            "existing clipboard content should only establish the startup baseline"
+        );
+    }
+
+    #[test]
+    fn external_change_after_baseline_is_detected() {
+        let backend = FakeClipboardBackend::new("A");
+
+        let backend_control = backend.clone();
+
+        let mut service = ClipboardService::new(backend);
+
+        service
+            .initialize_baseline()
+            .expect("baseline initialization failed");
+
+        backend_control.set_external_value("B");
+
+        let change = service.check_for_change().expect("change check failed");
+
+        assert_eq!(change.as_deref(), Some("B"),);
     }
 
     #[test]

@@ -47,8 +47,8 @@ fn main() -> eframe::Result<()> {
         .with_resizable(false)
         .with_decorations(false);
 
-    if let Some([x, y]) = popup_position::cursor_position() {
-        viewport = viewport.with_position([x + CURSOR_OFFSET, y + CURSOR_OFFSET]);
+    if let Some([x, y]) = popup_position::popup_position(POPUP_WIDTH, POPUP_HEIGHT, CURSOR_OFFSET) {
+        viewport = viewport.with_position([x, y]);
     }
 
     let options = eframe::NativeOptions {
