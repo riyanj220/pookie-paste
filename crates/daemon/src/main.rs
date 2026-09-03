@@ -23,6 +23,7 @@ use storage::Database;
 use daemon::focus_service::FocusService;
 use daemon::paste_backend::PlatformPasteBackend;
 use daemon::platform_focus_backend::PlatformFocusBackend;
+use daemon::shortcut_listener::ShortcutListener;
 
 use daemon::{activation_service::ClipboardActivationService, clipboard_service::ClipboardService};
 
@@ -63,6 +64,10 @@ async fn main() -> anyhow::Result<()> {
     info!("focus backend: {}", focus_backend.name());
 
     let focus_service = FocusService::new(focus_backend);
+
+    let mut shortcut_listener = ShortcutListener::start();
+
+    let mut shortcut_available = true;
 
     let activation_service = Arc::new(ClipboardActivationService::new(
         Arc::clone(&history_service),
@@ -127,7 +132,27 @@ async fn main() -> anyhow::Result<()> {
                     }
 
                     Err(error) => {
-                        return Err(error);
+                        return Err(
+                            error
+                        );
+                    }
+                }
+            }
+
+            activation =
+                shortcut_listener.activated(),
+                if shortcut_available =>
+            {
+                match activation {
+                    Some(()) => {
+                        info!(
+                            "global shortcut activated"
+                        );
+                    }
+
+                    None => {
+                        shortcut_available =
+                            false;
                     }
                 }
             }
