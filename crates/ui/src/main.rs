@@ -1,7 +1,10 @@
 mod ipc_client;
+mod popup_focus;
 mod popup_position;
 mod theme;
 mod ui_style;
+
+use std::time::{Duration, Instant};
 
 use eframe::egui;
 use theme::AppTheme;
@@ -14,6 +17,10 @@ const CURSOR_OFFSET: f32 = 12.0;
 const MAX_PREVIEW_LINES: usize = 3;
 const MAX_CHARS_PER_LINE: usize = 70;
 
+const FOCUS_ACQUISITION_TIMEOUT: Duration = Duration::from_millis(500);
+
+const FOCUS_RETRY_INTERVAL: Duration = Duration::from_millis(16);
+
 fn capture_initial_focus_target() -> Option<u64> {
     let runtime = tokio::runtime::Runtime::new().ok()?;
 
@@ -24,6 +31,13 @@ fn capture_initial_focus_target() -> Option<u64> {
 }
 
 fn main() -> eframe::Result<()> {
+    /*
+     * Capture the application that currently owns focus
+     * before creating the popup.
+     *
+     * The daemon will later use this target when an item
+     * is activated so it can restore the original app.
+     */
     let target_id = capture_initial_focus_target();
 
     let app_theme = theme::detect_system_theme();
@@ -39,7 +53,9 @@ fn main() -> eframe::Result<()> {
 
     let options = eframe::NativeOptions {
         viewport,
+
         renderer: eframe::Renderer::Glow,
+
         ..Default::default()
     };
 
@@ -56,7 +72,9 @@ fn main() -> eframe::Result<()> {
 
 enum HistoryState {
     Loading,
+
     Loaded(Vec<ipc::HistoryItem>),
+
     Failed(String),
 }
 
@@ -67,7 +85,14 @@ struct PookieApp {
 
     selected_index: Option<usize>,
 
-    focus_requested: bool,
+    /*
+     * Focus acquisition is bounded.
+     *
+     * We actively request focus only during the popup's
+     * initial appearance. Once focus has genuinely been
+     * received, ordinary focus-loss dismissal takes over.
+     */
+    focus_started_at: Instant,
 
     has_received_focus: bool,
 
@@ -100,7 +125,7 @@ impl PookieApp {
 
             selected_index: None,
 
-            focus_requested: false,
+            focus_started_at: Instant::now(),
 
             has_received_focus: false,
 
@@ -112,6 +137,66 @@ impl PookieApp {
 
             status_message: None,
         }
+    }
+
+    fn ensure_popup_focus(&mut self, ui: &mut egui::Ui) {
+        let focused = ui.input(|input| input.viewport().focused.unwrap_or(false));
+
+        /*
+         * Only mark focus as received when egui confirms
+         * the native viewport genuinely owns focus.
+         */
+        if focused {
+            self.has_received_focus = true;
+
+            return;
+        }
+
+        /*
+         * Once the popup has received focus once, we must
+         * not try to steal it back.
+         *
+         * A later focus loss is intentional click-away
+         * behavior and is handled in ui().
+         */
+        if self.has_received_focus {
+            return;
+        }
+
+        /*
+         * Limit active focus acquisition to the first
+         * 500 ms of the popup's lifetime.
+         *
+         * This isn't a sleep or UX delay. We retry across
+         * normal UI frames because the native X11 window
+         * may not yet appear in the WM client list during
+         * the very first frame.
+         */
+        if self.focus_started_at.elapsed() > FOCUS_ACQUISITION_TIMEOUT {
+            return;
+        }
+
+        /*
+         * Layer 1:
+         * Ask eframe/egui to focus its viewport.
+         */
+        ui.ctx().send_viewport_cmd(egui::ViewportCommand::Focus);
+
+        /*
+         * Layer 2:
+         * On X11, send a WM-friendly
+         * _NET_ACTIVE_WINDOW request for this UI process.
+         *
+         * On unsupported sessions this simply returns
+         * false and causes no failure.
+         */
+        popup_focus::request_focus();
+
+        /*
+         * Keep generating frames briefly while focus is
+         * still being acquired.
+         */
+        ui.ctx().request_repaint_after(FOCUS_RETRY_INTERVAL);
     }
 
     fn poll_history(&mut self) {
@@ -220,6 +305,10 @@ impl PookieApp {
 
         self.activation_receiver = Some(receiver);
 
+        /*
+         * Hide before asking the daemon to restore the
+         * original application and paste.
+         */
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
 
         std::thread::spawn(move || {
@@ -497,11 +586,12 @@ impl eframe::App for PookieApp {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        if !self.focus_requested {
-            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Focus);
-
-            self.focus_requested = true;
-        }
+        /*
+         * Focus acquisition must happen before keyboard
+         * input handling so arrows/Enter can work as soon
+         * as the popup receives native focus.
+         */
+        self.ensure_popup_focus(ui);
 
         self.poll_history();
 
@@ -509,10 +599,23 @@ impl eframe::App for PookieApp {
 
         let viewport_focused = ui.input(|input| input.viewport().focused.unwrap_or(false));
 
+        /*
+         * Keep this separate from the focus-request code.
+         *
+         * has_received_focus means "the WM actually gave
+         * us focus", not merely "we requested it".
+         */
         if viewport_focused {
             self.has_received_focus = true;
         }
 
+        /*
+         * Do not close the popup merely because its first
+         * frame wasn't focused yet.
+         *
+         * Only treat focus loss as dismissal after focus
+         * has genuinely been obtained at least once.
+         */
         if self.has_received_focus && !viewport_focused && !self.activation_in_progress {
             ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
 
@@ -667,6 +770,6 @@ mod tests {
 
         let preview = preview_text(&input);
 
-        assert!(preview.ends_with('…'),);
+        assert!(preview.ends_with('…',),);
     }
 }
