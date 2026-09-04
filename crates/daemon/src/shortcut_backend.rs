@@ -45,6 +45,7 @@ impl ShortcutModifiers {
 #[derive(Debug)]
 pub enum ShortcutError {
     Unavailable,
+    Cancelled,
     Conflict(String),
     Failed(String),
 }
@@ -63,7 +64,7 @@ mod tests {
     fn super_v_has_expected_definition() {
         let shortcut = Shortcut::super_v();
 
-        assert_eq!(shortcut.key, ShortcutKey::Character('v'),);
+        assert_eq!(shortcut.key, ShortcutKey::Character('v'));
 
         assert!(shortcut.modifiers.super_key);
         assert!(!shortcut.modifiers.control);

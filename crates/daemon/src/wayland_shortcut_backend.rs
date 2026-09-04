@@ -3,6 +3,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 
 use futures_util::StreamExt;
+use tokio::sync::oneshot;
 use zbus::{
     Connection, Proxy,
     zvariant::{ObjectPath, OwnedObjectPath, OwnedValue, Str, Value},
@@ -18,11 +19,15 @@ const GLOBAL_SHORTCUTS_INTERFACE: &str = "org.freedesktop.portal.GlobalShortcuts
 
 const REQUEST_INTERFACE: &str = "org.freedesktop.portal.Request";
 
+const SESSION_INTERFACE: &str = "org.freedesktop.portal.Session";
+
 const CLIPBOARD_HISTORY_SHORTCUT_ID: &str = "clipboard-history";
 
 const CLIPBOARD_HISTORY_DESCRIPTION: &str = "Open clipboard history";
 
 static TOKEN_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+type ActivationResult = Result<(), ShortcutError>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WaylandShortcutCapability {
@@ -59,7 +64,7 @@ pub struct WaylandShortcutBackend {
 
     session: Option<WaylandShortcutSession>,
 
-    activation_receiver: Option<Receiver<()>>,
+    activation_receiver: Option<Receiver<ActivationResult>>,
 
     registered: bool,
 }
@@ -93,33 +98,83 @@ impl WaylandShortcutSession {
         wait_for_deactivation(&self.connection, &self.session_handle.as_ref()).await
     }
 
-    pub async fn run_activation_loop(&self, sender: Sender<()>) -> Result<(), ShortcutError> {
+    pub async fn close(&self) -> Result<(), ShortcutError> {
         let proxy = Proxy::new(
+            &self.connection,
+            PORTAL_DESTINATION,
+            self.session_handle.as_ref(),
+            SESSION_INTERFACE,
+        )
+        .await
+        .map_err(|error| {
+            ShortcutError::Failed(format!("failed to create portal session proxy: {error}"))
+        })?;
+
+        proxy
+            .call::<_, _, ()>("Close", &())
+            .await
+            .map_err(|error| {
+                ShortcutError::Failed(format!("failed to close GlobalShortcuts session: {error}"))
+            })?;
+
+        Ok(())
+    }
+
+    pub async fn run_activation_loop(
+        &self,
+        sender: Sender<ActivationResult>,
+        ready: oneshot::Sender<Result<(), ShortcutError>>,
+    ) -> Result<(), ShortcutError> {
+        let proxy = match Proxy::new(
             &self.connection,
             PORTAL_DESTINATION,
             PORTAL_PATH,
             GLOBAL_SHORTCUTS_INTERFACE,
         )
         .await
-        .map_err(|_| ShortcutError::Unavailable)?;
+        {
+            Ok(proxy) => proxy,
 
-        let mut stream = proxy.receive_signal("Activated").await.map_err(|error| {
-            ShortcutError::Failed(format!(
-                "failed to subscribe to GlobalShortcuts Activated: {error}"
-            ))
-        })?;
+            Err(_) => {
+                let _ = ready.send(Err(ShortcutError::Unavailable));
+
+                return Err(ShortcutError::Unavailable);
+            }
+        };
+
+        let mut stream = match proxy.receive_signal("Activated").await {
+            Ok(stream) => stream,
+
+            Err(error) => {
+                let message = format!("failed to subscribe to GlobalShortcuts Activated: {error}");
+
+                let _ = ready.send(Err(ShortcutError::Failed(message.clone())));
+
+                return Err(ShortcutError::Failed(message));
+            }
+        };
+
+        /*
+         * From this point onward the signal subscription exists.
+         *
+         * register() must not report success before this readiness
+         * notification has been received.
+         */
+        let _ = ready.send(Ok(()));
 
         while let Some(message) = stream.next().await {
-            let (session_handle, shortcut_id, _timestamp, _options): (
-                OwnedObjectPath,
-                String,
-                u64,
-                HashMap<String, OwnedValue>,
-            ) = message.body().deserialize().map_err(|error| {
-                ShortcutError::Failed(format!(
-                    "failed to decode GlobalShortcuts Activated signal: {error}"
-                ))
-            })?;
+            let decoded: Result<(OwnedObjectPath, String, u64, HashMap<String, OwnedValue>), _> =
+                message.body().deserialize();
+
+            let (session_handle, shortcut_id, _timestamp, _options) = match decoded {
+                Ok(decoded) => decoded,
+
+                Err(error) => {
+                    return Err(ShortcutError::Failed(format!(
+                        "failed to decode GlobalShortcuts Activated signal: {error}"
+                    )));
+                }
+            };
 
             if session_handle != self.session_handle {
                 continue;
@@ -129,13 +184,17 @@ impl WaylandShortcutSession {
                 continue;
             }
 
-            if sender.send(()).is_err() {
+            if sender.send(Ok(())).is_err() {
+                /*
+                 * The synchronous consumer has disappeared, so there
+                 * is nothing left for this task to service.
+                 */
                 return Ok(());
             }
         }
 
         Err(ShortcutError::Failed(
-            "GlobalShortcuts Activated stream ended".to_string(),
+            "GlobalShortcuts activation stream ended".to_string(),
         ))
     }
 }
@@ -155,6 +214,13 @@ impl WaylandShortcutBackend {
             registered: false,
         })
     }
+
+    fn close_session_after_failed_registration(&self, session: &WaylandShortcutSession) {
+        /*
+         * Cleanup must never replace the actual registration error.
+         */
+        let _ = self.runtime.block_on(session.close());
+    }
 }
 
 impl ShortcutBackend for WaylandShortcutBackend {
@@ -169,31 +235,80 @@ impl ShortcutBackend for WaylandShortcutBackend {
 
         let session = self.runtime.block_on(create_global_shortcuts_session())?;
 
-        let bound = self
+        let bound = match self
             .runtime
-            .block_on(session.bind_clipboard_history(&preferred_trigger))?;
+            .block_on(session.bind_clipboard_history(&preferred_trigger))
+        {
+            Ok(bound) => bound,
+
+            Err(error) => {
+                self.close_session_after_failed_registration(&session);
+
+                return Err(error);
+            }
+        };
 
         let shortcut_bound = bound
             .iter()
             .any(|shortcut| shortcut.id == CLIPBOARD_HISTORY_SHORTCUT_ID);
 
         if !shortcut_bound {
+            self.close_session_after_failed_registration(&session);
+
             return Err(ShortcutError::Unavailable);
         }
 
-        let (sender, receiver) = channel();
+        let (activation_sender, activation_receiver) = channel();
+
+        let (ready_sender, ready_receiver) = oneshot::channel();
 
         let listener_session = session.clone();
 
-        let handle = self.runtime.handle().clone();
+        let terminal_sender = activation_sender.clone();
 
-        handle.spawn(async move {
-            let _ = listener_session.run_activation_loop(sender).await;
+        self.runtime.handle().spawn(async move {
+            let result = listener_session
+                .run_activation_loop(activation_sender, ready_sender)
+                .await;
+
+            if let Err(error) = result {
+                /*
+                 * If startup failed, ready_sender already carries the
+                 * startup error. Sending here is still safe: register()
+                 * has not installed the receiver until readiness
+                 * succeeds.
+                 *
+                 * Once startup has succeeded, this propagates terminal
+                 * portal/listener failures to wait_for_activation().
+                 */
+                let _ = terminal_sender.send(Err(error));
+            }
         });
 
+        let readiness = self.runtime.block_on(async {
+            ready_receiver.await.map_err(|_| {
+                ShortcutError::Failed(
+                    "Wayland activation listener stopped during startup".to_string(),
+                )
+            })?
+        });
+
+        if let Err(error) = readiness {
+            self.close_session_after_failed_registration(&session);
+
+            return Err(error);
+        }
+
+        /*
+         * Only publish the initialized state after:
+         *
+         *   session created
+         *   shortcut bound
+         *   Activated subscription established
+         */
         self.session = Some(session);
 
-        self.activation_receiver = Some(receiver);
+        self.activation_receiver = Some(activation_receiver);
 
         self.registered = true;
 
@@ -205,9 +320,9 @@ impl ShortcutBackend for WaylandShortcutBackend {
             ShortcutError::Failed("Wayland shortcut backend has not been registered".to_string())
         })?;
 
-        receiver.recv().map_err(|_| {
-            ShortcutError::Failed("Wayland shortcut activation channel closed".to_string())
-        })
+        receiver
+            .recv()
+            .map_err(|_| ShortcutError::Failed("Wayland activation listener stopped".to_string()))?
     }
 }
 
@@ -275,9 +390,7 @@ async fn create_session_with_connection(
     let (response, mut results) =
         wait_for_request_response(&connection, &request_handle.as_ref()).await?;
 
-    if response != 0 {
-        return Err(ShortcutError::Unavailable);
-    }
+    check_portal_response("GlobalShortcuts CreateSession", response)?;
 
     let session_handle = results.remove("session_handle").ok_or_else(|| {
         ShortcutError::Failed(
@@ -336,9 +449,7 @@ async fn bind_shortcuts(
     let (response, mut results) =
         wait_for_request_response(connection, &request_handle.as_ref()).await?;
 
-    if response != 0 {
-        return Err(ShortcutError::Unavailable);
-    }
+    check_portal_response("GlobalShortcuts BindShortcuts", response)?;
 
     let shortcuts = results.remove("shortcuts").ok_or_else(|| {
         ShortcutError::Failed("BindShortcuts response did not contain shortcuts".to_string())
@@ -552,6 +663,22 @@ async fn wait_for_request_response(
     Ok((response, results))
 }
 
+fn check_portal_response(operation: &str, response: u32) -> Result<(), ShortcutError> {
+    match response {
+        0 => Ok(()),
+
+        1 => Err(ShortcutError::Cancelled),
+
+        2 => Err(ShortcutError::Failed(format!(
+            "{operation} failed in the portal"
+        ))),
+
+        other => Err(ShortcutError::Failed(format!(
+            "{operation} returned unknown response code {other}"
+        ))),
+    }
+}
+
 fn map_portal_method_error(operation: &str, error: zbus::Error) -> ShortcutError {
     let message = error.to_string();
 
@@ -568,7 +695,7 @@ fn map_portal_method_error(operation: &str, error: zbus::Error) -> ShortcutError
 fn next_token(prefix: &str) -> String {
     let counter = TOKEN_COUNTER.fetch_add(1, Ordering::Relaxed);
 
-    format!("{prefix}_{}_{}", std::process::id(), counter,)
+    format!("{prefix}_{}_{}", std::process::id(), counter)
 }
 
 #[cfg(test)]
@@ -580,7 +707,7 @@ mod tests {
     fn converts_super_v_to_portal_trigger() {
         let trigger = portal_trigger(Shortcut::super_v()).unwrap();
 
-        assert_eq!(trigger, "<Super>v",);
+        assert_eq!(trigger, "<Super>v");
     }
 
     #[test]
@@ -595,6 +722,35 @@ mod tests {
         ))
         .unwrap();
 
-        assert_eq!(trigger, "<Ctrl><Alt>v",);
+        assert_eq!(trigger, "<Ctrl><Alt>v");
+    }
+
+    #[test]
+    fn successful_portal_response_is_accepted() {
+        assert!(check_portal_response("test", 0).is_ok());
+    }
+
+    #[test]
+    fn cancelled_portal_response_is_cancelled() {
+        assert!(matches!(
+            check_portal_response("test", 1),
+            Err(ShortcutError::Cancelled),
+        ));
+    }
+
+    #[test]
+    fn failed_portal_response_is_failure() {
+        assert!(matches!(
+            check_portal_response("test", 2),
+            Err(ShortcutError::Failed(_)),
+        ));
+    }
+
+    #[test]
+    fn unknown_portal_response_is_failure() {
+        assert!(matches!(
+            check_portal_response("test", 99),
+            Err(ShortcutError::Failed(_)),
+        ));
     }
 }

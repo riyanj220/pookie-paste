@@ -2,7 +2,6 @@ use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 use crate::platform_shortcut_backend::PlatformShortcutBackend;
-
 use crate::shortcut_backend::{Shortcut, ShortcutBackend, ShortcutError};
 
 pub struct ShortcutListener {
@@ -42,9 +41,13 @@ impl ShortcutListener {
                         warn!("global shortcuts are unavailable on this session");
                     }
 
-                    other => {
+                    ShortcutError::Cancelled => {
+                        warn!("global shortcut setup was cancelled");
+                    }
+
+                    ShortcutError::Failed(message) => {
                         warn!(
-                            error = ?other,
+                            %message,
                             "failed to register global shortcut"
                         );
                     }
@@ -65,6 +68,12 @@ impl ShortcutListener {
 
                     Err(ShortcutError::Unavailable) => {
                         warn!("global shortcuts became unavailable");
+
+                        break;
+                    }
+
+                    Err(ShortcutError::Cancelled) => {
+                        warn!("global shortcut operation was cancelled");
 
                         break;
                     }
