@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Pookie Paste
+Comment=Fast clipboard history for Linux
+Exec=ui
+Terminal=false
+NoDisplay=true
+Categories=Utility;
+StartupNotify=false

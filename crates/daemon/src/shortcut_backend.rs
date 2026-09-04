@@ -46,6 +46,7 @@ impl ShortcutModifiers {
 pub enum ShortcutError {
     Unavailable,
     Cancelled,
+    TimedOut(String),
     Conflict(String),
     Failed(String),
 }

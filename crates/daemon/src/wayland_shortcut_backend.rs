@@ -1,11 +1,14 @@
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
+use std::time::Duration;
 
 use futures_util::StreamExt;
 use tokio::sync::oneshot;
+use tracing::{debug, info, warn};
+use uuid::Uuid;
 use zbus::{
-    Connection, Proxy,
+    Connection, MatchRule, MessageStream, Proxy,
+    message::Type as MessageType,
     zvariant::{ObjectPath, OwnedObjectPath, OwnedValue, Str, Value},
 };
 
@@ -17,15 +20,29 @@ const PORTAL_PATH: &str = "/org/freedesktop/portal/desktop";
 
 const GLOBAL_SHORTCUTS_INTERFACE: &str = "org.freedesktop.portal.GlobalShortcuts";
 
+const HOST_REGISTRY_INTERFACE: &str = "org.freedesktop.host.portal.Registry";
+
 const REQUEST_INTERFACE: &str = "org.freedesktop.portal.Request";
 
 const SESSION_INTERFACE: &str = "org.freedesktop.portal.Session";
+
+const REQUEST_PATH_PREFIX: &str = "/org/freedesktop/portal/desktop/request";
+
+pub const POOKIE_APPLICATION_ID: &str = "io.github.riyanj220.PookiePaste";
+
+pub const POOKIE_DESKTOP_FILE_ID: &str = "io.github.riyanj220.PookiePaste.desktop";
 
 const CLIPBOARD_HISTORY_SHORTCUT_ID: &str = "clipboard-history";
 
 const CLIPBOARD_HISTORY_DESCRIPTION: &str = "Open clipboard history";
 
-static TOKEN_COUNTER: AtomicU64 = AtomicU64::new(0);
+const CREATE_SESSION_TIMEOUT: Duration = Duration::from_secs(15);
+
+/*
+ * BindShortcuts may legitimately involve desktop UI and user interaction,
+ * so give it substantially more time than CreateSession.
+ */
+const BIND_SHORTCUTS_TIMEOUT: Duration = Duration::from_secs(120);
 
 type ActivationResult = Result<(), ShortcutError>;
 
@@ -53,10 +70,30 @@ pub struct WaylandShortcutDeactivation {
     pub timestamp: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HostApplicationRegistration {
+    Registered,
+    Unavailable,
+}
+
 #[derive(Clone)]
 pub struct WaylandShortcutSession {
     connection: Connection,
     session_handle: OwnedObjectPath,
+}
+
+/*
+ * Represents one asynchronous XDG Desktop Portal Request.
+ *
+ * The Response subscription is installed during prepare(), before the
+ * portal method itself is invoked. This is critical: a fast portal may
+ * emit Request::Response immediately, and subscribing only after the
+ * method returns introduces a race.
+ */
+struct PortalRequest {
+    handle_token: String,
+    expected_path: OwnedObjectPath,
+    response_stream: MessageStream,
 }
 
 pub struct WaylandShortcutBackend {
@@ -67,6 +104,100 @@ pub struct WaylandShortcutBackend {
     activation_receiver: Option<Receiver<ActivationResult>>,
 
     registered: bool,
+}
+
+impl PortalRequest {
+    async fn prepare(connection: &Connection, token_prefix: &str) -> Result<Self, ShortcutError> {
+        let handle_token = next_token(token_prefix);
+
+        let expected_path = expected_request_path(connection, &handle_token)?;
+
+        /*
+         * Install the D-Bus match rule before invoking the portal method.
+         *
+         * This is what removes the Request::Response subscription race
+         * for standards-compliant portals using predictable request paths.
+         */
+        let response_stream = response_stream_for_path(connection, &expected_path.as_ref()).await?;
+
+        Ok(Self {
+            handle_token,
+            expected_path,
+            response_stream,
+        })
+    }
+
+    fn handle_token(&self) -> &str {
+        &self.handle_token
+    }
+
+    async fn finish(
+        self,
+        connection: &Connection,
+        returned_handle: OwnedObjectPath,
+        operation: &str,
+        timeout_duration: Duration,
+    ) -> Result<(u32, HashMap<String, OwnedValue>), ShortcutError> {
+        /*
+         * Modern/spec-compliant portals should return exactly the request
+         * path predicted from the D-Bus sender name and handle_token.
+         *
+         * Older implementations may return a different request path.
+         * In that case, establish a bounded compatibility subscription
+         * against the actual returned path.
+         *
+         * We cannot retroactively eliminate the race for a legacy portal
+         * that uses an unpredictable path and emits Response before
+         * returning that path.
+         */
+        let actual_path = returned_handle.clone();
+
+        let mut stream = if returned_handle == self.expected_path {
+            self.response_stream
+        } else {
+            response_stream_for_path(connection, &returned_handle.as_ref()).await?
+        };
+
+        let next = tokio::time::timeout(timeout_duration, stream.next()).await;
+
+        let message = match next {
+            Ok(Some(Ok(message))) => message,
+
+            Ok(Some(Err(error))) => {
+                return Err(ShortcutError::Failed(format!(
+                    "{operation} response stream failed: {error}"
+                )));
+            }
+
+            Ok(None) => {
+                return Err(ShortcutError::Failed(format!(
+                    "{operation} response stream ended unexpectedly"
+                )));
+            }
+
+            Err(_) => {
+                /*
+                 * Timeout cleanup is best-effort. A cleanup failure must
+                 * never replace the original timeout error.
+                 */
+                close_portal_request(connection, &actual_path.as_ref()).await;
+
+                return Err(ShortcutError::TimedOut(format!(
+                    "{operation} did not complete within {} seconds",
+                    timeout_duration.as_secs(),
+                )));
+            }
+        };
+
+        let (response, results): (u32, HashMap<String, OwnedValue>) =
+            message.body().deserialize().map_err(|error| {
+                ShortcutError::Failed(format!(
+                    "failed to decode {operation} portal response: {error}"
+                ))
+            })?;
+
+        Ok((response, results))
+    }
 }
 
 impl WaylandShortcutSession {
@@ -300,7 +431,7 @@ impl ShortcutBackend for WaylandShortcutBackend {
         }
 
         /*
-         * Only publish the initialized state after:
+         * Only publish initialized state after:
          *
          *   session created
          *   shortcut bound
@@ -357,7 +488,85 @@ pub async fn create_global_shortcuts_session() -> Result<WaylandShortcutSession,
         ShortcutError::Failed(format!("failed to connect to session D-Bus: {error}"))
     })?;
 
+    /*
+     * Host application identity must be registered on the SAME
+     * D-Bus connection that will subsequently use the portal.
+     *
+     * Registry support is intentionally optional. Current portal
+     * documentation warns that this interface may eventually be
+     * deprecated, so GlobalShortcuts must continue to work on
+     * systems where Registry is unavailable.
+     */
+    match register_host_application(&connection).await {
+        Ok(HostApplicationRegistration::Registered) => {
+            info!(
+                app_id = POOKIE_APPLICATION_ID,
+                "registered Pookie host application identity with portal"
+            );
+        }
+
+        Ok(HostApplicationRegistration::Unavailable) => {
+            debug!(
+                app_id = POOKIE_APPLICATION_ID,
+                "host portal Registry unavailable; continuing without explicit application identity"
+            );
+        }
+
+        Err(error) => {
+            /*
+             * Do not make GlobalShortcuts depend on Registry.
+             *
+             * Automatic portal application detection may still work,
+             * and future portal versions may remove this interface.
+             */
+            warn!(
+                app_id = POOKIE_APPLICATION_ID,
+                error = ?error,
+                "failed to register Pookie host application identity; continuing without it"
+            );
+        }
+    }
+
     create_session_with_connection(connection).await
+}
+
+async fn register_host_application(
+    connection: &Connection,
+) -> Result<HostApplicationRegistration, ShortcutError> {
+    let registry = Proxy::new(
+        connection,
+        PORTAL_DESTINATION,
+        PORTAL_PATH,
+        HOST_REGISTRY_INTERFACE,
+    )
+    .await
+    .map_err(|error| {
+        ShortcutError::Failed(format!(
+            "failed to create host portal Registry proxy: {error}"
+        ))
+    })?;
+
+    /*
+     * Registry version 1 currently defines no registration options,
+     * but the API reserves an a{sv} options dictionary.
+     */
+    let options: HashMap<&str, Value<'_>> = HashMap::new();
+
+    let result = registry
+        .call::<_, _, ()>("Register", &(POOKIE_APPLICATION_ID, options))
+        .await;
+
+    match result {
+        Ok(()) => Ok(HostApplicationRegistration::Registered),
+
+        Err(error) if is_portal_method_unavailable(&error) => {
+            Ok(HostApplicationRegistration::Unavailable)
+        }
+
+        Err(error) => Err(ShortcutError::Failed(format!(
+            "host portal Registry.Register failed for {POOKIE_APPLICATION_ID}: {error}"
+        ))),
+    }
 }
 
 async fn create_session_with_connection(
@@ -372,23 +581,45 @@ async fn create_session_with_connection(
     .await
     .map_err(|_| ShortcutError::Unavailable)?;
 
-    let handle_token = next_token("pookie_request");
+    /*
+     * Prepare the Request response subscription BEFORE CreateSession.
+     */
+    let request = PortalRequest::prepare(&connection, "pookie_request").await?;
 
     let session_token = next_token("pookie_session");
 
     let mut options: HashMap<&str, Value<'_>> = HashMap::new();
 
-    options.insert("handle_token", Value::from(handle_token.as_str()));
+    options.insert("handle_token", Value::from(request.handle_token()));
 
     options.insert("session_handle_token", Value::from(session_token.as_str()));
 
-    let request_handle: OwnedObjectPath = portal
-        .call("CreateSession", &(options,))
-        .await
-        .map_err(|error| map_portal_method_error("GlobalShortcuts CreateSession", error))?;
+    let request_handle: OwnedObjectPath = match portal.call("CreateSession", &(options,)).await {
+        Ok(handle) => handle,
 
-    let (response, mut results) =
-        wait_for_request_response(&connection, &request_handle.as_ref()).await?;
+        Err(error) => {
+            /*
+             * The predicted request object may already have been created.
+             * Closing it is best-effort and must not replace the method
+             * error.
+             */
+            close_portal_request(&connection, &request.expected_path.as_ref()).await;
+
+            return Err(map_portal_method_error(
+                "GlobalShortcuts CreateSession",
+                error,
+            ));
+        }
+    };
+
+    let (response, mut results) = request
+        .finish(
+            &connection,
+            request_handle,
+            "GlobalShortcuts CreateSession",
+            CREATE_SESSION_TIMEOUT,
+        )
+        .await?;
 
     check_portal_response("GlobalShortcuts CreateSession", response)?;
 
@@ -428,7 +659,10 @@ async fn bind_shortcuts(
     .await
     .map_err(|_| ShortcutError::Unavailable)?;
 
-    let handle_token = next_token("pookie_bind");
+    /*
+     * Prepare the Response subscription before BindShortcuts.
+     */
+    let request = PortalRequest::prepare(connection, "pookie_bind").await?;
 
     let shortcuts = clipboard_history_shortcuts(preferred_trigger);
 
@@ -436,18 +670,35 @@ async fn bind_shortcuts(
 
     let mut options: HashMap<&str, Value<'_>> = HashMap::new();
 
-    options.insert("handle_token", Value::from(handle_token.as_str()));
+    options.insert("handle_token", Value::from(request.handle_token()));
 
-    let request_handle: OwnedObjectPath = portal
+    let request_handle: OwnedObjectPath = match portal
         .call(
             "BindShortcuts",
             &(session_handle, shortcuts, parent_window, options),
         )
         .await
-        .map_err(|error| map_portal_method_error("GlobalShortcuts BindShortcuts", error))?;
+    {
+        Ok(handle) => handle,
 
-    let (response, mut results) =
-        wait_for_request_response(connection, &request_handle.as_ref()).await?;
+        Err(error) => {
+            close_portal_request(connection, &request.expected_path.as_ref()).await;
+
+            return Err(map_portal_method_error(
+                "GlobalShortcuts BindShortcuts",
+                error,
+            ));
+        }
+    };
+
+    let (response, mut results) = request
+        .finish(
+            connection,
+            request_handle,
+            "GlobalShortcuts BindShortcuts",
+            BIND_SHORTCUTS_TIMEOUT,
+        )
+        .await?;
 
     check_portal_response("GlobalShortcuts BindShortcuts", response)?;
 
@@ -632,35 +883,103 @@ fn portal_trigger(shortcut: Shortcut) -> Result<String, ShortcutError> {
     Ok(trigger)
 }
 
-async fn wait_for_request_response(
+/*
+ * Convert a D-Bus unique name into the sender component used by the
+ * XDG Desktop Portal Request object-path convention.
+ *
+ * Example:
+ *
+ *     :1.823 -> 1_823
+ */
+fn request_sender_component(unique_name: &str) -> Result<String, ShortcutError> {
+    let sender = unique_name.strip_prefix(':').ok_or_else(|| {
+        ShortcutError::Failed(format!("invalid D-Bus unique name: {unique_name}"))
+    })?;
+
+    Ok(sender.replace('.', "_"))
+}
+
+/*
+ * XDG Desktop Portal request paths are predictable from:
+ *
+ *     connection unique name + handle_token
+ *
+ * This lets us subscribe to Request::Response before invoking the
+ * portal method and therefore removes the fast-response race.
+ */
+fn expected_request_path(
     connection: &Connection,
-    request_handle: &ObjectPath<'_>,
-) -> Result<(u32, HashMap<String, OwnedValue>), ShortcutError> {
-    let proxy = Proxy::new(
+    handle_token: &str,
+) -> Result<OwnedObjectPath, ShortcutError> {
+    let unique_name = connection.unique_name().ok_or_else(|| {
+        ShortcutError::Failed("session D-Bus connection has no unique name".to_string())
+    })?;
+
+    let sender = request_sender_component(&unique_name.as_ref())?;
+
+    let path = format!("{REQUEST_PATH_PREFIX}/{sender}/{handle_token}");
+
+    OwnedObjectPath::try_from(path).map_err(|error| {
+        ShortcutError::Failed(format!("failed to construct portal request path: {error}"))
+    })
+}
+
+/*
+ * Register the Request::Response signal match directly on the D-Bus
+ * connection.
+ *
+ * This function returns only after the match rule has been installed.
+ */
+async fn response_stream_for_path(
+    connection: &Connection,
+    request_path: &ObjectPath<'_>,
+) -> Result<MessageStream, ShortcutError> {
+    let rule = MatchRule::builder()
+        .msg_type(MessageType::Signal)
+        .path(request_path.to_owned())
+        .map_err(|error| {
+            ShortcutError::Failed(format!(
+                "failed to build portal request path match: {error}"
+            ))
+        })?
+        .interface(REQUEST_INTERFACE)
+        .map_err(|error| {
+            ShortcutError::Failed(format!(
+                "failed to build portal request interface match: {error}"
+            ))
+        })?
+        .member("Response")
+        .map_err(|error| {
+            ShortcutError::Failed(format!("failed to build portal Response match: {error}"))
+        })?
+        .build();
+
+    MessageStream::for_match_rule(rule, connection, Some(1))
+        .await
+        .map_err(|error| {
+            ShortcutError::Failed(format!("failed to subscribe to portal Response: {error}"))
+        })
+}
+
+/*
+ * Abort an outstanding portal request.
+ *
+ * Cleanup is deliberately best-effort: failure to close the request
+ * must never replace the original timeout/method error.
+ */
+async fn close_portal_request(connection: &Connection, request_path: &ObjectPath<'_>) {
+    let Ok(proxy) = Proxy::new(
         connection,
         PORTAL_DESTINATION,
-        request_handle,
+        request_path,
         REQUEST_INTERFACE,
     )
     .await
-    .map_err(|error| {
-        ShortcutError::Failed(format!("failed to create portal request proxy: {error}"))
-    })?;
+    else {
+        return;
+    };
 
-    let mut stream = proxy.receive_signal("Response").await.map_err(|error| {
-        ShortcutError::Failed(format!("failed to subscribe to portal response: {error}"))
-    })?;
-
-    let message = stream.next().await.ok_or_else(|| {
-        ShortcutError::Failed("portal request ended without a response".to_string())
-    })?;
-
-    let (response, results): (u32, HashMap<String, OwnedValue>) =
-        message.body().deserialize().map_err(|error| {
-            ShortcutError::Failed(format!("failed to decode portal response: {error}"))
-        })?;
-
-    Ok((response, results))
+    let _ = proxy.call::<_, _, ()>("Close", &()).await;
 }
 
 fn check_portal_response(operation: &str, response: u32) -> Result<(), ShortcutError> {
@@ -679,13 +998,16 @@ fn check_portal_response(operation: &str, response: u32) -> Result<(), ShortcutE
     }
 }
 
-fn map_portal_method_error(operation: &str, error: zbus::Error) -> ShortcutError {
+fn is_portal_method_unavailable(error: &zbus::Error) -> bool {
     let message = error.to_string();
 
-    if message.contains("UnknownMethod")
+    message.contains("UnknownMethod")
         || message.contains("UnknownInterface")
         || message.contains("No such interface")
-    {
+}
+
+fn map_portal_method_error(operation: &str, error: zbus::Error) -> ShortcutError {
+    if is_portal_method_unavailable(&error) {
         ShortcutError::Unavailable
     } else {
         ShortcutError::Failed(format!("{operation} failed: {error}"))
@@ -693,15 +1015,30 @@ fn map_portal_method_error(operation: &str, error: zbus::Error) -> ShortcutError
 }
 
 fn next_token(prefix: &str) -> String {
-    let counter = TOKEN_COUNTER.fetch_add(1, Ordering::Relaxed);
-
-    format!("{prefix}_{}_{}", std::process::id(), counter)
+    format!("{prefix}_{}", Uuid::new_v4().simple())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::shortcut_backend::ShortcutModifiers;
+
+    #[test]
+    fn uses_stable_application_identity() {
+        assert_eq!(POOKIE_APPLICATION_ID, "io.github.riyanj220.PookiePaste",);
+
+        assert_eq!(
+            POOKIE_DESKTOP_FILE_ID,
+            "io.github.riyanj220.PookiePaste.desktop",
+        );
+
+        assert_eq!(
+            POOKIE_DESKTOP_FILE_ID
+                .strip_suffix(".desktop")
+                .expect("desktop file id should end in .desktop"),
+            POOKIE_APPLICATION_ID,
+        );
+    }
 
     #[test]
     fn converts_super_v_to_portal_trigger() {
@@ -723,6 +1060,39 @@ mod tests {
         .unwrap();
 
         assert_eq!(trigger, "<Ctrl><Alt>v");
+    }
+
+    #[test]
+    fn converts_dbus_unique_name_to_request_sender() {
+        assert_eq!(request_sender_component(":1.823").unwrap(), "1_823",);
+    }
+
+    #[test]
+    fn rejects_non_unique_dbus_name_for_request_sender() {
+        assert!(matches!(
+            request_sender_component("1.823"),
+            Err(ShortcutError::Failed(_)),
+        ));
+    }
+
+    #[test]
+    fn portal_tokens_are_object_path_safe() {
+        let token = next_token("pookie_request");
+
+        assert!(token.starts_with("pookie_request_"));
+
+        assert!(!token.contains('-'));
+
+        assert!(
+            token
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric() || character == '_')
+        );
+    }
+
+    #[test]
+    fn portal_tokens_are_unique() {
+        assert_ne!(next_token("pookie_request"), next_token("pookie_request"),);
     }
 
     #[test]

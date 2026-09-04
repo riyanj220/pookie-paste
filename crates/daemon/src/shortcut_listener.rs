@@ -45,6 +45,13 @@ impl ShortcutListener {
                         warn!("global shortcut setup was cancelled");
                     }
 
+                    ShortcutError::TimedOut(message) => {
+                        warn!(
+                            %message,
+                            "global shortcut setup timed out"
+                        );
+                    }
+
                     ShortcutError::Failed(message) => {
                         warn!(
                             %message,
