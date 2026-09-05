@@ -14,14 +14,24 @@ impl WaylandClipboard {
 
 impl ClipboardBackend for WaylandClipboard {
     fn read(&self) -> Result<String, ClipboardError> {
-        let mut clipboard = arboard::Clipboard::new()
-            .map_err(|error| ClipboardError::ReadFailed(error.to_string()))?;
+        let mut clipboard = arboard::Clipboard::new().map_err(|error| {
+            tracing::warn!("Wayland clipboard initialization failed: {:?}", error);
+            ClipboardError::ReadFailed(error.to_string())
+        })?;
 
-        let text = clipboard
-            .get_text()
-            .map_err(|error| ClipboardError::ReadFailed(error.to_string()))?;
+        match clipboard.get_text() {
+            Ok(text) => {
+                tracing::info!("Wayland clipboard read: {:?}", text);
 
-        Ok(text)
+                Ok(text)
+            }
+
+            Err(error) => {
+                tracing::warn!("Wayland clipboard read failed: {:?}", error);
+
+                Err(ClipboardError::ReadFailed(error.to_string()))
+            }
+        }
     }
 
     fn write(&self, content: &str) -> Result<(), ClipboardError> {

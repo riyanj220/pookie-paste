@@ -13,3 +13,5 @@ uuid = {
 }
 
 arboard = "3"
+
+tracing = "0.1"
