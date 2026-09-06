@@ -9,6 +9,7 @@ use tokio::sync::Mutex;
 use daemon::{
     activation_service::{ActivationResult, ClipboardActivationService},
     clipboard_service::ClipboardService,
+    clipboard_state::ClipboardState,
     focus_backend::{FocusBackend, FocusError, FocusTarget, UnavailableFocusBackend},
     focus_service::FocusService,
     paste_backend::{ClipboardOnlyPasteBackend, PasteBackend, PasteCapability, PasteError},
@@ -171,7 +172,10 @@ fn create_activation_stack(
 
     let backend_handle = backend.clone();
 
-    let clipboard_service = Arc::new(Mutex::new(ClipboardService::new(backend)));
+    let clipboard_service = Arc::new(Mutex::new(ClipboardService::new(
+        backend,
+        Arc::new(ClipboardState::default()),
+    )));
 
     let paste_backend = FakePasteBackend::direct(pasted);
 
@@ -399,7 +403,10 @@ async fn clipboard_only_activation_succeeds_without_focus_target() {
 
     let backend_handle = backend.clone();
 
-    let clipboard_service = Arc::new(Mutex::new(ClipboardService::new(backend)));
+    let clipboard_service = Arc::new(Mutex::new(ClipboardService::new(
+        backend,
+        Arc::new(ClipboardState::default()),
+    )));
 
     /*
         This represents the Wayland fallback:
@@ -493,7 +500,10 @@ async fn x11_style_focus_safe_activation_restores_focus_and_pastes() {
     let backend = FakeClipboardBackend::new("");
     let backend_handle = backend.clone();
 
-    let clipboard_service = Arc::new(Mutex::new(ClipboardService::new(backend)));
+    let clipboard_service = Arc::new(Mutex::new(ClipboardService::new(
+        backend,
+        Arc::new(ClipboardState::default()),
+    )));
 
     let pasted = Arc::new(AtomicBool::new(false));
 
@@ -563,7 +573,10 @@ async fn focus_failure_prevents_direct_paste_but_keeps_clipboard_and_promotion()
     let backend = FakeClipboardBackend::new("");
     let backend_handle = backend.clone();
 
-    let clipboard_service = Arc::new(Mutex::new(ClipboardService::new(backend)));
+    let clipboard_service = Arc::new(Mutex::new(ClipboardService::new(
+        backend,
+        Arc::new(ClipboardState::default()),
+    )));
 
     let pasted = Arc::new(AtomicBool::new(false));
 

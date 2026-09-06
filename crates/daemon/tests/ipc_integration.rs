@@ -6,6 +6,7 @@ use chrono::{Duration as ChronoDuration, Utc};
 
 use daemon::activation_service::ClipboardActivationService;
 use daemon::clipboard_service::ClipboardService;
+use daemon::clipboard_state::ClipboardState;
 use daemon::focus_backend::{FocusBackend, FocusError, FocusTarget};
 use daemon::focus_service::FocusService;
 use daemon::paste_backend::{ClipboardOnlyPasteBackend, PasteBackend, PasteCapability, PasteError};
@@ -151,8 +152,10 @@ impl TestIpcApp {
 
         let clipboard_backend = FakeClipboardBackend::new("");
 
-        let clipboard_service =
-            Arc::new(Mutex::new(ClipboardService::new(clipboard_backend.clone())));
+        let clipboard_service = Arc::new(Mutex::new(ClipboardService::new(
+            clipboard_backend.clone(),
+            Arc::new(ClipboardState::default()),
+        )));
 
         let focus_service = FocusService::new(FakeFocusBackend { target_id });
 
@@ -728,7 +731,10 @@ async fn x11_style_direct_activation_round_trips_through_ipc() {
 
     let clipboard_handle = clipboard_backend.clone();
 
-    let clipboard_service = Arc::new(Mutex::new(ClipboardService::new(clipboard_backend)));
+    let clipboard_service = Arc::new(Mutex::new(ClipboardService::new(
+        clipboard_backend,
+        Arc::new(ClipboardState::default()),
+    )));
 
     let pasted = Arc::new(AtomicBool::new(false));
 

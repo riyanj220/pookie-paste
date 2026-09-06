@@ -1,6 +1,7 @@
 pub mod activation_service;
 pub mod clipboard_backend;
 pub mod clipboard_service;
+pub mod clipboard_state;
 pub mod clipboard_watcher;
 
 pub mod focus_backend;

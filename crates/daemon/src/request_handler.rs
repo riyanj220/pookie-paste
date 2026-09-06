@@ -122,6 +122,7 @@ mod tests {
 
     use crate::{
         clipboard_service::ClipboardService,
+        clipboard_state::ClipboardState,
         focus_backend::{FocusBackend, FocusError, FocusTarget},
         focus_service::FocusService,
         paste_backend::ClipboardOnlyPasteBackend,
@@ -206,7 +207,10 @@ mod tests {
 
         let backend_handle = backend.clone();
 
-        let clipboard_service = Arc::new(Mutex::new(ClipboardService::new(backend)));
+        let clipboard_service = Arc::new(Mutex::new(ClipboardService::new(
+            backend,
+            Arc::new(ClipboardState::default()),
+        )));
 
         let focus_service = FocusService::new(FakeFocusBackend);
 
