@@ -12,8 +12,6 @@ where
 {
     backend: B,
 
-    last_content: Option<String>,
-
     clipboard_state: Arc<ClipboardState>,
 }
 
@@ -24,19 +22,8 @@ where
     pub fn new(backend: B, clipboard_state: Arc<ClipboardState>) -> Self {
         Self {
             backend,
-
-            last_content: None,
-
             clipboard_state,
         }
-    }
-
-    pub fn initialize_baseline(&mut self) -> Result<()> {
-        let content = self.backend.read()?;
-
-        self.last_content = Some(content);
-
-        Ok(())
     }
 
     pub fn read(&self) -> Result<String> {
@@ -51,38 +38,12 @@ where
         /*
          * Mark clipboard writes performed by Pookie.
          *
-         * The watcher will see this clipboard update,
-         * but daemon will ignore it once.
+         * The watcher will receive this clipboard update,
+         * but daemon will ignore this event once.
          */
         self.clipboard_state.mark_written(content.to_string());
 
-        self.last_content = Some(content.to_string());
-
         Ok(())
-    }
-
-    /*
-     * Deprecated polling path.
-     *
-     * Kept temporarily for tests and migration safety.
-     * Daemon no longer uses this.
-     */
-    pub fn check_for_change(&mut self) -> Result<Option<String>> {
-        let current = self.backend.read()?;
-
-        let changed = match &self.last_content {
-            Some(previous) => previous != &current,
-
-            None => true,
-        };
-
-        if changed {
-            self.last_content = Some(current.clone());
-
-            return Ok(Some(current));
-        }
-
-        Ok(None)
     }
 }
 
@@ -109,8 +70,11 @@ mod tests {
             }
         }
 
-        fn set_external_value(&self, value: &str) {
-            *self.value.lock().expect("fake clipboard mutex poisoned") = value.to_string();
+        fn content(&self) -> String {
+            self.value
+                .lock()
+                .expect("fake clipboard mutex poisoned")
+                .clone()
         }
     }
 
@@ -135,66 +99,37 @@ mod tests {
     }
 
     #[test]
-    fn initial_clipboard_is_not_reported_after_baseline_initialization() {
-        let backend = FakeClipboardBackend::new("already copied");
+    fn read_returns_current_clipboard_content() {
+        let backend = FakeClipboardBackend::new("hello");
 
-        let mut service = create_service(backend);
+        let service = create_service(backend);
 
-        service
-            .initialize_baseline()
-            .expect("baseline initialization failed");
+        let content = service.read().expect("clipboard read failed");
 
-        let change = service.check_for_change().expect("change check failed");
-
-        assert!(change.is_none());
+        assert_eq!(content, "hello");
     }
 
     #[test]
-    fn external_change_after_baseline_is_detected() {
-        let backend = FakeClipboardBackend::new("A");
+    fn write_updates_clipboard_content() {
+        let backend = FakeClipboardBackend::new("");
 
-        let backend_control = backend.clone();
+        let backend_handle = backend.clone();
 
         let mut service = create_service(backend);
 
-        service
-            .initialize_baseline()
-            .expect("baseline initialization failed");
+        service.write("hello").expect("clipboard write failed");
 
-        backend_control.set_external_value("B");
-
-        let change = service.check_for_change().expect("change check failed");
-
-        assert_eq!(change.as_deref(), Some("B"));
+        assert_eq!(backend_handle.content(), "hello");
     }
 
     #[test]
-    fn self_write_is_not_reported_as_new_change() {
+    fn write_marks_self_generated_clipboard_content() {
         let backend = FakeClipboardBackend::new("");
 
         let mut service = create_service(backend);
 
-        service.write("B").expect("clipboard write failed");
-
-        let change = service.check_for_change().expect("change check failed");
-
-        assert!(change.is_none());
-    }
-
-    #[test]
-    fn external_change_after_self_write_is_detected() {
-        let backend = FakeClipboardBackend::new("");
-
-        let backend_control = backend.clone();
-
-        let mut service = create_service(backend);
-
-        service.write("B").expect("clipboard write failed");
-
-        backend_control.set_external_value("C");
-
-        let change = service.check_for_change().expect("change check failed");
-
-        assert_eq!(change.as_deref(), Some("C"));
+        service
+            .write("pookie-write")
+            .expect("clipboard write failed");
     }
 }

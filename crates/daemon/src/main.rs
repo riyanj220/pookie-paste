@@ -93,193 +93,193 @@ async fn main() -> anyhow::Result<()> {
     loop {
         tokio::select! {
 
-                    event =
-                        clipboard_events.recv() =>
-                    {
+            event =
+                clipboard_events.recv() =>
+            {
 
-                        match event {
-
-
-                            Some(event) => {
+                match event {
 
 
-                                info!(
-                                    "clipboard event received: {}",
-                                    event.id
-                                );
-
-                                let text =
-                                    match &event.content {
-
-                                        pookie_clipboard::ClipboardContent::Text(text) =>
-                                            Some(text.as_str()),
+                    Some(event) => {
 
 
-                                        _ =>
-                                            None,
-                                    };
+                        info!(
+                            "clipboard event received: {}",
+                            event.id
+                        );
+
+                        let text =
+                            match &event.content {
+
+                                pookie_clipboard::ClipboardContent::Text(text) =>
+                                    Some(text.as_str()),
 
 
-                                if let Some(text) = text
-                                    && clipboard_state.is_self_write(text)
-                                {
-                                    info!(
-                                        "ignoring self-generated clipboard event"
-                                    );
-
-                                    continue;
-                                }
-
-                                let core_event =
-                                    ClipboardEvent {
-
-                                        content:
-                                            event.content,
-
-                                        created_at:
-                                            event.created_at,
-                                    };
+                                _ =>
+                                    None,
+                            };
 
 
+                        if let Some(text) = text
+                            && clipboard_state.is_self_write(text)
+                        {
+                            info!(
+                                "ignoring self-generated clipboard event"
+                            );
 
-                                if let Some(item) =
-                                    processor.process(
-                                        core_event
-                                    )
-                                {
+                            continue;
+                        }
 
-                                    info!(
-                                        "Clipboard item created: {:?}",
-                                        item.id
-                                    );
+                        let core_event =
+                            ClipboardEvent {
+
+                                content:
+                                    event.content,
+
+                                created_at:
+                                    event.created_at,
+                            };
 
 
 
-                                    history_service
-                                        .save(item)
-                                        .await?;
+                        if let Some(item) =
+                            processor.process(
+                                core_event
+                            )
+                        {
+
+                            info!(
+                                "Clipboard item created: {:?}",
+                                item.id
+                            );
 
 
 
-                                    info!(
-                                        "Clipboard item saved"
-                                    );
-                                }
-                            }
+                            history_service
+                                .save(item)
+                                .await?;
 
 
 
-                            None => {
-
-                                warn!(
-                                    "clipboard watcher stopped"
-                                );
-
-
-                                break;
-                            }
+                            info!(
+                                "Clipboard item saved"
+                            );
                         }
                     }
 
 
 
+                    None => {
 
-
-                    _ =
-                        shutdown::wait_for_shutdown() =>
-                    {
-
-                        info!(
-                            "Shutdown signal received"
+                        warn!(
+                            "clipboard watcher stopped"
                         );
 
 
                         break;
                     }
+                }
+            }
 
 
 
 
 
-                    result =
-                        &mut ipc_future =>
-                    {
+            _ =
+                shutdown::wait_for_shutdown() =>
+            {
 
-                        match result {
+                info!(
+                    "Shutdown signal received"
+                );
 
 
-                            Ok(()) => {
+                break;
+            }
 
-                                return Err(
-                                    anyhow::anyhow!(
-                                        "IPC server stopped unexpectedly"
-                                    )
-                                );
-                            }
+
+
+
+
+            result =
+                &mut ipc_future =>
+            {
+
+                match result {
+
+
+                    Ok(()) => {
+
+                        return Err(
+                            anyhow::anyhow!(
+                                "IPC server stopped unexpectedly"
+                            )
+                        );
+                    }
+
+
+                    Err(error) => {
+
+                        return Err(error);
+                    }
+                }
+            }
+
+
+
+
+
+            activation =
+                shortcut_listener.activated(),
+                if shortcut_available =>
+            {
+
+
+                match activation {
+
+
+                    Some(()) => {
+
+
+                        info!(
+                            "global shortcut activated"
+                        );
+
+
+
+                        match ui_launcher.launch() {
+
+
+                            Ok(
+                                UiLaunchOutcome::Launched
+                            )
+                            |
+                            Ok(
+                                UiLaunchOutcome::AlreadyRunning
+                            ) => {}
+
 
 
                             Err(error) => {
 
-                                return Err(error);
+                                warn!(
+                                    error = ?error,
+                                    "failed to launch Pookie UI"
+                                );
                             }
                         }
                     }
 
 
 
+                    None => {
 
-
-                    activation =
-                        shortcut_listener.activated(),
-                        if shortcut_available =>
-                    {
-
-
-                        match activation {
-
-
-                            Some(()) => {
-
-
-                                info!(
-                                    "global shortcut activated"
-                                );
-
-
-
-                                match ui_launcher.launch() {
-
-
-                                    Ok(
-                                        UiLaunchOutcome::Launched
-                                    )
-                                    |
-                                    Ok(
-                                        UiLaunchOutcome::AlreadyRunning
-                                    ) => {}
-
-
-
-                                    Err(error) => {
-
-                                        warn!(
-                                            error = ?error,
-                                            "failed to launch Pookie UI"
-                                        );
-                                    }
-                                }
-                            }
-
-
-
-                            None => {
-
-                                shortcut_available =
-                                    false;
-                            }
-                        }
+                        shortcut_available =
+                            false;
                     }
                 }
+            }
+        }
     }
 
     info!("Pookie daemon stopped");
