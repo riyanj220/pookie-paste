@@ -24,3 +24,18 @@ tokio = {
         "rt"
     ]
 }
+
+wayland-client = "0.31"
+
+wayland-protocols = "0.32"
+
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+
+futures-util = "0.3"
+
+nix = {
+    version = "0.29",
+    features = [
+        "fs"
+    ]
+}

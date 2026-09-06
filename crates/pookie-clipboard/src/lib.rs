@@ -17,15 +17,18 @@ mod content;
 mod error;
 mod event;
 mod watcher;
+mod wayland_state;
 
 pub mod wayland;
+pub mod wayland_watcher;
 pub mod x11;
-
 pub mod x11_watcher;
 
 pub use backend::ClipboardBackend;
 pub use content::ClipboardContent;
 pub use error::ClipboardError;
 pub use event::ClipboardEvent;
+
 pub use watcher::ClipboardWatcher;
+pub use wayland_watcher::WaylandClipboardWatcher;
 pub use x11_watcher::X11ClipboardWatcher;
