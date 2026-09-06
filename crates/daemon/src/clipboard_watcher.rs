@@ -1,8 +1,10 @@
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 
 use tokio::sync::mpsc::Receiver;
 
-use pookie_clipboard::{ClipboardEvent, ClipboardWatcher, X11ClipboardWatcher};
+use pookie_clipboard::{
+    ClipboardEvent, ClipboardWatcher, WaylandClipboardWatcher, X11ClipboardWatcher,
+};
 
 use crate::clipboard_backend::PlatformClipboard;
 
@@ -15,7 +17,11 @@ pub fn start(backend: &PlatformClipboard) -> Result<Receiver<ClipboardEvent>> {
         }
 
         PlatformClipboard::Wayland(_) => {
-            Err(anyhow!("Wayland clipboard watcher is not implemented yet"))
+            let mut watcher = WaylandClipboardWatcher::new().map_err(|error| {
+                anyhow::anyhow!("failed initializing Wayland clipboard watcher: {}", error)
+            })?;
+
+            Ok(watcher.start())
         }
     }
 }
