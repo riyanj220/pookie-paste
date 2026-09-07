@@ -19,20 +19,33 @@ impl ClipboardWatcher for WaylandClipboardWatcher {
     fn start(&mut self) -> Receiver<ClipboardEvent> {
         println!("WAYLAND WATCHER START CALLED");
 
-        tracing::info!("KDE Wayland watcher start called");
-
         let (sender, receiver) = mpsc::channel(100);
 
         std::thread::spawn(move || {
             println!("WAYLAND WATCHER THREAD STARTED");
 
-            let connection = Connection::connect_to_env().expect("failed connecting to Wayland");
+            let connection = match Connection::connect_to_env() {
+                Ok(connection) => connection,
+
+                Err(error) => {
+                    eprintln!("FAILED CONNECTING TO WAYLAND: {:?}", error);
+
+                    return;
+                }
+            };
 
             println!("CONNECTED TO WAYLAND COMPOSITOR");
 
             let (globals, mut event_queue) =
-                registry_queue_init::<ExtDataControlState>(&connection)
-                    .expect("failed initializing registry");
+                match registry_queue_init::<ExtDataControlState>(&connection) {
+                    Ok(value) => value,
+
+                    Err(error) => {
+                        eprintln!("FAILED INITIALIZING WAYLAND REGISTRY: {:?}", error);
+
+                        return;
+                    }
+                };
 
             println!("WAYLAND GLOBALS DISCOVERED");
 
@@ -40,15 +53,29 @@ impl ClipboardWatcher for WaylandClipboardWatcher {
 
             println!("WAYLAND QUEUE HANDLE CREATED");
 
-            let manager = globals
+            let manager = match globals
                 .bind::<ext_data_control_manager_v1::ExtDataControlManagerV1, _, _>(&qh, 1..=1, ())
-                .expect("missing ext_data_control_manager_v1");
+            {
+                Ok(manager) => manager,
+
+                Err(error) => {
+                    eprintln!("FAILED BINDING EXT DATA CONTROL MANAGER {:?}", error);
+
+                    return;
+                }
+            };
 
             println!("EXT DATA CONTROL MANAGER BOUND");
 
-            let seat = globals
-                .bind::<wl_seat::WlSeat, _, _>(&qh, 1..=9, ())
-                .expect("missing wl_seat");
+            let seat = match globals.bind::<wl_seat::WlSeat, _, _>(&qh, 1..=9, ()) {
+                Ok(seat) => seat,
+
+                Err(error) => {
+                    eprintln!("FAILED BINDING WL_SEAT {:?}", error);
+
+                    return;
+                }
+            };
 
             println!("WL SEAT BOUND");
 
@@ -74,22 +101,44 @@ impl ClipboardWatcher for WaylandClipboardWatcher {
 
             println!("STATE CREATED");
 
-            connection.roundtrip().expect("wayland roundtrip failed");
+            /*
+             * Force KDE to send initial clipboard state.
+             */
+            match connection.roundtrip() {
+                Ok(_) => {
+                    println!("WAYLAND ROUNDTRIP COMPLETE");
+                }
 
-            println!("WAYLAND ROUNDTRIP COMPLETE");
+                Err(error) => {
+                    eprintln!("WAYLAND ROUNDTRIP FAILED {:?}", error);
+
+                    return;
+                }
+            }
+
+            let mut event_counter = 0u64;
 
             println!("ENTERING WAYLAND DISPATCH LOOP");
 
             loop {
+                if let Err(error) = connection.flush() {
+                    eprintln!("WAYLAND FLUSH FAILED {:?}", error);
+                }
+
+                tracing::info!("waiting for Wayland events");
+
                 match event_queue.blocking_dispatch(&mut state) {
-                    Ok(_) => {
-                        tracing::info!("Wayland dispatch cycle completed");
+                    Ok(dispatched) => {
+                        event_counter += dispatched as u64;
+
+                        println!(
+                            "WAYLAND DISPATCH COMPLETE events={} total={}",
+                            dispatched, event_counter
+                        );
                     }
 
                     Err(error) => {
-                        println!("WAYLAND DISPATCH FAILED: {:?}", error);
-
-                        tracing::error!("Wayland dispatch failed: {:?}", error);
+                        eprintln!("WAYLAND DISPATCH FAILED {:?}", error);
 
                         break;
                     }
