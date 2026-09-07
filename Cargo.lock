@@ -2594,9 +2594,11 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+ "wayland-backend",
  "wayland-client",
  "wayland-protocols",
  "wayland-protocols-wlr",
+ "wayland-scanner",
 ]
 
 [[package]]

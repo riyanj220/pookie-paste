@@ -6,7 +6,7 @@ use wayland_protocols_wlr::data_control::v1::client::zwlr_data_control_manager_v
 
 use crate::{ClipboardEvent, ClipboardWatcher};
 
-use crate::wayland_state::WaylandState;
+use super::wlr_data_control::WaylandState;
 
 pub struct WaylandClipboardWatcher;
 
