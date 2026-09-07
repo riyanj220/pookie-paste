@@ -92,8 +92,6 @@ impl ClipboardWatcher for WaylandClipboardWatcher {
 
                 current_offer: None,
 
-                offers: Vec::new(),
-
                 offered_mime_types: Vec::new(),
 
                 sender,

@@ -7,7 +7,7 @@ use std::{
 use tokio::sync::mpsc::Sender;
 
 use wayland_client::{
-    Connection, Dispatch, QueueHandle,
+    Connection, Dispatch, Proxy, QueueHandle,
     globals::GlobalListContents,
     protocol::{wl_registry, wl_seat},
 };
@@ -33,8 +33,6 @@ pub struct ExtDataControlState {
 
     pub current_offer: Option<ext_data_control_offer_v1::ExtDataControlOfferV1>,
 
-    pub offers: Vec<ext_data_control_offer_v1::ExtDataControlOfferV1>,
-
     pub offered_mime_types: Vec<String>,
 
     pub sender: Sender<ClipboardEvent>,
@@ -54,30 +52,15 @@ impl ExtDataControlState {
         Ok(contents)
     }
 
-    fn try_request_text(&mut self) {
-        if self.clipboard_requested {
-            tracing::debug!("clipboard already requested");
-            return;
-        }
-
-        if self.current_offer.is_none() {
-            tracing::debug!("cannot request clipboard: no selection");
-
-            return;
-        }
-
-        if self.offered_mime_types.is_empty() {
-            tracing::debug!("cannot request clipboard: no mime types");
-
-            return;
-        }
-
-        self.request_text();
-    }
-
     fn request_text(&mut self) {
+        if self.clipboard_requested {
+            println!("clipboard request already sent");
+
+            return;
+        }
+
         let Some(offer) = self.current_offer.as_ref() else {
-            tracing::warn!("request_text called without offer");
+            println!("request_text: no current offer");
 
             return;
         };
@@ -87,16 +70,19 @@ impl ExtDataControlState {
             .iter()
             .find(|mime| SUPPORTED_MIME_TYPES.contains(&mime.as_str()))
         else {
-            tracing::warn!("unsupported mime types {:?}", self.offered_mime_types);
+            println!(
+                "request_text: no supported mime {:?}",
+                self.offered_mime_types
+            );
 
             return;
         };
 
-        tracing::info!("requesting clipboard data mime={}", mime);
+        println!("REQUESTING CLIPBOARD mime={}", mime);
 
         self.clipboard_requested = true;
 
-        let (read_fd, write_fd) = nix::unistd::pipe().expect("failed creating clipboard pipe");
+        let (read_fd, write_fd) = nix::unistd::pipe().expect("failed creating pipe");
 
         offer.receive(mime.clone(), write_fd.as_fd());
 
@@ -104,7 +90,7 @@ impl ExtDataControlState {
 
         match Self::read_clipboard_fd(read_fd) {
             Ok(value) => {
-                tracing::info!("clipboard received length={}", value.len());
+                println!("CLIPBOARD TEXT RECEIVED length={}", value.len());
 
                 let event = ClipboardEvent {
                     id: uuid::Uuid::new_v4().to_string(),
@@ -115,24 +101,14 @@ impl ExtDataControlState {
                 };
 
                 if let Err(error) = self.sender.blocking_send(event) {
-                    tracing::error!("failed sending clipboard event {}", error);
+                    println!("FAILED SENDING EVENT {}", error);
                 }
             }
 
             Err(error) => {
-                tracing::error!("clipboard read failed {}", error);
+                println!("FAILED READING FD {}", error);
             }
         }
-    }
-
-    fn dump_state(&self) {
-        tracing::info!(
-            "KDE state offers={} mime={:?} selected={} requested={}",
-            self.offers.len(),
-            self.offered_mime_types,
-            self.current_offer.is_some(),
-            self.clipboard_requested
-        );
     }
 }
 
@@ -186,27 +162,21 @@ impl Dispatch<ext_data_control_device_v1::ExtDataControlDeviceV1, ()> for ExtDat
 
         _qh: &QueueHandle<Self>,
     ) {
-        tracing::info!("KDE device event {:?}", event);
+        println!("DEVICE EVENT {:?}", event);
 
         match event {
             ext_data_control_device_v1::Event::DataOffer { id } => {
-                tracing::info!("KDE data offer received");
-
-                state.offers.push(id);
+                println!("DATA OFFER CREATED id={:?}", id.id());
             }
 
             ext_data_control_device_v1::Event::Selection { id } => {
-                tracing::info!("KDE selection changed");
+                println!("SELECTION EVENT offer_exists={}", id.is_some());
 
                 state.current_offer = id;
 
                 state.offered_mime_types.clear();
 
                 state.clipboard_requested = false;
-
-                state.dump_state();
-
-                state.try_request_text();
             }
 
             _ => {}
@@ -215,19 +185,12 @@ impl Dispatch<ext_data_control_device_v1::ExtDataControlDeviceV1, ()> for ExtDat
 
     fn event_created_child(
         opcode: u16,
+
         qhandle: &QueueHandle<Self>,
     ) -> std::sync::Arc<dyn wayland_client::backend::ObjectData> {
-        match opcode {
-            0 => {
-                tracing::info!("creating KDE offer object");
+        println!("EVENT CREATED CHILD opcode={}", opcode);
 
-                qhandle.make_data::<ext_data_control_offer_v1::ExtDataControlOfferV1, ()>(())
-            }
-
-            _ => {
-                panic!("unknown KDE child opcode {}", opcode);
-            }
-        }
+        qhandle.make_data::<ext_data_control_offer_v1::ExtDataControlOfferV1, ()>(())
     }
 }
 
@@ -245,18 +208,16 @@ impl Dispatch<ext_data_control_offer_v1::ExtDataControlOfferV1, ()> for ExtDataC
 
         _qh: &QueueHandle<Self>,
     ) {
-        tracing::info!("KDE offer event {:?}", event);
+        println!("OFFER EVENT {:?}", event);
 
         match event {
             ext_data_control_offer_v1::Event::Offer { mime_type } => {
-                tracing::info!("KDE MIME {}", mime_type);
-
                 if SUPPORTED_MIME_TYPES.contains(&mime_type.as_str()) {
+                    println!("SUPPORTED MIME RECEIVED {}", mime_type);
+
                     state.offered_mime_types.push(mime_type);
 
-                    state.dump_state();
-
-                    state.try_request_text();
+                    state.request_text();
                 }
             }
         }
