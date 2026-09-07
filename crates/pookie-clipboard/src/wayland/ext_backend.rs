@@ -50,6 +50,8 @@ pub fn start(connection: Connection, globals: GlobalList, sender: Sender<Clipboa
         sender,
 
         clipboard_requested: false,
+
+        has_selection: false,
     };
 
     println!("KDE CLIPBOARD STATE CREATED");

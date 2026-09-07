@@ -1,3 +1,7 @@
+mod clipboard_reader;
+
+mod mime;
+
 mod watcher;
 
 mod protocol;

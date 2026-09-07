@@ -1,8 +1,4 @@
-use std::{
-    fs::File,
-    io::Read,
-    os::fd::{AsFd, OwnedFd},
-};
+use std::os::fd::AsFd;
 
 use tokio::sync::mpsc::Sender;
 
@@ -14,15 +10,13 @@ use wayland_client::{
 
 use crate::ClipboardEvent;
 
-use super::ext_protocol::client::{
-    ext_data_control_device_v1, ext_data_control_manager_v1, ext_data_control_offer_v1,
+use super::{
+    clipboard_reader,
+    ext_protocol::client::{
+        ext_data_control_device_v1, ext_data_control_manager_v1, ext_data_control_offer_v1,
+    },
+    mime,
 };
-
-const SUPPORTED_MIME_TYPES: &[&str] = &[
-    "text/plain;charset=utf-8",
-    "text/plain;charset=UTF-8",
-    "text/plain",
-];
 
 pub struct ExtDataControlState {
     pub manager: ext_data_control_manager_v1::ExtDataControlManagerV1,
@@ -38,51 +32,39 @@ pub struct ExtDataControlState {
     pub sender: Sender<ClipboardEvent>,
 
     pub clipboard_requested: bool,
+
+    pub has_selection: bool,
 }
 
 impl ExtDataControlState {
-    fn read_clipboard_fd(fd: OwnedFd) -> Result<String, String> {
-        let mut file = File::from(fd);
-
-        let mut contents = String::new();
-
-        file.read_to_string(&mut contents)
-            .map_err(|error| format!("failed reading clipboard fd: {error}"))?;
-
-        Ok(contents)
-    }
-
     fn request_text(&mut self) {
         if self.clipboard_requested {
-            println!("clipboard request already sent");
-
+            tracing::debug!("clipboard request already sent");
             return;
         }
 
         let Some(offer) = self.current_offer.as_ref() else {
-            println!("request_text: no current offer");
-
+            tracing::debug!("request_text: no current offer");
             return;
         };
 
-        let Some(mime) = self
-            .offered_mime_types
-            .iter()
-            .find(|mime| SUPPORTED_MIME_TYPES.contains(&mime.as_str()))
-        else {
-            println!(
-                "request_text: unsupported mime {:?}",
-                self.offered_mime_types
+        let Some(mime) = mime::preferred_text_mime(&self.offered_mime_types) else {
+            tracing::debug!(
+                offered = ?self.offered_mime_types,
+                "no supported clipboard mime found"
             );
 
             return;
         };
 
-        println!("REQUESTING CLIPBOARD mime={}", mime);
+        tracing::debug!(
+            mime = %mime,
+            "requesting clipboard data"
+        );
 
         let (read_fd, write_fd) = nix::unistd::pipe().expect("failed creating clipboard pipe");
 
-        offer.receive(mime.clone(), write_fd.as_fd());
+        offer.receive(mime.to_string(), write_fd.as_fd());
 
         drop(write_fd);
 
@@ -90,36 +72,18 @@ impl ExtDataControlState {
 
         let sender = self.sender.clone();
 
-        std::thread::spawn(move || {
-            println!("clipboard reader thread started");
+        std::thread::spawn(move || match clipboard_reader::read_clipboard_fd(read_fd) {
+            Ok(value) => {
+                tracing::debug!(length = value.len(), "clipboard text received");
 
-            match Self::read_clipboard_fd(read_fd) {
-                Ok(value) => {
-                    println!("CLIPBOARD TEXT RECEIVED length={}", value.len());
+                clipboard_reader::send_clipboard_event(sender, value);
+            }
 
-                    // Ignore empty clipboard payloads
-                    if value.is_empty() {
-                        println!("ignoring empty clipboard payload");
-
-                        return;
-                    }
-
-                    let event = ClipboardEvent {
-                        id: uuid::Uuid::new_v4().to_string(),
-
-                        content: crate::ClipboardContent::Text(value),
-
-                        created_at: chrono::Utc::now(),
-                    };
-
-                    if let Err(error) = sender.blocking_send(event) {
-                        println!("FAILED SENDING EVENT {}", error);
-                    }
-                }
-
-                Err(error) => {
-                    println!("FAILED READING FD {}", error);
-                }
+            Err(error) => {
+                tracing::error!(
+                    error = %error,
+                    "failed reading clipboard fd"
+                );
             }
         });
     }
@@ -175,29 +139,27 @@ impl Dispatch<ext_data_control_device_v1::ExtDataControlDeviceV1, ()> for ExtDat
 
         _qh: &QueueHandle<Self>,
     ) {
-        println!("DEVICE EVENT {:?}", event);
+        tracing::debug!(
+            event = ?event,
+            "clipboard device event"
+        );
 
         match event {
             ext_data_control_device_v1::Event::DataOffer { id } => {
-                println!("DATA OFFER CREATED id={:?}", id.id());
+                tracing::debug!(
+                    id = ?id.id(),
+                                "clipboard data offer created"
+                );
             }
 
             ext_data_control_device_v1::Event::Selection { id } => {
-                println!("SELECTION EVENT offer_exists={}", id.is_some());
+                tracing::debug!(exists = id.is_some(), "clipboard selection changed");
 
                 state.current_offer = id;
 
-                state.clipboard_requested = false;
+                state.has_selection = true;
 
-                /*
-                 * Important:
-                 *
-                 * The offer object becomes valid here.
-                 * MIME events may already have arrived.
-                 *
-                 * If MIME types are available,
-                 * request clipboard now.
-                 */
+                state.clipboard_requested = false;
 
                 if !state.offered_mime_types.is_empty() {
                     state.request_text();
@@ -209,12 +171,10 @@ impl Dispatch<ext_data_control_device_v1::ExtDataControlDeviceV1, ()> for ExtDat
     }
 
     fn event_created_child(
-        opcode: u16,
+        _opcode: u16,
 
         qhandle: &QueueHandle<Self>,
     ) -> std::sync::Arc<dyn wayland_client::backend::ObjectData> {
-        println!("EVENT CREATED CHILD opcode={}", opcode);
-
         qhandle.make_data::<ext_data_control_offer_v1::ExtDataControlOfferV1, ()>(())
     }
 }
@@ -233,20 +193,28 @@ impl Dispatch<ext_data_control_offer_v1::ExtDataControlOfferV1, ()> for ExtDataC
 
         _qh: &QueueHandle<Self>,
     ) {
-        println!("OFFER EVENT {:?}", event);
-
         match event {
             ext_data_control_offer_v1::Event::Offer { mime_type } => {
-                if SUPPORTED_MIME_TYPES.contains(&mime_type.as_str()) {
-                    println!("SUPPORTED MIME RECEIVED {}", mime_type);
+                if mime::is_supported_text_mime(&mime_type) {
+                    tracing::debug!(
+                        mime = %mime_type,
+                        "supported clipboard mime received"
+                    );
 
-                    state.offered_mime_types.push(mime_type);
+                    if !state.offered_mime_types.contains(&mime_type) {
+                        state.offered_mime_types.push(mime_type);
+                    }
 
                     /*
-                     * Do NOT request here.
+                     * Handles:
                      *
-                     * Selection event owns the lifecycle.
+                     * Offer -> Selection
+                     *
+                     * ordering.
                      */
+                    if state.has_selection {
+                        state.request_text();
+                    }
                 }
             }
         }
