@@ -56,20 +56,6 @@ impl ClipboardWatcher for WaylandClipboardWatcher {
 
             println!("EXT DATA CONTROL DEVICE CREATED");
 
-            /*
-             * Force compositor roundtrip.
-             *
-             * The ext_data_control protocol sends
-             * the initial selection after the device
-             * is created.
-             *
-             * Without flushing, KDE may not send
-             * the initial events immediately.
-             */
-            connection.roundtrip().expect("wayland roundtrip failed");
-
-            println!("WAYLAND ROUNDTRIP COMPLETE");
-
             let mut state = ExtDataControlState {
                 manager,
 
@@ -86,12 +72,18 @@ impl ClipboardWatcher for WaylandClipboardWatcher {
                 sender,
             };
 
+            println!("STATE CREATED");
+
+            connection.roundtrip().expect("wayland roundtrip failed");
+
+            println!("WAYLAND ROUNDTRIP COMPLETE");
+
             println!("ENTERING WAYLAND DISPATCH LOOP");
 
             loop {
                 match event_queue.blocking_dispatch(&mut state) {
                     Ok(_) => {
-                        println!("WAYLAND EVENT DISPATCHED");
+                        tracing::info!("Wayland dispatch cycle completed");
                     }
 
                     Err(error) => {
