@@ -6,11 +6,8 @@ use std::{
 
 use tokio::sync::mpsc::Sender;
 
-use std::sync::Arc;
-
 use wayland_client::{
     Connection, Dispatch, QueueHandle,
-    backend::ObjectData,
     globals::GlobalListContents,
     protocol::{wl_registry, wl_seat},
 };
@@ -32,6 +29,8 @@ pub struct ExtDataControlState {
 
     pub current_offer: Option<ext_data_control_offer_v1::ExtDataControlOfferV1>,
 
+    pub offers: Vec<ext_data_control_offer_v1::ExtDataControlOfferV1>,
+
     pub offered_mime_types: Vec<String>,
 
     pub sender: Sender<ClipboardEvent>,
@@ -51,6 +50,7 @@ impl ExtDataControlState {
 
     fn request_text(&mut self) {
         let Some(offer) = self.current_offer.as_ref() else {
+            tracing::warn!("no current KDE clipboard offer");
             return;
         };
 
@@ -62,8 +62,11 @@ impl ExtDataControlState {
         } else if self.offered_mime_types.contains(&"text/plain".to_string()) {
             "text/plain"
         } else {
+            tracing::warn!("no supported KDE MIME type");
             return;
         };
+
+        tracing::info!("requesting KDE clipboard data mime={}", mime);
 
         let (read_fd, write_fd) = nix::unistd::pipe().expect("failed creating clipboard pipe");
 
@@ -71,6 +74,8 @@ impl ExtDataControlState {
 
         match Self::read_clipboard_fd(read_fd) {
             Ok(value) => {
+                tracing::info!("KDE clipboard text received length={}", value.len());
+
                 let event = ClipboardEvent {
                     id: uuid::Uuid::new_v4().to_string(),
 
@@ -80,12 +85,12 @@ impl ExtDataControlState {
                 };
 
                 if let Err(error) = self.sender.blocking_send(event) {
-                    tracing::error!("failed sending clipboard event: {}", error);
+                    tracing::error!("failed sending clipboard event {}", error);
                 }
             }
 
             Err(error) => {
-                tracing::error!("clipboard read failed: {}", error);
+                tracing::error!("clipboard read failed {}", error);
             }
         }
     }
@@ -94,15 +99,10 @@ impl ExtDataControlState {
 impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for ExtDataControlState {
     fn event(
         _state: &mut Self,
-
         _registry: &wl_registry::WlRegistry,
-
         _event: wl_registry::Event,
-
         _data: &GlobalListContents,
-
         _conn: &Connection,
-
         _qh: &QueueHandle<Self>,
     ) {
     }
@@ -111,15 +111,10 @@ impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for ExtDataControlSta
 impl Dispatch<wl_seat::WlSeat, ()> for ExtDataControlState {
     fn event(
         _state: &mut Self,
-
         _proxy: &wl_seat::WlSeat,
-
         _event: wl_seat::Event,
-
         _data: &(),
-
         _conn: &Connection,
-
         _qh: &QueueHandle<Self>,
     ) {
     }
@@ -128,15 +123,10 @@ impl Dispatch<wl_seat::WlSeat, ()> for ExtDataControlState {
 impl Dispatch<ext_data_control_manager_v1::ExtDataControlManagerV1, ()> for ExtDataControlState {
     fn event(
         _state: &mut Self,
-
         _proxy: &ext_data_control_manager_v1::ExtDataControlManagerV1,
-
         _event: ext_data_control_manager_v1::Event,
-
         _data: &(),
-
         _conn: &Connection,
-
         _qh: &QueueHandle<Self>,
     ) {
     }
@@ -145,39 +135,36 @@ impl Dispatch<ext_data_control_manager_v1::ExtDataControlManagerV1, ()> for ExtD
 impl Dispatch<ext_data_control_device_v1::ExtDataControlDeviceV1, ()> for ExtDataControlState {
     fn event(
         state: &mut Self,
-
         _proxy: &ext_data_control_device_v1::ExtDataControlDeviceV1,
-
         event: ext_data_control_device_v1::Event,
-
         _data: &(),
-
         _conn: &Connection,
-
         _qh: &QueueHandle<Self>,
     ) {
         match event {
+            ext_data_control_device_v1::Event::DataOffer { id } => {
+                tracing::info!("KDE clipboard data offer created");
+
+                state.offers.push(id);
+            }
+
             ext_data_control_device_v1::Event::Selection { id } => {
+                tracing::info!("KDE clipboard selection changed");
+
                 state.current_offer = id;
 
                 state.offered_mime_types.clear();
 
-                tracing::info!("KDE Wayland clipboard selection changed");
+                if let Some(offer) = state.current_offer.as_ref() {
+                    tracing::info!("KDE active offer found");
+
+                    if let Some(index) = state.offers.iter().position(|item| item == offer) {
+                        tracing::info!("KDE offer index {}", index);
+                    }
+                }
             }
 
             _ => {}
-        }
-    }
-
-    fn event_created_child(opcode: u16, qhandle: &QueueHandle<Self>) -> Arc<dyn ObjectData> {
-        match opcode {
-            0 => qhandle.make_data::<ext_data_control_offer_v1::ExtDataControlOfferV1, ()>(()),
-
-            _ => {
-                tracing::warn!("unknown ext_data_control_device child opcode: {}", opcode);
-
-                qhandle.make_data::<ext_data_control_offer_v1::ExtDataControlOfferV1, ()>(())
-            }
         }
     }
 }
@@ -185,25 +172,22 @@ impl Dispatch<ext_data_control_device_v1::ExtDataControlDeviceV1, ()> for ExtDat
 impl Dispatch<ext_data_control_offer_v1::ExtDataControlOfferV1, ()> for ExtDataControlState {
     fn event(
         state: &mut Self,
-
         _proxy: &ext_data_control_offer_v1::ExtDataControlOfferV1,
-
         event: ext_data_control_offer_v1::Event,
-
         _data: &(),
-
         _conn: &Connection,
-
         _qh: &QueueHandle<Self>,
     ) {
         match event {
             ext_data_control_offer_v1::Event::Offer { mime_type } => {
-                if SUPPORTED_MIME_TYPES.contains(&mime_type.as_str()) {
-                    tracing::info!("KDE MIME offered: {}", mime_type);
+                tracing::info!("KDE MIME offered {}", mime_type);
 
+                if SUPPORTED_MIME_TYPES.contains(&mime_type.as_str()) {
                     state.offered_mime_types.push(mime_type);
 
-                    state.request_text();
+                    if state.current_offer.is_some() {
+                        state.request_text();
+                    }
                 }
             }
         }
