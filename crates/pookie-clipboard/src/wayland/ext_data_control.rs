@@ -55,11 +55,13 @@ impl ExtDataControlState {
     fn request_text(&mut self) {
         if self.clipboard_requested {
             println!("clipboard request already sent");
+
             return;
         }
 
         let Some(offer) = self.current_offer.as_ref() else {
             println!("request_text: no current offer");
+
             return;
         };
 
@@ -80,36 +82,27 @@ impl ExtDataControlState {
 
         let (read_fd, write_fd) = nix::unistd::pipe().expect("failed creating clipboard pipe");
 
-        /*
-         * KDE compositor writes clipboard data
-         * into this fd asynchronously.
-         */
         offer.receive(mime.clone(), write_fd.as_fd());
 
-        /*
-         * Close our write side.
-         *
-         * Compositor owns the writer now.
-         */
         drop(write_fd);
 
         self.clipboard_requested = true;
 
         let sender = self.sender.clone();
 
-        /*
-         * Read clipboard asynchronously.
-         *
-         * IMPORTANT:
-         *
-         * Do not block the Wayland event loop.
-         */
         std::thread::spawn(move || {
             println!("clipboard reader thread started");
 
             match Self::read_clipboard_fd(read_fd) {
                 Ok(value) => {
                     println!("CLIPBOARD TEXT RECEIVED length={}", value.len());
+
+                    // Ignore empty clipboard payloads
+                    if value.is_empty() {
+                        println!("ignoring empty clipboard payload");
+
+                        return;
+                    }
 
                     let event = ClipboardEvent {
                         id: uuid::Uuid::new_v4().to_string(),
@@ -197,6 +190,20 @@ impl Dispatch<ext_data_control_device_v1::ExtDataControlDeviceV1, ()> for ExtDat
                 state.offered_mime_types.clear();
 
                 state.clipboard_requested = false;
+
+                /*
+                 * Important:
+                 *
+                 * The offer object becomes valid here.
+                 * MIME events may already have arrived.
+                 *
+                 * If MIME types are available,
+                 * request clipboard now.
+                 */
+
+                if !state.offered_mime_types.is_empty() {
+                    state.request_text();
+                }
             }
 
             _ => {}
@@ -237,7 +244,11 @@ impl Dispatch<ext_data_control_offer_v1::ExtDataControlOfferV1, ()> for ExtDataC
 
                     state.offered_mime_types.push(mime_type);
 
-                    state.request_text();
+                    /*
+                     * Do NOT request here.
+                     *
+                     * Selection event owns the lifecycle.
+                     */
                 }
             }
         }
