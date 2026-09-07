@@ -141,6 +141,7 @@ impl Dispatch<ext_data_control_device_v1::ExtDataControlDeviceV1, ()> for ExtDat
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
     ) {
+        tracing::info!("KDE device event received: {:?}", event);
         match event {
             ext_data_control_device_v1::Event::DataOffer { id } => {
                 tracing::info!("KDE clipboard data offer created");
@@ -192,6 +193,8 @@ impl Dispatch<ext_data_control_offer_v1::ExtDataControlOfferV1, ()> for ExtDataC
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
     ) {
+        tracing::info!("KDE offer event received: {:?}", event);
+
         match event {
             ext_data_control_offer_v1::Event::Offer { mime_type } => {
                 tracing::info!("KDE MIME offered {}", mime_type);

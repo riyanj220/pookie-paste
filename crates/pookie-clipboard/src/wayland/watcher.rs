@@ -38,6 +38,8 @@ impl ClipboardWatcher for WaylandClipboardWatcher {
 
             let device = manager.get_data_device(&seat, &qh, ());
 
+            tracing::info!("KDE data device created");
+
             let mut state = ExtDataControlState {
                 manager,
 
@@ -53,6 +55,8 @@ impl ClipboardWatcher for WaylandClipboardWatcher {
 
                 sender,
             };
+
+            tracing::info!("KDE clipboard event loop started");
 
             loop {
                 if let Err(error) = event_queue.blocking_dispatch(&mut state) {
