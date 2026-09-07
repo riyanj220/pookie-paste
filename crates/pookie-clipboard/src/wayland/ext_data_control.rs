@@ -187,8 +187,6 @@ impl Dispatch<ext_data_control_device_v1::ExtDataControlDeviceV1, ()> for ExtDat
 
                 state.current_offer = id;
 
-                state.offered_mime_types.clear();
-
                 state.clipboard_requested = false;
 
                 /*
