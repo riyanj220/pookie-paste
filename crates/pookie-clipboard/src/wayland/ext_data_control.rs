@@ -18,7 +18,11 @@ use super::ext_protocol::client::{
     ext_data_control_device_v1, ext_data_control_manager_v1, ext_data_control_offer_v1,
 };
 
-const SUPPORTED_MIME_TYPES: &[&str] = &["text/plain;charset=utf-8", "text/plain"];
+const SUPPORTED_MIME_TYPES: &[&str] = &[
+    "text/plain;charset=utf-8",
+    "text/plain;charset=UTF-8",
+    "text/plain",
+];
 
 pub struct ExtDataControlState {
     pub manager: ext_data_control_manager_v1::ExtDataControlManagerV1,
@@ -50,31 +54,34 @@ impl ExtDataControlState {
 
     fn request_text(&mut self) {
         let Some(offer) = self.current_offer.as_ref() else {
-            tracing::warn!("no current KDE clipboard offer");
+            tracing::warn!("cannot request clipboard text: no active offer");
+
             return;
         };
 
-        let mime = if self
+        let mime = self
             .offered_mime_types
-            .contains(&"text/plain;charset=utf-8".to_string())
-        {
-            "text/plain;charset=utf-8"
-        } else if self.offered_mime_types.contains(&"text/plain".to_string()) {
-            "text/plain"
-        } else {
-            tracing::warn!("no supported KDE MIME type");
+            .iter()
+            .find(|mime| SUPPORTED_MIME_TYPES.contains(&mime.as_str()));
+
+        let Some(mime) = mime else {
+            tracing::warn!(
+                "cannot request clipboard text: unsupported MIME list {:?}",
+                self.offered_mime_types
+            );
+
             return;
         };
 
-        tracing::info!("requesting KDE clipboard data mime={}", mime);
+        tracing::info!("requesting clipboard data mime={}", mime);
 
         let (read_fd, write_fd) = nix::unistd::pipe().expect("failed creating clipboard pipe");
 
-        offer.receive(mime.to_string(), write_fd.as_fd());
+        offer.receive(mime.clone(), write_fd.as_fd());
 
         match Self::read_clipboard_fd(read_fd) {
             Ok(value) => {
-                tracing::info!("KDE clipboard text received length={}", value.len());
+                tracing::info!("clipboard text received length={}", value.len());
 
                 let event = ClipboardEvent {
                     id: uuid::Uuid::new_v4().to_string(),
@@ -93,6 +100,15 @@ impl ExtDataControlState {
                 tracing::error!("clipboard read failed {}", error);
             }
         }
+    }
+
+    fn dump_state(&self) {
+        tracing::info!(
+            "clipboard state offers={} mime_types={:?} has_selection={}",
+            self.offers.len(),
+            self.offered_mime_types,
+            self.current_offer.is_some()
+        );
     }
 }
 
@@ -141,10 +157,11 @@ impl Dispatch<ext_data_control_device_v1::ExtDataControlDeviceV1, ()> for ExtDat
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
     ) {
-        tracing::info!("KDE device event received: {:?}", event);
+        tracing::info!("KDE device event received {:?}", event);
+
         match event {
             ext_data_control_device_v1::Event::DataOffer { id } => {
-                tracing::info!("KDE clipboard data offer created");
+                tracing::info!("new KDE clipboard offer created");
 
                 state.offers.push(id);
             }
@@ -156,8 +173,10 @@ impl Dispatch<ext_data_control_device_v1::ExtDataControlDeviceV1, ()> for ExtDat
 
                 state.offered_mime_types.clear();
 
-                if state.current_offer.is_some() {
-                    tracing::info!("KDE current clipboard offer available");
+                state.dump_state();
+
+                if state.current_offer.is_some() && !state.offered_mime_types.is_empty() {
+                    state.request_text();
                 }
             }
 
@@ -170,15 +189,14 @@ impl Dispatch<ext_data_control_device_v1::ExtDataControlDeviceV1, ()> for ExtDat
         qhandle: &QueueHandle<Self>,
     ) -> std::sync::Arc<dyn wayland_client::backend::ObjectData> {
         match opcode {
-            // ext_data_control_device_v1.data_offer
             0 => {
-                tracing::info!("KDE creating ext_data_control_offer child");
+                tracing::info!("creating KDE clipboard offer object");
 
                 qhandle.make_data::<ext_data_control_offer_v1::ExtDataControlOfferV1, ()>(())
             }
 
             _ => {
-                panic!("Unknown ext_data_control_device child opcode {}", opcode);
+                panic!("unknown ext_data_control_device child opcode {}", opcode);
             }
         }
     }
@@ -193,7 +211,7 @@ impl Dispatch<ext_data_control_offer_v1::ExtDataControlOfferV1, ()> for ExtDataC
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
     ) {
-        tracing::info!("KDE offer event received: {:?}", event);
+        tracing::info!("KDE offer event received {:?}", event);
 
         match event {
             ext_data_control_offer_v1::Event::Offer { mime_type } => {
@@ -202,9 +220,7 @@ impl Dispatch<ext_data_control_offer_v1::ExtDataControlOfferV1, ()> for ExtDataC
                 if SUPPORTED_MIME_TYPES.contains(&mime_type.as_str()) {
                     state.offered_mime_types.push(mime_type);
 
-                    if state.current_offer.is_some() {
-                        state.request_text();
-                    }
+                    state.dump_state();
                 }
             }
         }
