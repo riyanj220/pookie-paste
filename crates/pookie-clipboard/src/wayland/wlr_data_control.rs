@@ -6,11 +6,11 @@ use std::{
 
 use tokio::sync::mpsc::Sender;
 
-use wayland_client::{Connection, Dispatch, QueueHandle};
-
-use wayland_client::protocol::{wl_registry, wl_seat};
-
-use wayland_client::globals::GlobalListContents;
+use wayland_client::{
+    Connection, Dispatch, QueueHandle,
+    globals::GlobalListContents,
+    protocol::{wl_registry, wl_seat},
+};
 
 use wayland_protocols_wlr::data_control::v1::client::{
     zwlr_data_control_device_v1, zwlr_data_control_manager_v1, zwlr_data_control_offer_v1,
@@ -66,9 +66,9 @@ impl WaylandState {
 
         offer.receive(mime.to_string(), write_fd.as_fd());
 
-        let text = Self::read_clipboard_fd(read_fd);
+        drop(write_fd);
 
-        match text {
+        match Self::read_clipboard_fd(read_fd) {
             Ok(value) => {
                 let event = ClipboardEvent {
                     id: uuid::Uuid::new_v4().to_string(),
@@ -93,15 +93,10 @@ impl WaylandState {
 impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for WaylandState {
     fn event(
         _state: &mut Self,
-
         _registry: &wl_registry::WlRegistry,
-
         _event: wl_registry::Event,
-
         _data: &GlobalListContents,
-
         _conn: &Connection,
-
         _qh: &QueueHandle<Self>,
     ) {
     }
@@ -110,15 +105,10 @@ impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for WaylandState {
 impl Dispatch<zwlr_data_control_manager_v1::ZwlrDataControlManagerV1, ()> for WaylandState {
     fn event(
         _state: &mut Self,
-
         _proxy: &zwlr_data_control_manager_v1::ZwlrDataControlManagerV1,
-
         _event: zwlr_data_control_manager_v1::Event,
-
         _data: &(),
-
         _conn: &Connection,
-
         _qh: &QueueHandle<Self>,
     ) {
     }
@@ -127,15 +117,10 @@ impl Dispatch<zwlr_data_control_manager_v1::ZwlrDataControlManagerV1, ()> for Wa
 impl Dispatch<wl_seat::WlSeat, ()> for WaylandState {
     fn event(
         _state: &mut Self,
-
         _proxy: &wl_seat::WlSeat,
-
         _event: wl_seat::Event,
-
         _data: &(),
-
         _conn: &Connection,
-
         _qh: &QueueHandle<Self>,
     ) {
     }
@@ -144,15 +129,10 @@ impl Dispatch<wl_seat::WlSeat, ()> for WaylandState {
 impl Dispatch<zwlr_data_control_device_v1::ZwlrDataControlDeviceV1, ()> for WaylandState {
     fn event(
         state: &mut Self,
-
         _proxy: &zwlr_data_control_device_v1::ZwlrDataControlDeviceV1,
-
         event: zwlr_data_control_device_v1::Event,
-
         _data: &(),
-
         _conn: &Connection,
-
         _qh: &QueueHandle<Self>,
     ) {
         match event {
@@ -172,15 +152,10 @@ impl Dispatch<zwlr_data_control_device_v1::ZwlrDataControlDeviceV1, ()> for Wayl
 impl Dispatch<zwlr_data_control_offer_v1::ZwlrDataControlOfferV1, ()> for WaylandState {
     fn event(
         state: &mut Self,
-
         _proxy: &zwlr_data_control_offer_v1::ZwlrDataControlOfferV1,
-
         event: zwlr_data_control_offer_v1::Event,
-
         _data: &(),
-
         _conn: &Connection,
-
         _qh: &QueueHandle<Self>,
     ) {
         if let zwlr_data_control_offer_v1::Event::Offer { mime_type } = event {

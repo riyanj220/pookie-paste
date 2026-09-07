@@ -4,7 +4,7 @@ use wayland_client::{Connection, globals::registry_queue_init};
 
 use crate::{ClipboardEvent, ClipboardWatcher};
 
-use super::{ext_backend, registry::WaylandRegistryState};
+use super::{ext_backend, registry::WaylandRegistryState, wlr_backend};
 
 pub struct WaylandClipboardWatcher;
 
@@ -76,7 +76,7 @@ impl ClipboardWatcher for WaylandClipboardWatcher {
             if registry_state.has_wlr_data_control {
                 println!("SELECTING WLR data_control_v1");
 
-                // WLR backend wiring will be added after KDE path is stable.
+                wlr_backend::start(connection, globals, sender);
 
                 return;
             }

@@ -6,6 +6,8 @@ mod registry;
 
 mod ext_backend;
 
+mod wlr_backend;
+
 mod wlr_data_control;
 
 mod ext_protocol;
