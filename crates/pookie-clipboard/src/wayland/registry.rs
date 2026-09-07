@@ -10,48 +10,23 @@ pub struct WaylandRegistryState {
 }
 
 impl WaylandRegistryState {
-    pub fn log_state(&self) {
-        println!(
-            "WAYLAND REGISTRY RESULT ext={} wlr={}",
-            self.has_ext_data_control, self.has_wlr_data_control
-        );
-    }
-}
-
-impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for WaylandRegistryState {
-    fn event(
-        state: &mut Self,
-
-        _registry: &wl_registry::WlRegistry,
-
-        event: wl_registry::Event,
-
-        _data: &GlobalListContents,
-
-        _conn: &Connection,
-
-        _qh: &QueueHandle<Self>,
-    ) {
-        match event {
-            wl_registry::Event::Global {
-                interface,
-                version,
-                name,
-            } => {
+    pub fn detect(&mut self, globals: &GlobalListContents) {
+        globals.with_list(|list| {
+            for global in list {
                 println!(
-                    "WAYLAND GLOBAL FOUND interface={} version={} name={}",
-                    interface, version, name
+                    "WAYLAND GLOBAL {} version {}",
+                    global.interface, global.version
                 );
 
-                match interface.as_str() {
+                match global.interface.as_str() {
                     "ext_data_control_manager_v1" => {
-                        state.has_ext_data_control = true;
+                        self.has_ext_data_control = true;
 
                         println!("FOUND KDE ext_data_control_manager_v1");
                     }
 
                     "zwlr_data_control_manager_v1" => {
-                        state.has_wlr_data_control = true;
+                        self.has_wlr_data_control = true;
 
                         println!("FOUND WLR zwlr_data_control_manager_v1");
                     }
@@ -59,8 +34,23 @@ impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for WaylandRegistrySt
                     _ => {}
                 }
             }
+        });
+    }
+}
 
-            _ => {}
-        }
+impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for WaylandRegistryState {
+    fn event(
+        _state: &mut Self,
+
+        _registry: &wl_registry::WlRegistry,
+
+        _event: wl_registry::Event,
+
+        _data: &GlobalListContents,
+
+        _conn: &Connection,
+
+        _qh: &QueueHandle<Self>,
+    ) {
     }
 }

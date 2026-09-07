@@ -44,6 +44,8 @@ impl ClipboardWatcher for WaylandClipboardWatcher {
                     }
                 };
 
+            println!("WAYLAND REGISTRY INITIALIZED");
+
             let mut registry_state = WaylandRegistryState::default();
 
             match event_queue.roundtrip(&mut registry_state) {
@@ -56,7 +58,7 @@ impl ClipboardWatcher for WaylandClipboardWatcher {
                 }
             }
 
-            registry_state.log_state();
+            registry_state.detect(globals.contents());
 
             println!(
                 "WAYLAND PROTOCOLS ext={} wlr={}",
@@ -74,7 +76,7 @@ impl ClipboardWatcher for WaylandClipboardWatcher {
             if registry_state.has_wlr_data_control {
                 println!("SELECTING WLR data_control_v1");
 
-                // WLR backend wiring will be added next.
+                // WLR backend wiring will be added after KDE path is stable.
 
                 return;
             }
