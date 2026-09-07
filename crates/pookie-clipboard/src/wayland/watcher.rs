@@ -2,11 +2,10 @@ use tokio::sync::mpsc::{self, Receiver};
 
 use wayland_client::{Connection, globals::registry_queue_init, protocol::wl_seat};
 
-use wayland_protocols_wlr::data_control::v1::client::zwlr_data_control_manager_v1;
-
 use crate::{ClipboardEvent, ClipboardWatcher};
 
-use super::wlr_data_control::WaylandState;
+use super::ext_data_control::ExtDataControlState;
+use super::ext_protocol::client::ext_data_control_manager_v1;
 
 pub struct WaylandClipboardWatcher;
 
@@ -23,18 +22,15 @@ impl ClipboardWatcher for WaylandClipboardWatcher {
         std::thread::spawn(move || {
             let connection = Connection::connect_to_env().expect("failed connecting to Wayland");
 
-            let (globals, mut event_queue) = registry_queue_init::<WaylandState>(&connection)
-                .expect("failed initializing registry");
+            let (globals, mut event_queue) =
+                registry_queue_init::<ExtDataControlState>(&connection)
+                    .expect("failed initializing registry");
 
             let qh = event_queue.handle();
 
             let manager = globals
-                .bind::<zwlr_data_control_manager_v1::ZwlrDataControlManagerV1, _, _>(
-                    &qh,
-                    1..=2,
-                    (),
-                )
-                .expect("missing zwlr_data_control_manager_v1");
+                .bind::<ext_data_control_manager_v1::ExtDataControlManagerV1, _, _>(&qh, 1..=1, ())
+                .expect("missing ext_data_control_manager_v1");
 
             let seat = globals
                 .bind::<wl_seat::WlSeat, _, _>(&qh, 1..=9, ())
@@ -42,10 +38,10 @@ impl ClipboardWatcher for WaylandClipboardWatcher {
 
             let device = manager.get_data_device(&seat, &qh, ());
 
-            let mut state = WaylandState {
-                device,
-
+            let mut state = ExtDataControlState {
                 manager,
+
+                device,
 
                 seat,
 
