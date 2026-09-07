@@ -155,16 +155,30 @@ impl Dispatch<ext_data_control_device_v1::ExtDataControlDeviceV1, ()> for ExtDat
 
                 state.offered_mime_types.clear();
 
-                if let Some(offer) = state.current_offer.as_ref() {
-                    tracing::info!("KDE active offer found");
-
-                    if let Some(index) = state.offers.iter().position(|item| item == offer) {
-                        tracing::info!("KDE offer index {}", index);
-                    }
+                if state.current_offer.is_some() {
+                    tracing::info!("KDE current clipboard offer available");
                 }
             }
 
             _ => {}
+        }
+    }
+
+    fn event_created_child(
+        opcode: u16,
+        qhandle: &QueueHandle<Self>,
+    ) -> std::sync::Arc<dyn wayland_client::backend::ObjectData> {
+        match opcode {
+            // ext_data_control_device_v1.data_offer
+            0 => {
+                tracing::info!("KDE creating ext_data_control_offer child");
+
+                qhandle.make_data::<ext_data_control_offer_v1::ExtDataControlOfferV1, ()>(())
+            }
+
+            _ => {
+                panic!("Unknown ext_data_control_device child opcode {}", opcode);
+            }
         }
     }
 }
