@@ -16,7 +16,7 @@ pub fn start(backend: &PlatformClipboard) -> Result<Receiver<ClipboardEvent>> {
             Ok(watcher.start())
         }
 
-        PlatformClipboard::Wayland(_) => {
+        PlatformClipboard::Wayland => {
             let mut watcher = WaylandClipboardWatcher::new().map_err(|error| {
                 anyhow::anyhow!("failed initializing Wayland clipboard watcher: {}", error)
             })?;
