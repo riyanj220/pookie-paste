@@ -2,6 +2,8 @@ mod watcher;
 
 mod protocol;
 
+mod registry;
+
 mod wlr_data_control;
 
 mod ext_protocol;
