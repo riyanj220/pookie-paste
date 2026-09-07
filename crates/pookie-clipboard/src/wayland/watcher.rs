@@ -56,6 +56,8 @@ impl ClipboardWatcher for WaylandClipboardWatcher {
                 }
             }
 
+            registry_state.log_state();
+
             println!(
                 "WAYLAND PROTOCOLS ext={} wlr={}",
                 registry_state.has_ext_data_control, registry_state.has_wlr_data_control

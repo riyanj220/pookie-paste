@@ -9,6 +9,15 @@ pub struct WaylandRegistryState {
     pub has_wlr_data_control: bool,
 }
 
+impl WaylandRegistryState {
+    pub fn log_state(&self) {
+        println!(
+            "WAYLAND REGISTRY RESULT ext={} wlr={}",
+            self.has_ext_data_control, self.has_wlr_data_control
+        );
+    }
+}
+
 impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for WaylandRegistryState {
     fn event(
         state: &mut Self,
