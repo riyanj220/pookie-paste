@@ -12,33 +12,46 @@ pub struct WaylandRegistryState {
 impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for WaylandRegistryState {
     fn event(
         state: &mut Self,
+
         _registry: &wl_registry::WlRegistry,
+
         event: wl_registry::Event,
+
         _data: &GlobalListContents,
+
         _conn: &Connection,
+
         _qh: &QueueHandle<Self>,
     ) {
-        if let wl_registry::Event::Global {
-            interface,
-            version: _,
-            name: _,
-        } = event
-        {
-            match interface.as_str() {
-                "ext_data_control_manager_v1" => {
-                    state.has_ext_data_control = true;
+        match event {
+            wl_registry::Event::Global {
+                interface,
+                version,
+                name,
+            } => {
+                println!(
+                    "WAYLAND GLOBAL FOUND interface={} version={} name={}",
+                    interface, version, name
+                );
 
-                    tracing::info!("Wayland registry: ext_data_control_manager_v1 available");
+                match interface.as_str() {
+                    "ext_data_control_manager_v1" => {
+                        state.has_ext_data_control = true;
+
+                        println!("FOUND KDE ext_data_control_manager_v1");
+                    }
+
+                    "zwlr_data_control_manager_v1" => {
+                        state.has_wlr_data_control = true;
+
+                        println!("FOUND WLR zwlr_data_control_manager_v1");
+                    }
+
+                    _ => {}
                 }
-
-                "zwlr_data_control_manager_v1" => {
-                    state.has_wlr_data_control = true;
-
-                    tracing::info!("Wayland registry: zwlr_data_control_manager_v1 available");
-                }
-
-                _ => {}
             }
+
+            _ => {}
         }
     }
 }
