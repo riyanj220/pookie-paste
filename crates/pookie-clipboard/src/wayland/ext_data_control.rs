@@ -6,8 +6,11 @@ use std::{
 
 use tokio::sync::mpsc::Sender;
 
+use std::sync::Arc;
+
 use wayland_client::{
     Connection, Dispatch, QueueHandle,
+    backend::ObjectData,
     globals::GlobalListContents,
     protocol::{wl_registry, wl_seat},
 };
@@ -48,7 +51,6 @@ impl ExtDataControlState {
 
     fn request_text(&mut self) {
         let Some(offer) = self.current_offer.as_ref() else {
-            tracing::warn!("no clipboard offer available");
             return;
         };
 
@@ -60,7 +62,6 @@ impl ExtDataControlState {
         } else if self.offered_mime_types.contains(&"text/plain".to_string()) {
             "text/plain"
         } else {
-            tracing::warn!("no supported text MIME type found");
             return;
         };
 
@@ -68,12 +69,8 @@ impl ExtDataControlState {
 
         offer.receive(mime.to_string(), write_fd.as_fd());
 
-        let text = Self::read_clipboard_fd(read_fd);
-
-        match text {
+        match Self::read_clipboard_fd(read_fd) {
             Ok(value) => {
-                tracing::info!("KDE clipboard text received");
-
                 let event = ClipboardEvent {
                     id: uuid::Uuid::new_v4().to_string(),
 
@@ -169,6 +166,18 @@ impl Dispatch<ext_data_control_device_v1::ExtDataControlDeviceV1, ()> for ExtDat
             }
 
             _ => {}
+        }
+    }
+
+    fn event_created_child(opcode: u16, qhandle: &QueueHandle<Self>) -> Arc<dyn ObjectData> {
+        match opcode {
+            0 => qhandle.make_data::<ext_data_control_offer_v1::ExtDataControlOfferV1, ()>(()),
+
+            _ => {
+                tracing::warn!("unknown ext_data_control_device child opcode: {}", opcode);
+
+                qhandle.make_data::<ext_data_control_offer_v1::ExtDataControlOfferV1, ()>(())
+            }
         }
     }
 }
