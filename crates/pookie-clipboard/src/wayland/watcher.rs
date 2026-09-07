@@ -97,8 +97,6 @@ impl ClipboardWatcher for WaylandClipboardWatcher {
                 sender,
 
                 clipboard_requested: false,
-
-                pending_read_fd: None,
             };
 
             println!("STATE CREATED");
@@ -126,8 +124,6 @@ impl ClipboardWatcher for WaylandClipboardWatcher {
                 if let Err(error) = connection.flush() {
                     eprintln!("WAYLAND FLUSH FAILED {:?}", error);
                 }
-
-                tracing::info!("waiting for Wayland events");
 
                 match event_queue.blocking_dispatch(&mut state) {
                     Ok(dispatched) => {

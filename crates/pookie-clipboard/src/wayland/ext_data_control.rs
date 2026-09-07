@@ -37,11 +37,6 @@ pub struct ExtDataControlState {
 
     pub sender: Sender<ClipboardEvent>,
 
-    //
-    // KDE transfer state
-    //
-    pub pending_read_fd: Option<OwnedFd>,
-
     pub clipboard_requested: bool,
 }
 
@@ -65,7 +60,6 @@ impl ExtDataControlState {
 
         let Some(offer) = self.current_offer.as_ref() else {
             println!("request_text: no current offer");
-
             return;
         };
 
@@ -84,45 +78,57 @@ impl ExtDataControlState {
 
         println!("REQUESTING CLIPBOARD mime={}", mime);
 
-        let (read_fd, write_fd) = nix::unistd::pipe().expect("failed creating pipe");
+        let (read_fd, write_fd) = nix::unistd::pipe().expect("failed creating clipboard pipe");
 
+        /*
+         * KDE compositor writes clipboard data
+         * into this fd asynchronously.
+         */
         offer.receive(mime.clone(), write_fd.as_fd());
 
+        /*
+         * Close our write side.
+         *
+         * Compositor owns the writer now.
+         */
         drop(write_fd);
-
-        self.pending_read_fd = Some(read_fd);
 
         self.clipboard_requested = true;
 
-        println!("clipboard fd stored waiting for compositor");
-    }
+        let sender = self.sender.clone();
 
-    fn try_read_pending_fd(&mut self) {
-        let Some(fd) = self.pending_read_fd.take() else {
-            return;
-        };
+        /*
+         * Read clipboard asynchronously.
+         *
+         * IMPORTANT:
+         *
+         * Do not block the Wayland event loop.
+         */
+        std::thread::spawn(move || {
+            println!("clipboard reader thread started");
 
-        match Self::read_clipboard_fd(fd) {
-            Ok(value) => {
-                println!("CLIPBOARD TEXT RECEIVED length={}", value.len());
+            match Self::read_clipboard_fd(read_fd) {
+                Ok(value) => {
+                    println!("CLIPBOARD TEXT RECEIVED length={}", value.len());
 
-                let event = ClipboardEvent {
-                    id: uuid::Uuid::new_v4().to_string(),
+                    let event = ClipboardEvent {
+                        id: uuid::Uuid::new_v4().to_string(),
 
-                    content: crate::ClipboardContent::Text(value),
+                        content: crate::ClipboardContent::Text(value),
 
-                    created_at: chrono::Utc::now(),
-                };
+                        created_at: chrono::Utc::now(),
+                    };
 
-                if let Err(error) = self.sender.blocking_send(event) {
-                    println!("FAILED SENDING EVENT {}", error);
+                    if let Err(error) = sender.blocking_send(event) {
+                        println!("FAILED SENDING EVENT {}", error);
+                    }
+                }
+
+                Err(error) => {
+                    println!("FAILED READING FD {}", error);
                 }
             }
-
-            Err(error) => {
-                println!("FAILED READING FD {}", error);
-            }
-        }
+        });
     }
 }
 
@@ -165,10 +171,15 @@ impl Dispatch<ext_data_control_manager_v1::ExtDataControlManagerV1, ()> for ExtD
 impl Dispatch<ext_data_control_device_v1::ExtDataControlDeviceV1, ()> for ExtDataControlState {
     fn event(
         state: &mut Self,
+
         _proxy: &ext_data_control_device_v1::ExtDataControlDeviceV1,
+
         event: ext_data_control_device_v1::Event,
+
         _data: &(),
+
         _conn: &Connection,
+
         _qh: &QueueHandle<Self>,
     ) {
         println!("DEVICE EVENT {:?}", event);
@@ -194,6 +205,7 @@ impl Dispatch<ext_data_control_device_v1::ExtDataControlDeviceV1, ()> for ExtDat
 
     fn event_created_child(
         opcode: u16,
+
         qhandle: &QueueHandle<Self>,
     ) -> std::sync::Arc<dyn wayland_client::backend::ObjectData> {
         println!("EVENT CREATED CHILD opcode={}", opcode);
@@ -205,10 +217,15 @@ impl Dispatch<ext_data_control_device_v1::ExtDataControlDeviceV1, ()> for ExtDat
 impl Dispatch<ext_data_control_offer_v1::ExtDataControlOfferV1, ()> for ExtDataControlState {
     fn event(
         state: &mut Self,
+
         _proxy: &ext_data_control_offer_v1::ExtDataControlOfferV1,
+
         event: ext_data_control_offer_v1::Event,
+
         _data: &(),
+
         _conn: &Connection,
+
         _qh: &QueueHandle<Self>,
     ) {
         println!("OFFER EVENT {:?}", event);
