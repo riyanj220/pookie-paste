@@ -17,20 +17,41 @@ impl WaylandClipboardWatcher {
 
 impl ClipboardWatcher for WaylandClipboardWatcher {
     fn start(&mut self) -> Receiver<ClipboardEvent> {
+        tracing::info!("KDE Wayland watcher start called");
+
         let (sender, receiver) = mpsc::channel(100);
 
         std::thread::spawn(move || {
+            tracing::info!("KDE Wayland watcher thread started");
+
             let connection = Connection::connect_to_env().expect("failed connecting to Wayland");
+
+            tracing::info!("Connected to Wayland compositor");
 
             let (globals, mut event_queue) =
                 registry_queue_init::<ExtDataControlState>(&connection)
                     .expect("failed initializing registry");
 
+            tracing::info!("Wayland globals discovered");
+
             let qh = event_queue.handle();
 
-            let manager = globals
+            tracing::info!("Wayland queue handle created");
+
+            let manager = match globals
                 .bind::<ext_data_control_manager_v1::ExtDataControlManagerV1, _, _>(&qh, 1..=1, ())
-                .expect("missing ext_data_control_manager_v1");
+            {
+                Ok(manager) => {
+                    tracing::info!("ext_data_control_manager_v1 bound");
+                    manager
+                }
+
+                Err(error) => {
+                    tracing::error!("failed binding ext_data_control_manager_v1: {:?}", error);
+
+                    return;
+                }
+            };
 
             let seat = globals
                 .bind::<wl_seat::WlSeat, _, _>(&qh, 1..=9, ())
@@ -38,7 +59,7 @@ impl ClipboardWatcher for WaylandClipboardWatcher {
 
             let device = manager.get_data_device(&seat, &qh, ());
 
-            tracing::info!("KDE data device created");
+            tracing::info!("ext_data_control_device_v1 created");
 
             let mut state = ExtDataControlState {
                 manager,
@@ -56,7 +77,7 @@ impl ClipboardWatcher for WaylandClipboardWatcher {
                 sender,
             };
 
-            tracing::info!("KDE clipboard event loop started");
+            tracing::info!("entering KDE Wayland dispatch loop");
 
             loop {
                 if let Err(error) = event_queue.blocking_dispatch(&mut state) {
