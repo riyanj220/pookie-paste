@@ -37,11 +37,11 @@ pub fn start(connection: Connection, globals: GlobalList, sender: Sender<Clipboa
     tracing::debug!("ext data control device created");
 
     let mut state = ExtDataControlState {
-        manager,
+        _manager: manager,
 
-        device,
+        _device: device,
 
-        seat,
+        _seat: seat,
 
         current_offer: None,
 

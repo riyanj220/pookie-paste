@@ -19,11 +19,11 @@ use super::{
 };
 
 pub struct ExtDataControlState {
-    pub manager: ext_data_control_manager_v1::ExtDataControlManagerV1,
+    pub _manager: ext_data_control_manager_v1::ExtDataControlManagerV1,
 
-    pub device: ext_data_control_device_v1::ExtDataControlDeviceV1,
+    pub _device: ext_data_control_device_v1::ExtDataControlDeviceV1,
 
-    pub seat: wl_seat::WlSeat,
+    pub _seat: wl_seat::WlSeat,
 
     pub current_offer: Option<ext_data_control_offer_v1::ExtDataControlOfferV1>,
 

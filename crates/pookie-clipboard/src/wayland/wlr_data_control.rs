@@ -17,11 +17,11 @@ use crate::ClipboardEvent;
 use super::{clipboard_reader, mime};
 
 pub struct WaylandState {
-    pub device: zwlr_data_control_device_v1::ZwlrDataControlDeviceV1,
+    pub _device: zwlr_data_control_device_v1::ZwlrDataControlDeviceV1,
 
-    pub manager: zwlr_data_control_manager_v1::ZwlrDataControlManagerV1,
+    pub _manager: zwlr_data_control_manager_v1::ZwlrDataControlManagerV1,
 
-    pub seat: wl_seat::WlSeat,
+    pub _seat: wl_seat::WlSeat,
 
     pub current_offer: Option<zwlr_data_control_offer_v1::ZwlrDataControlOfferV1>,
 

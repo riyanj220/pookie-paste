@@ -22,13 +22,7 @@ pub fn send_clipboard_event(sender: Sender<ClipboardEvent>, value: String) {
         return;
     }
 
-    let event = ClipboardEvent {
-        id: uuid::Uuid::new_v4().to_string(),
-
-        content: ClipboardContent::Text(value),
-
-        created_at: chrono::Utc::now(),
-    };
+    let event = ClipboardEvent::new(ClipboardContent::Text(value));
 
     if let Err(error) = sender.blocking_send(event) {
         tracing::error!(

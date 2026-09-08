@@ -37,11 +37,11 @@ pub fn start(connection: Connection, globals: GlobalList, sender: Sender<Clipboa
     tracing::debug!("wlr data control device created");
 
     let mut state = WaylandState {
-        device,
+        _device: device,
 
-        manager,
+        _manager: manager,
 
-        seat,
+        _seat: seat,
 
         current_offer: None,
 
