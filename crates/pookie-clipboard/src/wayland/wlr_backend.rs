@@ -42,6 +42,9 @@ pub fn start(connection: Connection, globals: GlobalList, sender: Sender<Clipboa
         offered_mime_types: Vec::new(),
 
         sender,
+        clipboard_requested: false,
+
+        has_selection: false,
     };
 
     if let Err(error) = connection.roundtrip() {
