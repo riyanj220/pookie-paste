@@ -13,10 +13,10 @@ use super::{
 };
 
 pub fn start(connection: Connection, globals: GlobalList, sender: Sender<ClipboardEvent>) {
-    println!("STARTING KDE EXT DATA CONTROL BACKEND");
+    tracing::info!("starting ext data control backend");
 
     let (_, mut event_queue) = registry_queue_init::<ExtDataControlState>(&connection)
-        .expect("failed creating KDE event queue");
+        .expect("failed creating EXT event queue");
 
     let qh = event_queue.handle();
 
@@ -24,17 +24,17 @@ pub fn start(connection: Connection, globals: GlobalList, sender: Sender<Clipboa
         .bind::<ext_data_control_manager_v1::ExtDataControlManagerV1, _, _>(&qh, 1..=1, ())
         .expect("missing ext_data_control_manager_v1");
 
-    println!("EXT DATA CONTROL MANAGER BOUND");
+    tracing::debug!("ext data control manager bound");
 
     let seat = globals
         .bind::<wl_seat::WlSeat, _, _>(&qh, 1..=9, ())
         .expect("missing wl_seat");
 
-    println!("WL SEAT BOUND");
+    tracing::debug!("wayland seat bound");
 
     let device = manager.get_data_device(&seat, &qh, ());
 
-    println!("EXT DATA CONTROL DEVICE CREATED");
+    tracing::debug!("ext data control device created");
 
     let mut state = ExtDataControlState {
         manager,
@@ -54,29 +54,32 @@ pub fn start(connection: Connection, globals: GlobalList, sender: Sender<Clipboa
         has_selection: false,
     };
 
-    println!("KDE CLIPBOARD STATE CREATED");
-
     if let Err(error) = connection.roundtrip() {
-        eprintln!("WAYLAND ROUNDTRIP FAILED {:?}", error);
+        tracing::error!(
+            error = ?error,
+            "wayland EXT roundtrip failed"
+        );
 
         return;
     }
 
-    println!("KDE WAYLAND ROUNDTRIP COMPLETE");
+    tracing::debug!("ext data control backend initialized");
 
     loop {
         if let Err(error) = connection.flush() {
-            eprintln!("WAYLAND FLUSH FAILED {:?}", error);
+            tracing::error!(
+                error = ?error,
+                "wayland flush failed"
+            );
         }
 
-        match event_queue.blocking_dispatch(&mut state) {
-            Ok(_) => {}
+        if let Err(error) = event_queue.blocking_dispatch(&mut state) {
+            tracing::error!(
+                error = ?error,
+                "EXT wayland dispatch failed"
+            );
 
-            Err(error) => {
-                eprintln!("KDE WAYLAND DISPATCH FAILED {:?}", error);
-
-                break;
-            }
+            break;
         }
     }
 }

@@ -19,54 +19,59 @@ impl ClipboardWatcher for WaylandClipboardWatcher {
         let (sender, receiver) = mpsc::channel(100);
 
         std::thread::spawn(move || {
-            println!("WAYLAND WATCHER THREAD STARTED");
+            tracing::info!("starting wayland clipboard watcher");
 
             let connection = match Connection::connect_to_env() {
                 Ok(connection) => connection,
 
                 Err(error) => {
-                    eprintln!("FAILED CONNECTING TO WAYLAND {:?}", error);
+                    tracing::error!(
+                        error = ?error,
+                        "failed connecting to wayland compositor"
+                    );
 
                     return;
                 }
             };
 
-            println!("CONNECTED TO WAYLAND COMPOSITOR");
+            tracing::debug!("connected to wayland compositor");
 
             let (globals, mut event_queue) =
                 match registry_queue_init::<WaylandRegistryState>(&connection) {
                     Ok(value) => value,
 
                     Err(error) => {
-                        eprintln!("FAILED INITIALIZING REGISTRY {:?}", error);
+                        tracing::error!(
+                            error = ?error,
+                            "failed initializing wayland registry"
+                        );
 
                         return;
                     }
                 };
 
-            println!("WAYLAND REGISTRY INITIALIZED");
-
             let mut registry_state = WaylandRegistryState::default();
 
-            match event_queue.roundtrip(&mut registry_state) {
-                Ok(_) => {}
+            if let Err(error) = event_queue.roundtrip(&mut registry_state) {
+                tracing::error!(
+                    error = ?error,
+                    "wayland registry roundtrip failed"
+                );
 
-                Err(error) => {
-                    eprintln!("REGISTRY ROUNDTRIP FAILED {:?}", error);
-
-                    return;
-                }
+                return;
             }
 
             registry_state.detect(globals.contents());
 
-            println!(
-                "WAYLAND PROTOCOLS ext={} wlr={}",
-                registry_state.has_ext_data_control, registry_state.has_wlr_data_control
+            tracing::debug!(
+                ext = registry_state.has_ext_data_control,
+                wlr = registry_state.has_wlr_data_control,
+                "wayland clipboard protocols detected"
             );
 
+            // EXT data control is currently the preferred implementation.
             if registry_state.has_ext_data_control {
-                println!("SELECTING KDE ext_data_control_v1");
+                tracing::info!("selecting ext_data_control_v1 clipboard backend");
 
                 ext_backend::start(connection, globals, sender);
 
@@ -74,14 +79,14 @@ impl ClipboardWatcher for WaylandClipboardWatcher {
             }
 
             if registry_state.has_wlr_data_control {
-                println!("SELECTING WLR data_control_v1");
+                tracing::info!("selecting zwlr_data_control_v1 clipboard backend");
 
                 wlr_backend::start(connection, globals, sender);
 
                 return;
             }
 
-            eprintln!("NO SUPPORTED WAYLAND CLIPBOARD PROTOCOL FOUND");
+            tracing::error!("no supported wayland clipboard protocol found");
         });
 
         receiver

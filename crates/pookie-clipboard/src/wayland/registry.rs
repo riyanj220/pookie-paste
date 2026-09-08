@@ -13,22 +13,23 @@ impl WaylandRegistryState {
     pub fn detect(&mut self, globals: &GlobalListContents) {
         globals.with_list(|list| {
             for global in list {
-                println!(
-                    "WAYLAND GLOBAL {} version {}",
-                    global.interface, global.version
+                tracing::debug!(
+                    interface = %global.interface,
+                    version = global.version,
+                    "wayland global discovered"
                 );
 
                 match global.interface.as_str() {
                     "ext_data_control_manager_v1" => {
                         self.has_ext_data_control = true;
 
-                        println!("FOUND KDE ext_data_control_manager_v1");
+                        tracing::debug!("ext_data_control_manager_v1 available");
                     }
 
                     "zwlr_data_control_manager_v1" => {
                         self.has_wlr_data_control = true;
 
-                        println!("FOUND WLR zwlr_data_control_manager_v1");
+                        tracing::debug!("zwlr_data_control_manager_v1 available");
                     }
 
                     _ => {}
