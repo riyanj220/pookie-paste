@@ -144,16 +144,28 @@ impl Dispatch<zwlr_data_control_device_v1::ZwlrDataControlDeviceV1, ()> for Wayl
             zwlr_data_control_device_v1::Event::Selection { id } => {
                 tracing::debug!(exists = id.is_some(), "WLR selection changed");
 
-                state.current_offer = id;
+                match id {
+                    Some(offer) => {
+                        state.current_offer = Some(offer);
 
-                state.offered_mime_types.clear();
+                        state.clipboard_requested = false;
 
-                state.clipboard_requested = false;
+                        state.has_selection = true;
 
-                state.has_selection = true;
+                        if !state.offered_mime_types.is_empty() {
+                            state.request_text();
+                        }
+                    }
 
-                if !state.offered_mime_types.is_empty() {
-                    state.request_text();
+                    None => {
+                        state.current_offer = None;
+
+                        state.offered_mime_types.clear();
+
+                        state.clipboard_requested = false;
+
+                        state.has_selection = false;
+                    }
                 }
             }
 
