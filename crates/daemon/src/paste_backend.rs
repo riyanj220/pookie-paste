@@ -1,4 +1,5 @@
-use crate::wayland_paste_backend::WaylandPasteBackend;
+pub use crate::wayland_paste_backend::WaylandPasteBackend;
+
 use crate::x11_paste_backend::X11PasteBackend;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -18,8 +19,6 @@ pub trait PasteBackend: Send + Sync {
 
     fn paste(&self) -> Result<(), PasteError>;
 }
-
-pub type ClipboardOnlyPasteBackend = WaylandPasteBackend;
 
 pub enum PlatformPasteBackend {
     X11(Box<X11PasteBackend>),
@@ -41,7 +40,8 @@ impl PlatformPasteBackend {
     pub fn new() -> Result<Self, PasteError> {
         let session_type = std::env::var("XDG_SESSION_TYPE")
             .unwrap_or_default()
-            .to_lowercase();
+            .trim()
+            .to_ascii_lowercase();
 
         Self::from_session_type(&session_type)
     }
@@ -75,7 +75,6 @@ impl PasteBackend for PlatformPasteBackend {
 
 #[cfg(test)]
 mod tests {
-
     use super::*;
 
     #[test]

@@ -1,11 +1,13 @@
 use tokio::sync::mpsc;
+
 use tracing::{info, warn};
 
 use crate::platform_shortcut_backend::PlatformShortcutBackend;
-use crate::shortcut_backend::{Shortcut, ShortcutBackend, ShortcutError};
+
+use crate::shortcut_backend::{Shortcut, ShortcutActivation, ShortcutBackend, ShortcutError};
 
 pub struct ShortcutListener {
-    receiver: mpsc::UnboundedReceiver<()>,
+    receiver: mpsc::UnboundedReceiver<ShortcutActivation>,
 }
 
 impl ShortcutListener {
@@ -67,8 +69,8 @@ impl ShortcutListener {
 
             loop {
                 match backend.wait_for_activation() {
-                    Ok(()) => {
-                        if sender.send(()).is_err() {
+                    Ok(activation) => {
+                        if sender.send(activation).is_err() {
                             break;
                         }
                     }
@@ -100,7 +102,7 @@ impl ShortcutListener {
         Self { receiver }
     }
 
-    pub async fn activated(&mut self) -> Option<()> {
+    pub async fn activated(&mut self) -> Option<ShortcutActivation> {
         self.receiver.recv().await
     }
 }

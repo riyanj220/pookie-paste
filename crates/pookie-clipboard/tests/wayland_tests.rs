@@ -1,4 +1,4 @@
-use pookie_clipboard::{ClipboardWatcher, WaylandClipboardWatcher};
+use pookie_clipboard:: WaylandClipboardWatcher;
 
 fn has_wayland_display() -> bool {
     std::env::var("WAYLAND_DISPLAY").is_ok()

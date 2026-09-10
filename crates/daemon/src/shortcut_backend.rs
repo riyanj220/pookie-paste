@@ -42,6 +42,33 @@ impl ShortcutModifiers {
     };
 }
 
+#[derive(Debug, Clone)]
+pub struct ShortcutActivation {
+    /*
+     * Platform-specific activation identifier.
+     *
+     * For Wayland this is the activation token
+     * returned by the global shortcut portal.
+     *
+     * X11 does not currently need this value.
+     */
+    pub activation_token: Option<String>,
+}
+
+impl ShortcutActivation {
+    pub fn none() -> Self {
+        Self {
+            activation_token: None,
+        }
+    }
+
+    pub fn with_activation_token(token: String) -> Self {
+        Self {
+            activation_token: Some(token),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum ShortcutError {
     Unavailable,
@@ -54,7 +81,7 @@ pub enum ShortcutError {
 pub trait ShortcutBackend: Send {
     fn register(&mut self, shortcut: Shortcut) -> Result<(), ShortcutError>;
 
-    fn wait_for_activation(&mut self) -> Result<(), ShortcutError>;
+    fn wait_for_activation(&mut self) -> Result<ShortcutActivation, ShortcutError>;
 }
 
 #[cfg(test)]
@@ -71,5 +98,19 @@ mod tests {
         assert!(!shortcut.modifiers.control);
         assert!(!shortcut.modifiers.alt);
         assert!(!shortcut.modifiers.shift);
+    }
+
+    #[test]
+    fn empty_activation_has_no_token() {
+        let activation = ShortcutActivation::none();
+
+        assert!(activation.activation_token.is_none());
+    }
+
+    #[test]
+    fn activation_can_store_wayland_token() {
+        let activation = ShortcutActivation::with_activation_token("test-token".to_string());
+
+        assert_eq!(activation.activation_token.as_deref(), Some("test-token"));
     }
 }

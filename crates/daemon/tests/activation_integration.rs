@@ -12,7 +12,7 @@ use daemon::{
     clipboard_state::ClipboardState,
     focus_backend::{FocusBackend, FocusError, FocusTarget, UnavailableFocusBackend},
     focus_service::FocusService,
-    paste_backend::{ClipboardOnlyPasteBackend, PasteBackend, PasteCapability, PasteError},
+    paste_backend::{PasteBackend, PasteCapability, PasteError, WaylandPasteBackend},
 };
 
 use history::{ClipboardHistoryService, HistoryConfig};
@@ -201,37 +201,37 @@ async fn missing_activation_does_not_change_clipboard() {
         .await
         .expect("activation failed");
 
-    assert_eq!(result, ActivationResult::NotFound,);
+    assert_eq!(result, ActivationResult::NotFound);
 
     /*
-        Missing activation must not
-        trigger direct paste.
-    */
+     * Missing activation must not
+     * trigger direct paste.
+     */
     assert!(
-        !pasted.load(Ordering::SeqCst,),
+        !pasted.load(Ordering::SeqCst),
         "paste backend was triggered for a missing item"
     );
 
     /*
-        Missing activation must not
-        touch the OS clipboard.
-    */
-    assert_eq!(backend_handle.content(), "",);
+     * Missing activation must not
+     * touch the OS clipboard.
+     */
+    assert_eq!(backend_handle.content(), "");
 
     /*
-        History should also remain empty.
-    */
+     * History should also remain empty.
+     */
     let items = history_service
         .get_all()
         .await
         .expect("history retrieval failed");
 
-    assert!(items.is_empty(),);
+    assert!(items.is_empty());
 
     /*
-        Keep the complete activation stack
-        alive for the duration of the test.
-    */
+     * Keep the complete activation stack
+     * alive for the duration of the test.
+     */
     let _ = clipboard_service;
 }
 
@@ -240,14 +240,14 @@ async fn clipboard_only_activation_succeeds_without_focus_target() {
     let history_service = create_history_service().await;
 
     /*
-        Keep the initial history in the past
-        because promote() uses Utc::now().
-
-        Initial order:
-        C
-        B
-        A
-    */
+     * Keep the initial history in the past
+     * because promote() uses Utc::now().
+     *
+     * Initial order:
+     * C
+     * B
+     * A
+     */
     let base_time = Utc::now() - Duration::seconds(10);
 
     let a = test_item("A", "wayland-hash-a", base_time);
@@ -265,7 +265,9 @@ async fn clipboard_only_activation_succeeds_without_focus_target() {
     let c_id = c.id.to_string();
 
     history_service.save(a).await.expect("save A failed");
+
     history_service.save(b).await.expect("save B failed");
+
     history_service.save(c).await.expect("save C failed");
 
     let backend = FakeClipboardBackend::new("");
@@ -278,50 +280,50 @@ async fn clipboard_only_activation_succeeds_without_focus_target() {
     )));
 
     /*
-        This represents the Wayland fallback:
-
-        - no focus target support
-        - no direct paste support
-        - clipboard functionality remains available
-    */
+     * This represents the Wayland fallback:
+     *
+     * - no focus target support
+     * - no direct paste support
+     * - clipboard functionality remains available
+     */
     let focus_service = FocusService::new(UnavailableFocusBackend);
 
     let activation_service = ClipboardActivationService::new(
         Arc::clone(&history_service),
         Arc::clone(&clipboard_service),
-        ClipboardOnlyPasteBackend,
+        WaylandPasteBackend::new(),
         focus_service,
     );
 
     /*
-        No target is supplied.
-
-        Therefore focus restoration must
-        not be required for activation.
-    */
+     * No target is supplied.
+     *
+     * Therefore focus restoration must
+     * not be required for activation.
+     */
     let result = activation_service
         .activate(&b_id, None)
         .await
         .expect("Wayland fallback activation failed");
 
-    assert_eq!(result, ActivationResult::ClipboardUpdated,);
+    assert_eq!(result, ActivationResult::ClipboardUpdated);
 
     /*
-        Even without direct paste support,
-        the selected content must still be
-        written to the clipboard.
-    */
-    assert_eq!(backend_handle.content(), "Wayland fallback item",);
+     * Even without direct paste support,
+     * the selected content must still be
+     * written to the clipboard.
+     */
+    assert_eq!(backend_handle.content(), "Wayland fallback item");
 
     /*
-        Successful clipboard activation
-        must still promote B.
-
-        Expected:
-        B
-        C
-        A
-    */
+     * Successful clipboard activation
+     * must still promote B.
+     *
+     * Expected:
+     * B
+     * C
+     * A
+     */
     let items = history_service
         .get_all()
         .await
@@ -330,15 +332,18 @@ async fn clipboard_only_activation_succeeds_without_focus_target() {
     assert_eq!(items.len(), 3);
 
     assert_eq!(items[0].id, b_id);
+
     assert_eq!(
         items[0].text_content.as_deref(),
         Some("Wayland fallback item"),
     );
 
     assert_eq!(items[1].id, c_id);
+
     assert_eq!(items[1].text_content.as_deref(), Some("C"),);
 
     assert_eq!(items[2].id, a_id);
+
     assert_eq!(items[2].text_content.as_deref(), Some("A"),);
 }
 
@@ -363,10 +368,13 @@ async fn x11_style_focus_safe_activation_restores_focus_and_pastes() {
     let c_id = c.id.to_string();
 
     history_service.save(a).await.expect("save A failed");
+
     history_service.save(b).await.expect("save B failed");
+
     history_service.save(c).await.expect("save C failed");
 
     let backend = FakeClipboardBackend::new("");
+
     let backend_handle = backend.clone();
 
     let clipboard_service = Arc::new(Mutex::new(ClipboardService::new(
@@ -394,7 +402,7 @@ async fn x11_style_focus_safe_activation_restores_focus_and_pastes() {
 
     assert_eq!(result, ActivationResult::Pasted);
 
-    assert_eq!(backend_handle.content(), "X11 focused item",);
+    assert_eq!(backend_handle.content(), "X11 focused item");
 
     assert!(
         pasted.load(Ordering::SeqCst),
@@ -409,9 +417,11 @@ async fn x11_style_focus_safe_activation_restores_focus_and_pastes() {
     assert_eq!(items.len(), 3);
 
     assert_eq!(items[0].id, b_id);
+
     assert_eq!(items[0].text_content.as_deref(), Some("X11 focused item"),);
 
     assert_eq!(items[1].id, c_id);
+
     assert_eq!(items[2].id, a_id);
 }
 
@@ -436,10 +446,13 @@ async fn focus_failure_prevents_direct_paste_but_keeps_clipboard_and_promotion()
     let c_id = c.id.to_string();
 
     history_service.save(a).await.expect("save A failed");
+
     history_service.save(b).await.expect("save B failed");
+
     history_service.save(c).await.expect("save C failed");
 
     let backend = FakeClipboardBackend::new("");
+
     let backend_handle = backend.clone();
 
     let clipboard_service = Arc::new(Mutex::new(ClipboardService::new(
@@ -465,7 +478,7 @@ async fn focus_failure_prevents_direct_paste_but_keeps_clipboard_and_promotion()
         .await
         .expect("activation should return an application outcome");
 
-    assert_eq!(result, ActivationResult::PasteFailed,);
+    assert_eq!(result, ActivationResult::PasteFailed);
 
     assert_eq!(
         backend_handle.content(),
@@ -490,5 +503,6 @@ async fn focus_failure_prevents_direct_paste_but_keeps_clipboard_and_promotion()
     assert_eq!(items[0].text_content.as_deref(), Some("Focus failure item"),);
 
     assert_eq!(items[1].id, c_id);
+
     assert_eq!(items[2].id, a_id);
 }

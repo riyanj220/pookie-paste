@@ -146,7 +146,7 @@ mod tests {
     use daemon::clipboard_state::ClipboardState;
     use daemon::focus_backend::{FocusBackend, FocusError, FocusTarget};
     use daemon::focus_service::FocusService;
-    use daemon::paste_backend::ClipboardOnlyPasteBackend;
+    use daemon::paste_backend::WaylandPasteBackend;
 
     use history::{ClipboardHistoryService, HistoryConfig};
 
@@ -199,6 +199,7 @@ mod tests {
 
     /*
      * IPC tests are not testing real window focus.
+     *
      * This fake immediately accepts restoration and
      * reports the requested target as active.
      */
@@ -243,7 +244,7 @@ mod tests {
         let activation_service = Arc::new(ClipboardActivationService::new(
             Arc::clone(&history_service),
             clipboard_service,
-            ClipboardOnlyPasteBackend,
+            WaylandPasteBackend::new(),
             focus_service,
         ));
 

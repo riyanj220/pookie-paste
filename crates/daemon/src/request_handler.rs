@@ -39,9 +39,13 @@ where
                 Ok(result) => {
                     let outcome = match result {
                         ActivationResult::Pasted => ActivationOutcome::Pasted,
+
                         ActivationResult::ClipboardUpdated => ActivationOutcome::ClipboardUpdated,
+
                         ActivationResult::PasteFailed => ActivationOutcome::PasteFailed,
+
                         ActivationResult::NotFound => ActivationOutcome::NotFound,
+
                         ActivationResult::UnsupportedContent => {
                             ActivationOutcome::UnsupportedContent
                         }
@@ -125,7 +129,7 @@ mod tests {
         clipboard_state::ClipboardState,
         focus_backend::{FocusBackend, FocusError, FocusTarget},
         focus_service::FocusService,
-        paste_backend::ClipboardOnlyPasteBackend,
+        paste_backend::WaylandPasteBackend,
     };
 
     #[derive(Clone)]
@@ -164,6 +168,12 @@ mod tests {
         }
     }
 
+    /*
+     * IPC tests are not testing real window focus.
+     *
+     * This fake immediately accepts restoration and
+     * reports the requested target as active.
+     */
     struct FakeFocusBackend;
 
     impl FocusBackend for FakeFocusBackend {
@@ -196,11 +206,7 @@ mod tests {
     fn create_activation_service(
         history_service: Arc<ClipboardHistoryService>,
     ) -> (
-        ClipboardActivationService<
-            FakeClipboardBackend,
-            ClipboardOnlyPasteBackend,
-            FakeFocusBackend,
-        >,
+        ClipboardActivationService<FakeClipboardBackend, WaylandPasteBackend, FakeFocusBackend>,
         FakeClipboardBackend,
     ) {
         let backend = FakeClipboardBackend::new("");
@@ -217,7 +223,7 @@ mod tests {
         let activation_service = ClipboardActivationService::new(
             history_service,
             clipboard_service,
-            ClipboardOnlyPasteBackend,
+            WaylandPasteBackend::new(),
             focus_service,
         );
 
@@ -263,19 +269,26 @@ mod tests {
 
         let first = ClipboardItem {
             id: uuid::Uuid::new_v4(),
+
             content: ClipboardContent::Text("First".to_string()),
+
             hash: "first-hash".to_string(),
+
             created_at: Utc::now(),
         };
 
         let second = ClipboardItem {
             id: uuid::Uuid::new_v4(),
+
             content: ClipboardContent::Text("Second".to_string()),
+
             hash: "second-hash".to_string(),
+
             created_at: Utc::now() + Duration::seconds(1),
         };
 
         service.save(first).await.expect("first save failed");
+
         service.save(second).await.expect("second save failed");
 
         let (activation_service, _backend_handle) = create_activation_service(Arc::clone(&service));
@@ -290,7 +303,9 @@ mod tests {
         match response {
             IpcResponse::History { items } => {
                 assert_eq!(items.len(), 2);
+
                 assert_eq!(items[0].text_content.as_deref(), Some("Second"));
+
                 assert_eq!(items[1].text_content.as_deref(), Some("First"));
             }
 
@@ -308,8 +323,11 @@ mod tests {
 
         let item = ClipboardItem {
             id: item_id,
+
             content: ClipboardContent::Text("Paste me".to_string()),
+
             hash: "paste-me-hash".to_string(),
+
             created_at: Utc::now(),
         };
 
@@ -320,6 +338,7 @@ mod tests {
         let response = handle_request(
             IpcRequest::ActivateItem {
                 id: item_id.to_string(),
+
                 target_id: None,
             },
             service.as_ref(),
@@ -345,8 +364,11 @@ mod tests {
 
         let item = ClipboardItem {
             id: item_id,
+
             content: ClipboardContent::Text("Paste me".to_string()),
+
             hash: "paste-me-target-hash".to_string(),
+
             created_at: Utc::now(),
         };
 
@@ -357,6 +379,7 @@ mod tests {
         let response = handle_request(
             IpcRequest::ActivateItem {
                 id: item_id.to_string(),
+
                 target_id: Some(12345),
             },
             service.as_ref(),
@@ -383,6 +406,7 @@ mod tests {
         let response = handle_request(
             IpcRequest::ActivateItem {
                 id: "does-not-exist".to_string(),
+
                 target_id: None,
             },
             service.as_ref(),
@@ -408,8 +432,11 @@ mod tests {
 
         let item = ClipboardItem {
             id: item_id,
+
             content: ClipboardContent::Text("Delete me".to_string()),
+
             hash: "delete-me-hash".to_string(),
+
             created_at: Utc::now(),
         };
 
@@ -457,27 +484,38 @@ mod tests {
 
         let first = ClipboardItem {
             id: uuid::Uuid::new_v4(),
+
             content: ClipboardContent::Text("A".to_string()),
+
             hash: "hash-a".to_string(),
+
             created_at: Utc::now(),
         };
 
         let second = ClipboardItem {
             id: uuid::Uuid::new_v4(),
+
             content: ClipboardContent::Text("B".to_string()),
+
             hash: "hash-b".to_string(),
+
             created_at: Utc::now() + Duration::seconds(1),
         };
 
         let third = ClipboardItem {
             id: uuid::Uuid::new_v4(),
+
             content: ClipboardContent::Text("C".to_string()),
+
             hash: "hash-c".to_string(),
+
             created_at: Utc::now() + Duration::seconds(2),
         };
 
         service.save(first).await.expect("first save failed");
+
         service.save(second).await.expect("second save failed");
+
         service.save(third).await.expect("third save failed");
 
         let (activation_service, _backend_handle) = create_activation_service(Arc::clone(&service));

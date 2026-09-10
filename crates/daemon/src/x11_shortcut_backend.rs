@@ -2,7 +2,7 @@ use x11rb::connection::Connection;
 use x11rb::protocol::xproto::{ConnectionExt as _, GrabMode, ModMask};
 
 use crate::shortcut_backend::{
-    Shortcut, ShortcutBackend, ShortcutError, ShortcutKey, ShortcutModifiers,
+    Shortcut, ShortcutActivation, ShortcutBackend, ShortcutError, ShortcutKey, ShortcutModifiers,
 };
 
 const XK_NUM_LOCK: u32 = 0xff7f;
@@ -112,7 +112,7 @@ impl ShortcutBackend for X11ShortcutBackend {
         Ok(())
     }
 
-    fn wait_for_activation(&mut self) -> Result<(), ShortcutError> {
+    fn wait_for_activation(&mut self) -> Result<ShortcutActivation, ShortcutError> {
         let Some(keycode) = self.registered_keycode else {
             return Err(ShortcutError::Failed(
                 "shortcut backend has not been registered".to_string(),
@@ -130,7 +130,7 @@ impl ShortcutBackend for X11ShortcutBackend {
 
                     self.key_down = true;
 
-                    return Ok(());
+                    return Ok(ShortcutActivation::none());
                 }
 
                 x11rb::protocol::Event::KeyRelease(release) if release.detail == keycode => {
@@ -140,13 +140,15 @@ impl ShortcutBackend for X11ShortcutBackend {
 
                     if let Some(x11rb::protocol::Event::KeyPress(press)) = next_event {
                         if press.detail == release.detail && press.time == release.time {
-                            // Classic X11 auto-repeat:
-                            //
-                            // KeyRelease + KeyPress with
-                            // identical keycode/time.
-                            //
-                            // The key is still physically
-                            // held, so do not re-arm.
+                            /*
+                             * Classic X11 auto-repeat:
+                             *
+                             * KeyRelease + KeyPress with
+                             * identical keycode/time.
+                             *
+                             * The key is still physically
+                             * held, so do not re-arm.
+                             */
                             continue;
                         }
 

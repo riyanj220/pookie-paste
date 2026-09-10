@@ -1,5 +1,7 @@
-use crate::shortcut_backend::{Shortcut, ShortcutBackend, ShortcutError};
+use crate::shortcut_backend::{Shortcut, ShortcutActivation, ShortcutBackend, ShortcutError};
+
 use crate::wayland_shortcut_backend::WaylandShortcutBackend;
+
 use crate::x11_shortcut_backend::X11ShortcutBackend;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -11,7 +13,9 @@ enum SessionType {
 
 pub enum PlatformShortcutBackend {
     X11(Box<X11ShortcutBackend>),
+
     Wayland(Box<WaylandShortcutBackend>),
+
     Unavailable,
 }
 
@@ -50,7 +54,7 @@ impl ShortcutBackend for PlatformShortcutBackend {
         }
     }
 
-    fn wait_for_activation(&mut self) -> Result<(), ShortcutError> {
+    fn wait_for_activation(&mut self) -> Result<ShortcutActivation, ShortcutError> {
         match self {
             Self::X11(backend) => backend.wait_for_activation(),
 
