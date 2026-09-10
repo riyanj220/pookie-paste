@@ -6,9 +6,10 @@ use chrono::{Duration as ChronoDuration, Utc};
 
 use daemon::activation_service::ClipboardActivationService;
 use daemon::clipboard_service::ClipboardService;
+use daemon::clipboard_state::ClipboardState;
 use daemon::focus_backend::{FocusBackend, FocusError, FocusTarget};
 use daemon::focus_service::FocusService;
-use daemon::paste_backend::{ClipboardOnlyPasteBackend, PasteBackend, PasteCapability, PasteError};
+use daemon::paste_backend::{PasteBackend, PasteCapability, PasteError, WaylandPasteBackend};
 use daemon::request_handler::handle_request;
 
 use history::{ClipboardHistoryService, HistoryConfig};
@@ -87,6 +88,7 @@ impl FocusBackend for FakeFocusBackend {
     fn active_target(&self) -> Result<FocusTarget, FocusError> {
         match self.target_id {
             Some(id) => Ok(FocusTarget::new(id)),
+
             None => Err(FocusError::Unavailable),
         }
     }
@@ -117,7 +119,7 @@ impl PasteBackend for FakeDirectPasteBackend {
 }
 
 type TestActivationService =
-    ClipboardActivationService<FakeClipboardBackend, ClipboardOnlyPasteBackend, FakeFocusBackend>;
+    ClipboardActivationService<FakeClipboardBackend, WaylandPasteBackend, FakeFocusBackend>;
 
 type X11TestActivationService =
     ClipboardActivationService<FakeClipboardBackend, FakeDirectPasteBackend, FakeFocusBackend>;
@@ -151,8 +153,10 @@ impl TestIpcApp {
 
         let clipboard_backend = FakeClipboardBackend::new("");
 
-        let clipboard_service =
-            Arc::new(Mutex::new(ClipboardService::new(clipboard_backend.clone())));
+        let clipboard_service = Arc::new(Mutex::new(ClipboardService::new(
+            clipboard_backend.clone(),
+            Arc::new(ClipboardState::default()),
+        )));
 
         let focus_service = FocusService::new(FakeFocusBackend { target_id });
 
@@ -160,7 +164,7 @@ impl TestIpcApp {
             Arc::new(ClipboardActivationService::new(
                 Arc::clone(&history_service),
                 clipboard_service,
-                ClipboardOnlyPasteBackend,
+                WaylandPasteBackend::new(),
                 focus_service,
             ));
 
@@ -690,7 +694,7 @@ async fn handles_concurrent_read_and_delete() {
 
     let (read_result, delete_result) = tokio::join!(read_task, delete_task,);
 
-    assert!(read_result.unwrap().is_ok(),);
+    assert!(read_result.unwrap().is_ok());
 
     assert_eq!(
         delete_result.unwrap().expect("delete request failed"),
@@ -728,7 +732,10 @@ async fn x11_style_direct_activation_round_trips_through_ipc() {
 
     let clipboard_handle = clipboard_backend.clone();
 
-    let clipboard_service = Arc::new(Mutex::new(ClipboardService::new(clipboard_backend)));
+    let clipboard_service = Arc::new(Mutex::new(ClipboardService::new(
+        clipboard_backend,
+        Arc::new(ClipboardState::default()),
+    )));
 
     let pasted = Arc::new(AtomicBool::new(false));
 
@@ -769,6 +776,7 @@ async fn x11_style_direct_activation_round_trips_through_ipc() {
     let response = client
         .send(&IpcRequest::ActivateItem {
             id: item_id.clone(),
+
             target_id: Some(42),
         })
         .await

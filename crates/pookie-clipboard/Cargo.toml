@@ -15,3 +15,41 @@ uuid = {
 arboard = "3"
 
 tracing = "0.1"
+
+tokio = {
+    version = "1",
+    features = [
+        "sync",
+        "time",
+        "rt"
+    ]
+}
+
+wayland-client = "0.31"
+wayland-backend = "0.3"
+
+wayland-protocols = {
+    version = "0.32",
+    features = [
+        "client",
+        "staging"
+    ]
+}
+
+wayland-protocols-wlr = {
+    version = "0.3",
+    features = ["client"]
+}
+
+futures-util = "0.3"
+
+nix = {
+    version = "0.29",
+    features = [
+        "fs"
+    ]
+}
+
+wayland-scanner = "0.31"
+
+wl-clipboard-rs = "0.9.3"

@@ -12,7 +12,9 @@ use zbus::{
     zvariant::{ObjectPath, OwnedObjectPath, OwnedValue, Str, Value},
 };
 
-use crate::shortcut_backend::{Shortcut, ShortcutBackend, ShortcutError, ShortcutKey};
+use crate::shortcut_backend::{
+    Shortcut, ShortcutActivation, ShortcutBackend, ShortcutError, ShortcutKey,
+};
 
 const PORTAL_DESTINATION: &str = "org.freedesktop.portal.Desktop";
 
@@ -44,7 +46,7 @@ const CREATE_SESSION_TIMEOUT: Duration = Duration::from_secs(15);
  */
 const BIND_SHORTCUTS_TIMEOUT: Duration = Duration::from_secs(120);
 
-type ActivationResult = Result<(), ShortcutError>;
+type ActivationResult = Result<ShortcutActivation, ShortcutError>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WaylandShortcutCapability {
@@ -82,6 +84,16 @@ pub struct WaylandShortcutSession {
     session_handle: OwnedObjectPath,
 }
 
+pub struct WaylandShortcutBackend {
+    runtime: tokio::runtime::Runtime,
+
+    session: Option<WaylandShortcutSession>,
+
+    activation_receiver: Option<Receiver<ActivationResult>>,
+
+    registered: bool,
+}
+
 /*
  * Represents one asynchronous XDG Desktop Portal Request.
  *
@@ -94,16 +106,6 @@ struct PortalRequest {
     handle_token: String,
     expected_path: OwnedObjectPath,
     response_stream: MessageStream,
-}
-
-pub struct WaylandShortcutBackend {
-    runtime: tokio::runtime::Runtime,
-
-    session: Option<WaylandShortcutSession>,
-
-    activation_receiver: Option<Receiver<ActivationResult>>,
-
-    registered: bool,
 }
 
 impl PortalRequest {
@@ -297,7 +299,7 @@ impl WaylandShortcutSession {
             let decoded: Result<(OwnedObjectPath, String, u64, HashMap<String, OwnedValue>), _> =
                 message.body().deserialize();
 
-            let (session_handle, shortcut_id, _timestamp, _options) = match decoded {
+            let (session_handle, shortcut_id, timestamp, mut options) = match decoded {
                 Ok(decoded) => decoded,
 
                 Err(error) => {
@@ -315,7 +317,35 @@ impl WaylandShortcutSession {
                 continue;
             }
 
-            if sender.send(Ok(())).is_err() {
+            /*
+             * Wayland/XDG portals may provide an activation_token
+             * in the Activated signal options.
+             *
+             * Preserve it instead of discarding it. The daemon can
+             * later use this token when implementing Wayland-specific
+             * target application activation.
+             */
+            let activation_token = options
+                .remove("activation_token")
+                .and_then(|value| String::try_from(value).ok());
+
+            if activation_token.is_some() {
+                debug!(
+                    shortcut_id = %shortcut_id,
+                    timestamp,
+                    "Wayland shortcut activation token received"
+                );
+            } else {
+                debug!(
+                    shortcut_id = %shortcut_id,
+                    timestamp,
+                    "Wayland shortcut activated without activation token"
+                );
+            }
+
+            let activation = ShortcutActivation { activation_token };
+
+            if sender.send(Ok(activation)).is_err() {
                 /*
                  * The synchronous consumer has disappeared, so there
                  * is nothing left for this task to service.
@@ -421,8 +451,8 @@ impl ShortcutBackend for WaylandShortcutBackend {
                 ShortcutError::Failed(
                     "Wayland activation listener stopped during startup".to_string(),
                 )
-            })?
-        });
+            })
+        })?;
 
         if let Err(error) = readiness {
             self.close_session_after_failed_registration(&session);
@@ -446,7 +476,7 @@ impl ShortcutBackend for WaylandShortcutBackend {
         Ok(())
     }
 
-    fn wait_for_activation(&mut self) -> Result<(), ShortcutError> {
+    fn wait_for_activation(&mut self) -> Result<ShortcutActivation, ShortcutError> {
         let receiver = self.activation_receiver.as_ref().ok_or_else(|| {
             ShortcutError::Failed("Wayland shortcut backend has not been registered".to_string())
         })?;
@@ -1021,6 +1051,7 @@ fn next_token(prefix: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     use crate::shortcut_backend::ShortcutModifiers;
 
     #[test]
@@ -1086,7 +1117,7 @@ mod tests {
         assert!(
             token
                 .chars()
-                .all(|character| character.is_ascii_alphanumeric() || character == '_')
+                .all(|character| { character.is_ascii_alphanumeric() || character == '_' })
         );
     }
 

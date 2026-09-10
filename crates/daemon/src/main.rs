@@ -1,32 +1,37 @@
-mod clipboard_backend;
 mod ipc_server;
 mod logging;
 mod shutdown;
 
 use std::sync::Arc;
 
-use clipboard_backend::PlatformClipboard;
-
 use tokio::sync::Mutex;
-use tokio::time::{Duration, sleep};
 
 use tracing::{info, warn};
 
 use pookie_core::{ClipboardEvent, ClipboardProcessor};
 
-use pookie_clipboard::ClipboardContent;
-
 use history::{ClipboardHistoryService, HistoryConfig};
 
 use storage::Database;
 
+use daemon::{
+    activation_service::ClipboardActivationService, clipboard_service::ClipboardService,
+    clipboard_state::ClipboardState,
+};
+
 use daemon::focus_service::FocusService;
+
 use daemon::paste_backend::PlatformPasteBackend;
+
 use daemon::platform_focus_backend::PlatformFocusBackend;
+
 use daemon::shortcut_listener::ShortcutListener;
+
 use daemon::ui_launcher::{UiLaunchOutcome, UiLauncher};
 
-use daemon::{activation_service::ClipboardActivationService, clipboard_service::ClipboardService};
+use daemon::clipboard_backend::PlatformClipboard;
+
+use daemon::clipboard_watcher;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -42,42 +47,26 @@ async fn main() -> anyhow::Result<()> {
 
     let history_config = HistoryConfig::default();
 
-    info!("history limit: {}", history_config.max_items);
-
     let history_service = Arc::new(ClipboardHistoryService::new(repository, history_config));
 
-    info!("history service initialized");
+    let clipboard_state = Arc::new(ClipboardState::default());
 
     let backend = PlatformClipboard::new()?;
 
     info!("clipboard backend: {}", backend.name());
 
-    let clipboard_service = Arc::new(Mutex::new(ClipboardService::new(backend)));
+    let mut clipboard_events = clipboard_watcher::start(&backend)?;
 
-    /*
-     * Establish the clipboard state that existed before
-     * Pookie started as the initial monitoring baseline.
-     *
-     * This prevents the daemon from treating the user's
-     * pre-existing clipboard contents as a new copy event.
-     */
-    {
-        let mut clipboard = clipboard_service.lock().await;
-
-        clipboard.initialize_baseline()?;
-    }
-
-    info!("clipboard baseline initialized");
+    let clipboard_service = Arc::new(Mutex::new(ClipboardService::new(
+        backend,
+        Arc::clone(&clipboard_state),
+    )));
 
     let paste_backend = PlatformPasteBackend::new()
         .map_err(|error| anyhow::anyhow!("failed to initialize paste backend: {error:?}"))?;
 
-    info!("paste backend: {}", paste_backend.name());
-
     let focus_backend = PlatformFocusBackend::new()
         .map_err(|error| anyhow::anyhow!("failed to initialize focus backend: {error:?}"))?;
-
-    info!("focus backend: {}", focus_backend.name());
 
     let focus_service = FocusService::new(focus_backend);
 
@@ -107,32 +96,72 @@ async fn main() -> anyhow::Result<()> {
     info!("Pookie daemon running");
 
     loop {
-        let clipboard_change = {
-            let mut clipboard = clipboard_service.lock().await;
-
-            clipboard.check_for_change()?
-        };
-
-        if let Some(content) = clipboard_change {
-            let event = ClipboardEvent {
-                content: ClipboardContent::Text(content),
-
-                created_at: chrono::Utc::now(),
-            };
-
-            if let Some(item) = processor.process(event) {
-                info!("Clipboard item created: {:?}", item.id);
-
-                history_service.save(item).await?;
-
-                info!("Clipboard item saved");
-            } else {
-                info!("Clipboard content ignored");
-            }
-        }
-
         tokio::select! {
-            _ = shutdown::wait_for_shutdown() => {
+            event =
+            clipboard_events.recv() =>
+            {
+                match event {
+                    Some(event) => {
+                        info!(
+                            "clipboard event received: {}",
+                            event.id
+                        );
+
+                        let text =
+                        match &event.content {
+                            pookie_clipboard::ClipboardContent::Text(text) =>
+                            Some(text.as_str()),
+
+                            _ => None,
+                        };
+
+                        if let Some(text) = text
+                            && clipboard_state.is_self_write(text)
+                            {
+                                info!(
+                                    "ignoring self-generated clipboard event"
+                                );
+
+                                continue;
+                            }
+
+                            let core_event =
+                            ClipboardEvent {
+                                content: event.content,
+                                created_at: event.created_at,
+                            };
+
+                            if let Some(item) =
+                                processor.process(core_event)
+                                {
+                                    info!(
+                                        "Clipboard item created: {:?}",
+                                        item.id
+                                    );
+
+                                    history_service
+                                    .save(item)
+                                    .await?;
+
+                                    info!(
+                                        "Clipboard item saved"
+                                    );
+                                }
+                    }
+
+                    None => {
+                        warn!(
+                            "clipboard watcher stopped"
+                        );
+
+                        break;
+                    }
+                }
+            }
+
+            _ =
+            shutdown::wait_for_shutdown() =>
+            {
                 info!(
                     "Shutdown signal received"
                 );
@@ -140,7 +169,9 @@ async fn main() -> anyhow::Result<()> {
                 break;
             }
 
-            result = &mut ipc_future => {
+            result =
+            &mut ipc_future =>
+            {
                 match result {
                     Ok(()) => {
                         return Err(
@@ -151,51 +182,65 @@ async fn main() -> anyhow::Result<()> {
                     }
 
                     Err(error) => {
-                        return Err(
-                            error
-                        );
+                        return Err(error);
                     }
                 }
             }
 
             activation =
-                shortcut_listener.activated(),
-                if shortcut_available =>
+            shortcut_listener.activated(),
+            if shortcut_available =>
             {
                 match activation {
-                    Some(()) => {
-                        info!(
-                            "global shortcut activated"
-                        );
+                    Some(activation) => {
+                        if let Some(token) =
+                            activation.activation_token.as_deref()
+                            {
+                                info!(
+                                    token_present = true,
+                                    "global shortcut activated with Wayland activation context"
+                                );
 
-                        match ui_launcher.launch() {
-                            Ok(
-                                UiLaunchOutcome::Launched,
-                            ) => {}
-
-                            Ok(
-                                UiLaunchOutcome::AlreadyRunning,
-                            ) => {}
-
-                            Err(error) => {
-                                warn!(
-                                    error = ?error,
-                                    "failed to launch Pookie UI"
+                                /*
+                                 * Commit 2:
+                                 *
+                                 * The Wayland activation token is now
+                                 * preserved and propagated to the daemon.
+                                 *
+                                 * Actual token usage for restoring/focusing
+                                 * the target application belongs to the
+                                 * next activation commit.
+                                 */
+                                let _ = token;
+                            } else {
+                                info!(
+                                    "global shortcut activated"
                                 );
                             }
-                        }
+
+                            match ui_launcher.launch() {
+                                Ok(
+                                    UiLaunchOutcome::Launched
+                                )
+                                |
+                                Ok(
+                                    UiLaunchOutcome::AlreadyRunning
+                                ) => {}
+
+                                Err(error) => {
+                                    warn!(
+                                        error = ?error,
+                                        "failed to launch Pookie UI"
+                                    );
+                                }
+                            }
                     }
 
                     None => {
-                        shortcut_available =
-                            false;
+                        shortcut_available = false;
                     }
                 }
             }
-
-            _ = sleep(
-                Duration::from_secs(2)
-            ) => {}
         }
     }
 

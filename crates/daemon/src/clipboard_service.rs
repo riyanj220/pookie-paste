@@ -1,32 +1,29 @@
+use std::sync::Arc;
+
 use anyhow::Result;
 
 use pookie_clipboard::ClipboardBackend;
+
+use crate::clipboard_state::ClipboardState;
 
 pub struct ClipboardService<B>
 where
     B: ClipboardBackend,
 {
     backend: B,
-    last_content: Option<String>,
+
+    clipboard_state: Arc<ClipboardState>,
 }
 
 impl<B> ClipboardService<B>
 where
     B: ClipboardBackend,
 {
-    pub fn new(backend: B) -> Self {
+    pub fn new(backend: B, clipboard_state: Arc<ClipboardState>) -> Self {
         Self {
             backend,
-            last_content: None,
+            clipboard_state,
         }
-    }
-
-    pub fn initialize_baseline(&mut self) -> Result<()> {
-        let content = self.backend.read()?;
-
-        self.last_content = Some(content);
-
-        Ok(())
     }
 
     pub fn read(&self) -> Result<String> {
@@ -39,42 +36,25 @@ where
         self.backend.write(content)?;
 
         /*
-         * A clipboard write performed by Pookie itself
-         * becomes the new baseline immediately.
+         * Mark clipboard writes performed by Pookie.
          *
-         * This prevents our monitor from seeing our own
-         * activation write as a fresh external clipboard
-         * event.
+         * The watcher will receive this clipboard update,
+         * but daemon will ignore this event once.
          */
-        self.last_content = Some(content.to_string());
+        self.clipboard_state.mark_written(content.to_string());
 
         Ok(())
-    }
-
-    pub fn check_for_change(&mut self) -> Result<Option<String>> {
-        let current = self.backend.read()?;
-
-        let changed = match &self.last_content {
-            Some(previous) => previous != &current,
-
-            None => true,
-        };
-
-        if changed {
-            self.last_content = Some(current.clone());
-
-            return Ok(Some(current));
-        }
-
-        Ok(None)
     }
 }
 
 #[cfg(test)]
 mod tests {
+
     use std::sync::{Arc, Mutex as StdMutex};
 
     use pookie_clipboard::{ClipboardBackend, ClipboardError};
+
+    use crate::clipboard_state::ClipboardState;
 
     use super::ClipboardService;
 
@@ -90,8 +70,11 @@ mod tests {
             }
         }
 
-        fn set_external_value(&self, value: &str) {
-            *self.value.lock().expect("fake clipboard mutex poisoned") = value.to_string();
+        fn content(&self) -> String {
+            self.value
+                .lock()
+                .expect("fake clipboard mutex poisoned")
+                .clone()
         }
     }
 
@@ -111,73 +94,42 @@ mod tests {
         }
     }
 
-    #[test]
-    fn initial_clipboard_is_not_reported_after_baseline_initialization() {
-        let backend = FakeClipboardBackend::new("already copied");
-
-        let mut service = ClipboardService::new(backend);
-
-        service
-            .initialize_baseline()
-            .expect("baseline initialization failed");
-
-        let change = service.check_for_change().expect("change check failed");
-
-        assert!(
-            change.is_none(),
-            "existing clipboard content should only establish the startup baseline"
-        );
+    fn create_service(backend: FakeClipboardBackend) -> ClipboardService<FakeClipboardBackend> {
+        ClipboardService::new(backend, Arc::new(ClipboardState::default()))
     }
 
     #[test]
-    fn external_change_after_baseline_is_detected() {
-        let backend = FakeClipboardBackend::new("A");
+    fn read_returns_current_clipboard_content() {
+        let backend = FakeClipboardBackend::new("hello");
 
-        let backend_control = backend.clone();
+        let service = create_service(backend);
 
-        let mut service = ClipboardService::new(backend);
+        let content = service.read().expect("clipboard read failed");
 
-        service
-            .initialize_baseline()
-            .expect("baseline initialization failed");
-
-        backend_control.set_external_value("B");
-
-        let change = service.check_for_change().expect("change check failed");
-
-        assert_eq!(change.as_deref(), Some("B"),);
+        assert_eq!(content, "hello");
     }
 
     #[test]
-    fn self_write_is_not_reported_as_new_change() {
+    fn write_updates_clipboard_content() {
         let backend = FakeClipboardBackend::new("");
 
-        let mut service = ClipboardService::new(backend);
+        let backend_handle = backend.clone();
 
-        service.write("B").expect("clipboard write failed");
+        let mut service = create_service(backend);
 
-        let change = service.check_for_change().expect("change check failed");
+        service.write("hello").expect("clipboard write failed");
 
-        assert!(
-            change.is_none(),
-            "self-written clipboard content should not be emitted again"
-        );
+        assert_eq!(backend_handle.content(), "hello");
     }
 
     #[test]
-    fn external_change_after_self_write_is_detected() {
+    fn write_marks_self_generated_clipboard_content() {
         let backend = FakeClipboardBackend::new("");
 
-        let backend_control = backend.clone();
+        let mut service = create_service(backend);
 
-        let mut service = ClipboardService::new(backend);
-
-        service.write("B").expect("clipboard write failed");
-
-        backend_control.set_external_value("C");
-
-        let change = service.check_for_change().expect("change check failed");
-
-        assert_eq!(change.as_deref(), Some("C"),);
+        service
+            .write("pookie-write")
+            .expect("clipboard write failed");
     }
 }

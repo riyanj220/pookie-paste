@@ -128,6 +128,7 @@ mod tests {
 
     use super::{ActivationResult, ClipboardActivationService};
     use crate::clipboard_service::ClipboardService;
+    use crate::clipboard_state::ClipboardState;
     use crate::focus_backend::{FocusBackend, FocusError, FocusTarget};
     use crate::focus_service::FocusService;
     use crate::paste_backend::{PasteBackend, PasteCapability, PasteError};
@@ -284,7 +285,10 @@ mod tests {
     {
         let backend = FakeClipboardBackend { written };
 
-        let clipboard_service = StdArc::new(Mutex::new(ClipboardService::new(backend)));
+        let clipboard_state = StdArc::new(ClipboardState::default());
+
+        let clipboard_service =
+            StdArc::new(Mutex::new(ClipboardService::new(backend, clipboard_state)));
 
         let focus_service = FocusService::new(ImmediateFocusBackend::new());
 
@@ -495,7 +499,10 @@ mod tests {
             written: StdArc::clone(&written),
         };
 
-        let clipboard_service = StdArc::new(Mutex::new(ClipboardService::new(backend)));
+        let clipboard_state = StdArc::new(ClipboardState::default());
+
+        let clipboard_service =
+            StdArc::new(Mutex::new(ClipboardService::new(backend, clipboard_state)));
 
         let focus_service = FocusService::new(ImmediateFocusBackend::new());
 
@@ -583,7 +590,10 @@ mod tests {
             written: StdArc::clone(&written),
         };
 
-        let clipboard_service = StdArc::new(Mutex::new(ClipboardService::new(backend)));
+        let clipboard_state = StdArc::new(ClipboardState::default());
+
+        let clipboard_service =
+            StdArc::new(Mutex::new(ClipboardService::new(backend, clipboard_state)));
 
         let paste_backend = FakePasteBackend::direct(StdArc::clone(&pasted));
 
@@ -659,7 +669,10 @@ mod tests {
             written: StdArc::clone(&written),
         };
 
-        let clipboard_service = StdArc::new(Mutex::new(ClipboardService::new(backend)));
+        let clipboard_state = StdArc::new(ClipboardState::default());
+
+        let clipboard_service =
+            StdArc::new(Mutex::new(ClipboardService::new(backend, clipboard_state)));
 
         let paste_backend = FakePasteBackend::direct(StdArc::clone(&pasted));
 

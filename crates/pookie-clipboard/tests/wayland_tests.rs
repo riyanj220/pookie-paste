@@ -1,31 +1,44 @@
-use pookie_clipboard::{ClipboardBackend, wayland::WaylandClipboard};
+use pookie_clipboard::{
+    ClipboardBackend,
+    wayland::{WaylandClipboard, WaylandClipboardWatcher},
+};
 
 fn has_wayland_display() -> bool {
-    std::env::var("WAYLAND_DISPLAY").is_ok()
+    std::env::var_os("WAYLAND_DISPLAY").is_some()
 }
 
 #[test]
-fn test_wayland_clipboard_read() {
+fn test_wayland_watcher_initialization() {
     if !has_wayland_display() {
         return;
     }
 
-    let clipboard = WaylandClipboard::new().expect("Failed to initialize Wayland clipboard");
+    let watcher = WaylandClipboardWatcher::new();
 
-    let result = clipboard.read();
-
-    assert!(result.is_ok());
+    assert!(
+        watcher.is_ok(),
+        "failed to initialize Wayland clipboard watcher"
+    );
 }
 
 #[test]
-fn test_wayland_clipboard_write() {
+fn test_wayland_clipboard_write_and_read() {
     if !has_wayland_display() {
         return;
     }
 
-    let clipboard = WaylandClipboard::new().expect("Failed to initialize Wayland clipboard");
+    let clipboard = WaylandClipboard::new();
 
-    let result = clipboard.write("Pookie Paste Wayland Test");
+    let expected = "Pookie Paste Wayland Test";
 
-    assert!(result.is_ok());
+    clipboard
+        .write(expected)
+        .expect("failed writing Wayland clipboard");
+
+    let actual = clipboard.read().expect("failed reading Wayland clipboard");
+
+    assert_eq!(
+        actual, expected,
+        "Wayland clipboard content did not match written content"
+    );
 }

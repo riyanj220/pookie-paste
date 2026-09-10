@@ -143,9 +143,10 @@ mod tests {
     use std::sync::{Arc, Mutex as StdMutex};
 
     use daemon::clipboard_service::ClipboardService;
+    use daemon::clipboard_state::ClipboardState;
     use daemon::focus_backend::{FocusBackend, FocusError, FocusTarget};
     use daemon::focus_service::FocusService;
-    use daemon::paste_backend::ClipboardOnlyPasteBackend;
+    use daemon::paste_backend::WaylandPasteBackend;
 
     use history::{ClipboardHistoryService, HistoryConfig};
 
@@ -198,6 +199,7 @@ mod tests {
 
     /*
      * IPC tests are not testing real window focus.
+     *
      * This fake immediately accepts restoration and
      * reports the requested target as active.
      */
@@ -232,14 +234,17 @@ mod tests {
 
         let clipboard_backend = FakeClipboardBackend::new();
 
-        let clipboard_service = Arc::new(Mutex::new(ClipboardService::new(clipboard_backend)));
+        let clipboard_service = Arc::new(Mutex::new(ClipboardService::new(
+            clipboard_backend,
+            Arc::new(ClipboardState::default()),
+        )));
 
         let focus_service = FocusService::new(ImmediateFocusBackend);
 
         let activation_service = Arc::new(ClipboardActivationService::new(
             Arc::clone(&history_service),
             clipboard_service,
-            ClipboardOnlyPasteBackend,
+            WaylandPasteBackend::new(),
             focus_service,
         ));
 
