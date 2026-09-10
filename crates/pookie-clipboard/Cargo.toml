@@ -35,7 +35,11 @@ wayland-protocols = {
         "staging"
     ]
 }
-wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+
+wayland-protocols-wlr = {
+    version = "0.3",
+    features = ["client"]
+}
 
 futures-util = "0.3"
 
@@ -47,3 +51,5 @@ nix = {
 }
 
 wayland-scanner = "0.31"
+
+wl-clipboard-rs = "0.9.3"

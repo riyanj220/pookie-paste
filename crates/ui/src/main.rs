@@ -21,8 +21,6 @@ const FOCUS_ACQUISITION_TIMEOUT: Duration = Duration::from_millis(500);
 
 const FOCUS_RETRY_INTERVAL: Duration = Duration::from_millis(16);
 
-const CLIPBOARD_UPDATED_NOTIFICATION_DURATION: Duration = Duration::from_millis(1600);
-
 fn capture_initial_focus_target() -> Option<u64> {
     let runtime = tokio::runtime::Runtime::new().ok()?;
 
@@ -105,15 +103,6 @@ struct PookieApp {
     activation_in_progress: bool,
 
     status_message: Option<String>,
-
-    /*
-     * Temporary notification state.
-     *
-     * Used by Wayland clipboard-only activation to tell
-     * the user that the selected item is now in the
-     * system clipboard and can be pasted with Ctrl+V.
-     */
-    notification_until: Option<Instant>,
 }
 
 impl PookieApp {
@@ -147,8 +136,6 @@ impl PookieApp {
             activation_in_progress: false,
 
             status_message: None,
-
-            notification_until: None,
         }
     }
 
@@ -181,7 +168,7 @@ impl PookieApp {
          * 500 ms of the popup's lifetime.
          *
          * This isn't a sleep or UX delay. We retry across
-         * normal UI frames because the native window
+         * normal UI frames because the native X11 window
          * may not yet appear in the WM client list during
          * the very first frame.
          */
@@ -314,8 +301,6 @@ impl PookieApp {
 
         self.status_message = None;
 
-        self.notification_until = None;
-
         self.activation_in_progress = true;
 
         self.activation_receiver = Some(receiver);
@@ -344,28 +329,6 @@ impl PookieApp {
         self.start_activation_for_index(ctx, index);
     }
 
-    fn show_clipboard_updated_notification(&mut self, ctx: &egui::Context) {
-        self.activation_in_progress = false;
-
-        self.status_message = Some("Clipboard updated — press Ctrl+V".to_string());
-
-        self.notification_until = Some(Instant::now() + CLIPBOARD_UPDATED_NOTIFICATION_DURATION);
-
-        /*
-         * The popup was hidden while activation was running.
-         *
-         * Make the notification visible again so the user
-         * receives immediate feedback that the clipboard
-         * has been updated.
-         */
-        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-
-        /*
-         * Continue rendering until the notification expires.
-         */
-        ctx.request_repaint_after(Duration::from_millis(50));
-    }
-
     fn poll_activation(&mut self, ctx: &egui::Context) {
         let result = match self.activation_receiver.as_mut() {
             Some(receiver) => match receiver.try_recv() {
@@ -388,35 +351,14 @@ impl PookieApp {
         self.activation_receiver = None;
 
         match result {
-            Ok(ipc::ActivationOutcome::Pasted) => {
-                /*
-                 * Direct paste succeeded.
-                 *
-                 * Keep the existing X11 behavior:
-                 * close immediately after successful paste.
-                 */
+            Ok(ipc::ActivationOutcome::Pasted) | Ok(ipc::ActivationOutcome::ClipboardUpdated) => {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-            }
-
-            Ok(ipc::ActivationOutcome::ClipboardUpdated) => {
-                /*
-                 * Wayland fallback:
-                 *
-                 * The selected item has already been written
-                 * to the system clipboard by the daemon.
-                 *
-                 * Do not pretend that a paste happened.
-                 * Instead, tell the user exactly what to do.
-                 */
-                self.show_clipboard_updated_notification(ctx);
             }
 
             Ok(ipc::ActivationOutcome::PasteFailed) => {
                 self.activation_in_progress = false;
 
                 self.status_message = Some("Couldn't paste into the application.".to_string());
-
-                self.notification_until = None;
 
                 ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
             }
@@ -427,8 +369,6 @@ impl PookieApp {
                 self.status_message =
                     Some("This clipboard item is no longer available.".to_string());
 
-                self.notification_until = None;
-
                 ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
             }
 
@@ -436,8 +376,6 @@ impl PookieApp {
                 self.activation_in_progress = false;
 
                 self.status_message = Some("This clipboard item isn't supported yet.".to_string());
-
-                self.notification_until = None;
 
                 ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
             }
@@ -447,33 +385,9 @@ impl PookieApp {
 
                 self.status_message = Some("Something went wrong.".to_string());
 
-                self.notification_until = None;
-
                 ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
             }
         }
-    }
-
-    fn poll_notification(&mut self, ctx: &egui::Context) {
-        let Some(until) = self.notification_until else {
-            return;
-        };
-
-        if Instant::now() >= until {
-            self.notification_until = None;
-
-            self.status_message = None;
-
-            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-
-            return;
-        }
-
-        /*
-         * Keep checking until the notification duration
-         * expires without blocking the UI thread.
-         */
-        ctx.request_repaint_after(Duration::from_millis(50));
     }
 }
 
@@ -683,8 +597,6 @@ impl eframe::App for PookieApp {
 
         self.poll_activation(ui.ctx());
 
-        self.poll_notification(ui.ctx());
-
         let viewport_focused = ui.input(|input| input.viewport().focused.unwrap_or(false));
 
         /*
@@ -698,49 +610,14 @@ impl eframe::App for PookieApp {
         }
 
         /*
-         * A clipboard-updated notification is intentionally
-         * allowed to remain visible even if focus is not
-         * currently owned by the popup.
-         *
-         * Otherwise Wayland/compositor focus behavior could
-         * immediately dismiss the notification before the
-         * user has a chance to read it.
-         */
-        let notification_active = self.notification_until.is_some();
-
-        /*
          * Do not close the popup merely because its first
          * frame wasn't focused yet.
          *
          * Only treat focus loss as dismissal after focus
          * has genuinely been obtained at least once.
          */
-        if self.has_received_focus
-            && !viewport_focused
-            && !self.activation_in_progress
-            && !notification_active
-        {
+        if self.has_received_focus && !viewport_focused && !self.activation_in_progress {
             ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
-
-            return;
-        }
-
-        /*
-         * Once the clipboard-updated notification is visible,
-         * keyboard interaction is no longer required.
-         *
-         * The notification will disappear automatically.
-         */
-        if notification_active {
-            let palette = ui_style::palette(if ui.visuals().dark_mode {
-                AppTheme::Dark
-            } else {
-                AppTheme::Light
-            });
-
-            if let Some(message) = &self.status_message {
-                render_status_message(ui, message, palette);
-            }
 
             return;
         }
@@ -877,14 +754,14 @@ mod tests {
 
     #[test]
     fn short_preview_is_unchanged() {
-        assert_eq!(preview_text("Hello world"), "Hello world");
+        assert_eq!(preview_text("Hello world",), "Hello world",);
     }
 
     #[test]
     fn preview_limits_number_of_lines() {
         let preview = preview_text("one\ntwo\nthree\nfour");
 
-        assert_eq!(preview, "one\ntwo\nthree…");
+        assert_eq!(preview, "one\ntwo\nthree…",);
     }
 
     #[test]
@@ -893,6 +770,6 @@ mod tests {
 
         let preview = preview_text(&input);
 
-        assert!(preview.ends_with('…'));
+        assert!(preview.ends_with('…',),);
     }
 }

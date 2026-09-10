@@ -1,21 +1,24 @@
-use anyhow::Result;
-
 use std::sync::Arc;
 
-use pookie_clipboard::{ClipboardBackend, x11::X11Clipboard};
+use anyhow::Result;
+
+use pookie_clipboard::{ClipboardBackend, wayland::WaylandClipboard, x11::X11Clipboard};
 
 pub enum PlatformClipboard {
     X11(Arc<X11Clipboard>),
 
-    Wayland,
+    Wayland(Arc<WaylandClipboard>),
 }
 
 impl PlatformClipboard {
     pub fn new() -> Result<Self> {
-        let session = std::env::var("XDG_SESSION_TYPE").unwrap_or_default();
+        let session = std::env::var("XDG_SESSION_TYPE")
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase();
 
         match session.as_str() {
-            "wayland" => Ok(Self::Wayland),
+            "wayland" => Ok(Self::Wayland(Arc::new(WaylandClipboard::new()))),
 
             _ => Ok(Self::X11(Arc::new(X11Clipboard::new()?))),
         }
@@ -25,7 +28,7 @@ impl PlatformClipboard {
         match self {
             Self::X11(_) => "X11",
 
-            Self::Wayland => "Wayland",
+            Self::Wayland(_) => "Wayland",
         }
     }
 }
@@ -33,21 +36,25 @@ impl PlatformClipboard {
 impl ClipboardBackend for PlatformClipboard {
     fn read(&self) -> Result<String, pookie_clipboard::ClipboardError> {
         match self {
+            /*
+             * Existing X11 behavior remains delegated
+             * directly to X11Clipboard.
+             */
             Self::X11(backend) => backend.read(),
 
-            Self::Wayland => Err(pookie_clipboard::ClipboardError::ReadFailed(
-                "Wayland direct clipboard read is not implemented yet".to_string(),
-            )),
+            Self::Wayland(backend) => backend.read(),
         }
     }
 
     fn write(&self, content: &str) -> Result<(), pookie_clipboard::ClipboardError> {
         match self {
+            /*
+             * Existing X11 behavior remains delegated
+             * directly to X11Clipboard.
+             */
             Self::X11(backend) => backend.write(content),
 
-            Self::Wayland => Err(pookie_clipboard::ClipboardError::WriteFailed(
-                "Wayland direct clipboard write is not implemented yet".to_string(),
-            )),
+            Self::Wayland(backend) => backend.write(content),
         }
     }
 }
