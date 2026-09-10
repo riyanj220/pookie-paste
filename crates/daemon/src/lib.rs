@@ -10,6 +10,7 @@ pub mod ipc_mapper;
 pub mod paste_backend;
 pub mod platform_focus_backend;
 pub mod request_handler;
+pub mod wayland_paste_backend;
 pub mod x11_focus_backend;
 pub mod x11_paste_backend;
 
