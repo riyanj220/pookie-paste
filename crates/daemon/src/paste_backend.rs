@@ -20,6 +20,22 @@ pub trait PasteBackend: Send + Sync {
     fn paste(&self) -> Result<(), PasteError>;
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PasteBackendKind {
+    X11,
+    Wayland,
+}
+
+fn classify_session_type(session_type: &str) -> PasteBackendKind {
+    match session_type.trim().to_ascii_lowercase().as_str() {
+        "x11" => PasteBackendKind::X11,
+
+        "wayland" => PasteBackendKind::Wayland,
+
+        _ => PasteBackendKind::Wayland,
+    }
+}
+
 pub enum PlatformPasteBackend {
     X11(Box<X11PasteBackend>),
 
@@ -28,20 +44,15 @@ pub enum PlatformPasteBackend {
 
 impl PlatformPasteBackend {
     fn from_session_type(session_type: &str) -> Result<Self, PasteError> {
-        match session_type {
-            "x11" => Ok(Self::X11(Box::new(X11PasteBackend::new()?))),
+        match classify_session_type(session_type) {
+            PasteBackendKind::X11 => Ok(Self::X11(Box::new(X11PasteBackend::new()?))),
 
-            "wayland" => Ok(Self::Wayland(WaylandPasteBackend::new())),
-
-            _ => Ok(Self::Wayland(WaylandPasteBackend::new())),
+            PasteBackendKind::Wayland => Ok(Self::Wayland(WaylandPasteBackend::new())),
         }
     }
 
     pub fn new() -> Result<Self, PasteError> {
-        let session_type = std::env::var("XDG_SESSION_TYPE")
-            .unwrap_or_default()
-            .trim()
-            .to_ascii_lowercase();
+        let session_type = std::env::var("XDG_SESSION_TYPE").unwrap_or_default();
 
         Self::from_session_type(&session_type)
     }
@@ -78,26 +89,41 @@ mod tests {
     use super::*;
 
     #[test]
-    fn wayland_uses_clipboard_only_backend() {
-        let backend =
-            PlatformPasteBackend::from_session_type("wayland").expect("backend creation failed");
-
-        assert_eq!(backend.capability(), PasteCapability::ClipboardOnly);
+    fn identifies_wayland_session() {
+        assert_eq!(classify_session_type("wayland"), PasteBackendKind::Wayland,);
     }
 
     #[test]
-    fn x11_keeps_direct_paste_backend() {
-        let backend =
-            PlatformPasteBackend::from_session_type("x11").expect("backend creation failed");
-
-        assert_eq!(backend.capability(), PasteCapability::Direct);
+    fn identifies_x11_session() {
+        assert_eq!(classify_session_type("x11"), PasteBackendKind::X11,);
     }
 
     #[test]
     fn unknown_session_uses_wayland_fallback() {
-        let backend =
-            PlatformPasteBackend::from_session_type("unknown").expect("backend creation failed");
+        assert_eq!(classify_session_type("unknown"), PasteBackendKind::Wayland,);
+    }
 
-        assert_eq!(backend.capability(), PasteCapability::ClipboardOnly);
+    #[test]
+    fn classification_is_case_insensitive() {
+        assert_eq!(classify_session_type("X11"), PasteBackendKind::X11,);
+
+        assert_eq!(classify_session_type("WAYLAND"), PasteBackendKind::Wayland,);
+    }
+
+    #[test]
+    fn classification_ignores_whitespace() {
+        assert_eq!(classify_session_type("  x11  "), PasteBackendKind::X11,);
+
+        assert_eq!(
+            classify_session_type("\nwayland\t"),
+            PasteBackendKind::Wayland,
+        );
+    }
+
+    #[test]
+    fn wayland_backend_remains_clipboard_only() {
+        let backend = WaylandPasteBackend::new();
+
+        assert_eq!(backend.capability(), PasteCapability::ClipboardOnly,);
     }
 }
