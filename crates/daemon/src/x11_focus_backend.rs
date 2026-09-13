@@ -47,8 +47,13 @@ impl X11FocusBackend {
     }
 
     fn target_window(target: FocusTarget) -> Result<u32, FocusError> {
-        u32::try_from(target.id())
-            .map_err(|_| FocusError::Failed(format!("invalid X11 window ID: {}", target.id(),)))
+        let id = target.x11_id().ok_or_else(|| {
+            FocusError::Failed(format!(
+                "non-X11 focus target passed to X11 focus backend: {target}",
+            ))
+        })?;
+
+        u32::try_from(id).map_err(|_| FocusError::Failed(format!("invalid X11 window ID: {id}")))
     }
 }
 
@@ -80,7 +85,7 @@ impl FocusBackend for X11FocusBackend {
             return Err(FocusError::Unavailable);
         }
 
-        Ok(FocusTarget::new(u64::from(window)))
+        Ok(FocusTarget::x11(u64::from(window)))
     }
 
     fn restore(&self, target: FocusTarget) -> Result<(), FocusError> {
@@ -112,6 +117,16 @@ impl FocusBackend for X11FocusBackend {
     }
 
     fn is_active(&self, target: FocusTarget) -> Result<bool, FocusError> {
+        /*
+         * Reject a target belonging to another platform rather
+         * than accidentally comparing unrelated identifiers.
+         */
+        if target.x11_id().is_none() {
+            return Err(FocusError::Failed(format!(
+                "non-X11 focus target passed to X11 focus backend: {target}",
+            )));
+        }
+
         match self.active_target() {
             Ok(active) => Ok(active == target),
 
@@ -119,5 +134,36 @@ impl FocusBackend for X11FocusBackend {
 
             Err(error) => Err(error),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_kde_target_as_x11_window() {
+        let kde_id =
+            uuid::Uuid::parse_str("12345678-1234-5678-1234-567812345678").expect("valid UUID");
+
+        let result = X11FocusBackend::target_window(FocusTarget::kde(kde_id));
+
+        match result {
+            Err(FocusError::Failed(message)) => {
+                assert!(message.contains("non-X11 focus target"));
+            }
+
+            _ => {
+                panic!("expected platform mismatch failure");
+            }
+        }
+    }
+
+    #[test]
+    fn converts_valid_x11_target_to_window_id() {
+        let window =
+            X11FocusBackend::target_window(FocusTarget::x11(12345)).expect("valid X11 target");
+
+        assert_eq!(window, 12345);
     }
 }

@@ -92,7 +92,7 @@ where
         {
             tracing::error!(
                 error = ?error,
-                target_id = target.id(),
+                target = %target,
                 "focus restoration failed"
             );
 

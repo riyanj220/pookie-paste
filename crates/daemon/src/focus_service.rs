@@ -48,8 +48,7 @@ where
 
             if started.elapsed() >= self.timeout {
                 return Err(FocusError::Failed(format!(
-                    "focus restoration timed out for target {}",
-                    target.id(),
+                    "focus restoration timed out for target {target}",
                 )));
             }
 
@@ -122,7 +121,7 @@ mod tests {
 
         assert!(result.is_ok());
 
-        assert!(restore_called.load(Ordering::SeqCst,));
+        assert!(restore_called.load(Ordering::SeqCst));
 
         assert_eq!(checks.load(Ordering::SeqCst), 3,);
     }
@@ -168,16 +167,34 @@ mod tests {
 
         let result = service.restore_and_wait(target).await;
 
-        assert!(restore_called.load(Ordering::SeqCst,));
+        assert!(restore_called.load(Ordering::SeqCst));
 
         match result {
             Err(FocusError::Failed(message)) => {
                 assert!(message.contains("focus restoration timed out"));
+
+                assert!(message.contains("x11:42"));
             }
 
             other => {
                 panic!("unexpected result: {other:?}");
             }
         }
+    }
+
+    #[tokio::test]
+    async fn service_supports_kde_focus_target_without_platform_assumptions() {
+        let backend = FakeFocusBackend::new(0);
+
+        let service =
+            FocusService::with_timing(backend, Duration::from_millis(1), Duration::from_millis(20));
+
+        let id = uuid::Uuid::parse_str("12345678-1234-5678-1234-567812345678").expect("valid UUID");
+
+        let target = FocusTarget::kde(id);
+
+        let result = service.restore_and_wait(target).await;
+
+        assert!(result.is_ok());
     }
 }

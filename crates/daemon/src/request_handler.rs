@@ -33,7 +33,7 @@ where
         },
 
         IpcRequest::ActivateItem { id, target_id } => {
-            let target = target_id.map(FocusTarget::new);
+            let target = target_id.map(FocusTarget::x11);
 
             match activation_service.activate(&id, target).await {
                 Ok(result) => {
@@ -86,8 +86,21 @@ where
         },
 
         IpcRequest::CaptureFocusTarget => match activation_service.capture_target() {
-            Ok(target) => IpcResponse::FocusTarget {
-                target_id: Some(target.id()),
+            Ok(target) => match target.x11_id() {
+                Some(target_id) => IpcResponse::FocusTarget {
+                    target_id: Some(target_id),
+                },
+
+                None => {
+                    tracing::error!(
+                        target = %target,
+                        "focus target cannot be represented by current IPC format"
+                    );
+
+                    IpcResponse::Error {
+                        message: "unsupported focus target type".to_string(),
+                    }
+                }
             },
 
             Err(FocusError::Unavailable) => IpcResponse::FocusTarget { target_id: None },
