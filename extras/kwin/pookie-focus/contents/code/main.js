@@ -1,6 +1,13 @@
 let capturedWindowId = null;
 
-const PREFIX = "POOKIE_FOCUS:";
+const POOKIE_SERVICE =
+"io.github.riyanj220.PookiePaste";
+
+const POOKIE_PATH =
+"/io/github/riyanj220/PookiePaste/Focus";
+
+const POOKIE_INTERFACE =
+"io.github.riyanj220.PookiePaste.Focus";
 
 function windowId(window) {
     if (!window) {
@@ -28,42 +35,64 @@ function captureActiveWindow() {
     const active = workspace.activeWindow;
 
     if (!active) {
-        print(PREFIX + "CAPTURE_UNAVAILABLE");
+        callDBus(
+            POOKIE_SERVICE,
+            POOKIE_PATH,
+            POOKIE_INTERFACE,
+            "CaptureUnavailable"
+        );
+
         return;
     }
 
     capturedWindowId = windowId(active);
 
-    print(
-        PREFIX +
-        "CAPTURED:" +
+    callDBus(
+        POOKIE_SERVICE,
+        POOKIE_PATH,
+        POOKIE_INTERFACE,
+        "Captured",
         capturedWindowId
     );
 }
 
 function restoreCapturedWindow() {
     if (!capturedWindowId) {
-        print(PREFIX + "RESTORE_NO_TARGET");
+        callDBus(
+            POOKIE_SERVICE,
+            POOKIE_PATH,
+            POOKIE_INTERFACE,
+            "RestoreNoTarget"
+        );
+
         return;
     }
 
     const target = findWindow(capturedWindowId);
 
     if (!target) {
-        print(
-            PREFIX +
-            "RESTORE_NOT_FOUND:" +
+        callDBus(
+            POOKIE_SERVICE,
+            POOKIE_PATH,
+            POOKIE_INTERFACE,
+            "RestoreNotFound",
             capturedWindowId
         );
 
         return;
     }
 
+    /*
+     * This is the exact activation mechanism that was
+     * verified on Plasma 6.7.4.
+     */
     workspace.activeWindow = target;
 
-    print(
-        PREFIX +
-        "RESTORE_REQUESTED:" +
+    callDBus(
+        POOKIE_SERVICE,
+        POOKIE_PATH,
+        POOKIE_INTERFACE,
+        "RestoreRequested",
         capturedWindowId
     );
 }
@@ -72,17 +101,31 @@ function reportActiveWindow() {
     const active = workspace.activeWindow;
 
     if (!active) {
-        print(PREFIX + "ACTIVE_NONE");
+        callDBus(
+            POOKIE_SERVICE,
+            POOKIE_PATH,
+            POOKIE_INTERFACE,
+            "ActiveNone"
+        );
+
         return;
     }
 
-    print(
-        PREFIX +
-        "ACTIVE:" +
+    callDBus(
+        POOKIE_SERVICE,
+        POOKIE_PATH,
+        POOKIE_INTERFACE,
+        "Active",
         windowId(active)
     );
 }
 
+/*
+ * Final production action IDs.
+ *
+ * These IDs must remain stable after release.
+ * No user-visible default shortcuts are assigned.
+ */
 registerShortcut(
     "PookiePasteFocusCapture",
     "Pookie Paste: Capture Focus",

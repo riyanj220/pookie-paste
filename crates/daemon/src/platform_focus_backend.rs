@@ -1,32 +1,80 @@
 use crate::focus_backend::{FocusBackend, FocusError, FocusTarget, UnavailableFocusBackend};
 
+use crate::kde_focus_backend::KdeFocusBackend;
 use crate::x11_focus_backend::X11FocusBackend;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FocusBackendKind {
+    X11,
+    Kde,
+    Unavailable,
+}
+
+fn classify_environment(session_type: &str, current_desktop: &str) -> FocusBackendKind {
+    let session = session_type.trim().to_ascii_lowercase();
+
+    if session == "x11" {
+        return FocusBackendKind::X11;
+    }
+
+    if session != "wayland" {
+        return FocusBackendKind::Unavailable;
+    }
+
+    let desktop = current_desktop.trim().to_ascii_lowercase();
+
+    let is_kde = desktop.split([':', ';']).any(|part| part.trim() == "kde");
+
+    if is_kde {
+        FocusBackendKind::Kde
+    } else {
+        FocusBackendKind::Unavailable
+    }
+}
 
 pub enum PlatformFocusBackend {
     X11(Box<X11FocusBackend>),
+
+    Kde(KdeFocusBackend),
+
     Unavailable(UnavailableFocusBackend),
 }
 
 impl PlatformFocusBackend {
     pub fn new() -> Result<Self, FocusError> {
-        let session_type = std::env::var("XDG_SESSION_TYPE")
-            .unwrap_or_default()
-            .to_lowercase();
+        let session_type = std::env::var("XDG_SESSION_TYPE").unwrap_or_default();
 
-        Self::from_session_type(&session_type)
+        let current_desktop = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
+
+        Self::from_environment(&session_type, &current_desktop)
     }
 
-    fn from_session_type(session_type: &str) -> Result<Self, FocusError> {
-        match session_type {
-            "x11" => Ok(Self::X11(Box::new(X11FocusBackend::new()?))),
+    fn from_environment(session_type: &str, current_desktop: &str) -> Result<Self, FocusError> {
+        match classify_environment(session_type, current_desktop) {
+            FocusBackendKind::X11 => Ok(Self::X11(Box::new(X11FocusBackend::new()?))),
 
-            _ => Ok(Self::Unavailable(UnavailableFocusBackend)),
+            FocusBackendKind::Kde => match KdeFocusBackend::new() {
+                Ok(backend) => Ok(Self::Kde(backend)),
+
+                Err(error) => {
+                    tracing::warn!(
+                        error = ?error,
+                        "KDE focus helper unavailable; using focus fallback"
+                    );
+
+                    Ok(Self::Unavailable(UnavailableFocusBackend))
+                }
+            },
+
+            FocusBackendKind::Unavailable => Ok(Self::Unavailable(UnavailableFocusBackend)),
         }
     }
 
     pub fn name(&self) -> &'static str {
         match self {
             Self::X11(_) => "X11 focus",
+
+            Self::Kde(_) => "KDE KWin focus",
 
             Self::Unavailable(_) => "unavailable",
         }
@@ -38,6 +86,8 @@ impl FocusBackend for PlatformFocusBackend {
         match self {
             Self::X11(backend) => backend.active_target(),
 
+            Self::Kde(backend) => backend.active_target(),
+
             Self::Unavailable(backend) => backend.active_target(),
         }
     }
@@ -45,6 +95,8 @@ impl FocusBackend for PlatformFocusBackend {
     fn restore(&self, target: FocusTarget) -> Result<(), FocusError> {
         match self {
             Self::X11(backend) => backend.restore(target),
+
+            Self::Kde(backend) => backend.restore(target),
 
             Self::Unavailable(backend) => backend.restore(target),
         }
@@ -54,6 +106,8 @@ impl FocusBackend for PlatformFocusBackend {
         match self {
             Self::X11(backend) => backend.is_active(target),
 
+            Self::Kde(backend) => backend.is_active(target),
+
             Self::Unavailable(backend) => backend.is_active(target),
         }
     }
@@ -62,27 +116,49 @@ impl FocusBackend for PlatformFocusBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::focus_backend::FocusBackend;
 
     #[test]
-    fn wayland_uses_unavailable_focus_backend() {
-        let backend =
-            PlatformFocusBackend::from_session_type("wayland").expect("backend creation failed");
-
-        assert!(matches!(
-            backend.active_target(),
-            Err(FocusError::Unavailable)
-        ));
+    fn x11_selects_x11_backend() {
+        assert_eq!(classify_environment("x11", "KDE",), FocusBackendKind::X11,);
     }
 
     #[test]
-    fn unknown_session_uses_unavailable_focus_backend() {
-        let backend =
-            PlatformFocusBackend::from_session_type("unknown").expect("backend creation failed");
+    fn kde_wayland_selects_kde_backend() {
+        assert_eq!(
+            classify_environment("wayland", "KDE",),
+            FocusBackendKind::Kde,
+        );
+    }
 
-        assert!(matches!(
-            backend.active_target(),
-            Err(FocusError::Unavailable)
-        ));
+    #[test]
+    fn kde_desktop_matching_is_case_insensitive() {
+        assert_eq!(
+            classify_environment("WAYLAND", "kde",),
+            FocusBackendKind::Kde,
+        );
+    }
+
+    #[test]
+    fn composite_kde_desktop_is_detected() {
+        assert_eq!(
+            classify_environment("wayland", "KDE:Plasma",),
+            FocusBackendKind::Kde,
+        );
+    }
+
+    #[test]
+    fn non_kde_wayland_uses_fallback() {
+        assert_eq!(
+            classify_environment("wayland", "GNOME",),
+            FocusBackendKind::Unavailable,
+        );
+    }
+
+    #[test]
+    fn unknown_session_uses_fallback() {
+        assert_eq!(
+            classify_environment("unknown", "KDE",),
+            FocusBackendKind::Unavailable,
+        );
     }
 }

@@ -68,6 +68,8 @@ async fn main() -> anyhow::Result<()> {
     let focus_backend = PlatformFocusBackend::new()
         .map_err(|error| anyhow::anyhow!("failed to initialize focus backend: {error:?}"))?;
 
+    info!("focus backend: {}", focus_backend.name());
+
     let focus_service = FocusService::new(focus_backend);
 
     let mut shortcut_listener = ShortcutListener::start();
