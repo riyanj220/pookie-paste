@@ -38,7 +38,10 @@ ipc = {
     path = "../ipc"
 }
 
-uuid = { version = "1", features = ["v4"] }
+uuid = {
+    version = "1",
+    features = ["v4"]
+}
 
 x11rb = {
     version = "0.13",
@@ -46,4 +49,25 @@ x11rb = {
 }
 
 zbus = "5.19"
+
 futures-util = "0.3"
+
+ashpd = {
+    version = "0.13.13",
+    default-features = false,
+    features = [
+        "tokio",
+        "remote_desktop",
+        "screencast"
+    ]
+}
+
+reis = {
+    version = "0.7.1",
+    features = ["tokio"]
+}
+
+rustix = {
+    version = "1",
+    features = ["time"]
+}
