@@ -54,7 +54,8 @@ const RESTORE_TOKEN_FILE: &str = "remote-desktop.restore-token";
 enum PortalEisHealth {
     Ready = 1,
     Paused = 2,
-    Failed = 3,
+    Recovering = 3,
+    Failed = 4,
 }
 
 impl PortalEisHealth {
@@ -62,6 +63,7 @@ impl PortalEisHealth {
         match value {
             1 => Self::Ready,
             2 => Self::Paused,
+            3 => Self::Recovering,
             _ => Self::Failed,
         }
     }
@@ -70,9 +72,18 @@ impl PortalEisHealth {
 fn health_capability(health: PortalEisHealth) -> PasteCapability {
     match health {
         PortalEisHealth::Ready => PasteCapability::Direct,
-        PortalEisHealth::Paused | PortalEisHealth::Failed => PasteCapability::ClipboardOnly,
+        PortalEisHealth::Paused | PortalEisHealth::Recovering | PortalEisHealth::Failed => {
+            PasteCapability::ClipboardOnly
+        }
     }
 }
+
+const RECONNECT_DELAYS: [Duration; 4] = [
+    Duration::from_secs(1),
+    Duration::from_secs(2),
+    Duration::from_secs(5),
+    Duration::from_secs(10),
+];
 
 pub struct PortalEisPasteBackend {
     sender: tokio_mpsc::UnboundedSender<WorkerCommand>,
@@ -83,6 +94,18 @@ enum WorkerCommand {
     Paste {
         reply: SyncSender<Result<(), PasteError>>,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SessionRunOutcome {
+    Reconnect,
+    BackendDropped,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EventOutcome {
+    Continue,
+    Reconnect,
 }
 
 struct PortalEisSession {
@@ -153,14 +176,12 @@ impl PortalEisPasteBackend {
 
                 runtime.block_on(async move {
                     match PortalEisSession::connect(Arc::clone(&worker_health)).await {
-                        Ok(mut session) => {
+                        Ok(session) => {
                             worker_health.store(PortalEisHealth::Ready as u8, Ordering::Release);
 
                             let _ = init_sender.send(Ok(()));
 
-                            session.run(command_receiver).await;
-
-                            worker_health.store(PortalEisHealth::Failed as u8, Ordering::Release);
+                            run_worker(session, command_receiver, worker_health).await;
                         }
 
                         Err(error) => {
@@ -242,6 +263,142 @@ impl PasteBackend for PortalEisPasteBackend {
         }
 
         self.request_paste()
+    }
+}
+
+async fn run_worker(
+    mut session: PortalEisSession,
+    mut receiver: tokio_mpsc::UnboundedReceiver<WorkerCommand>,
+    health: Arc<AtomicU8>,
+) {
+    loop {
+        match session.run(&mut receiver).await {
+            SessionRunOutcome::BackendDropped => {
+                health.store(PortalEisHealth::Failed as u8, Ordering::Release);
+
+                break;
+            }
+
+            SessionRunOutcome::Reconnect => {
+                health.store(PortalEisHealth::Recovering as u8, Ordering::Release);
+
+                tracing::warn!("Portal/EIS session lost; attempting recovery");
+            }
+        }
+
+        drop(session);
+
+        let mut retry_index = 0usize;
+
+        loop {
+            let delay = RECONNECT_DELAYS[retry_index.min(RECONNECT_DELAYS.len() - 1)];
+
+            tracing::info!(
+                retry_seconds = delay.as_secs(),
+                "waiting before Portal/EIS reconnect"
+            );
+
+            if !wait_for_reconnect_delay(&mut receiver, delay).await {
+                health.store(PortalEisHealth::Failed as u8, Ordering::Release);
+
+                return;
+            }
+
+            tracing::info!("attempting Portal/EIS reconnection");
+
+            match PortalEisSession::connect(Arc::clone(&health)).await {
+                Ok(new_session) => {
+                    /*
+                     * Never execute paste commands that were queued while the
+                     * connection was unavailable.
+                     */
+                    if !reject_pending_commands(&mut receiver) {
+                        health.store(PortalEisHealth::Failed as u8, Ordering::Release);
+
+                        return;
+                    }
+
+                    health.store(PortalEisHealth::Ready as u8, Ordering::Release);
+
+                    tracing::info!("Portal/EIS direct paste recovered");
+
+                    session = new_session;
+
+                    break;
+                }
+
+                Err(error) => {
+                    health.store(PortalEisHealth::Recovering as u8, Ordering::Release);
+
+                    tracing::warn!(
+                        error = ?error,
+                        "Portal/EIS reconnection failed"
+                    );
+
+                    retry_index = retry_index.saturating_add(1);
+                }
+            }
+        }
+    }
+}
+
+fn reject_command(command: WorkerCommand) {
+    match command {
+        WorkerCommand::Paste { reply } => {
+            let _ = reply.send(Err(PasteError::Unavailable));
+        }
+    }
+}
+
+fn reject_pending_commands(receiver: &mut tokio_mpsc::UnboundedReceiver<WorkerCommand>) -> bool {
+    loop {
+        match receiver.try_recv() {
+            Ok(command) => {
+                reject_command(command);
+            }
+
+            Err(tokio_mpsc::error::TryRecvError::Empty) => {
+                return true;
+            }
+
+            Err(tokio_mpsc::error::TryRecvError::Disconnected) => {
+                return false;
+            }
+        }
+    }
+}
+
+async fn wait_for_reconnect_delay(
+    receiver: &mut tokio_mpsc::UnboundedReceiver<WorkerCommand>,
+    delay: Duration,
+) -> bool {
+    let sleep = tokio::time::sleep(delay);
+
+    tokio::pin!(sleep);
+
+    loop {
+        tokio::select! {
+            _ = &mut sleep => {
+                return true;
+            }
+
+            command = receiver.recv() => {
+                match command {
+                    Some(command) => {
+                        /*
+                         * The caller sees immediate clipboard-only fallback.
+                         * Never retain this command for execution after
+                         * reconnection.
+                         */
+                        reject_command(command);
+                    }
+
+                    None => {
+                        return false;
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -540,7 +697,10 @@ impl PortalEisSession {
         })
     }
 
-    async fn run(&mut self, mut receiver: tokio_mpsc::UnboundedReceiver<WorkerCommand>) {
+    async fn run(
+        &mut self,
+        receiver: &mut tokio_mpsc::UnboundedReceiver<WorkerCommand>,
+    ) -> SessionRunOutcome {
         loop {
             tokio::select! {
                 command = receiver.recv() => {
@@ -548,11 +708,27 @@ impl PortalEisSession {
                         Some(WorkerCommand::Paste { reply }) => {
                             let result = self.paste_ctrl_v().await;
 
+                            let connection_failed =
+                            matches!(result, Err(PasteError::Failed(_)));
+
                             let _ = reply.send(result);
+
+                            if connection_failed {
+                                self.health.store(
+                                    PortalEisHealth::Recovering as u8,
+                                    Ordering::Release,
+                                );
+
+                                self.stop_emulating_best_effort();
+
+                                return SessionRunOutcome::Reconnect;
+                            }
                         }
 
                         None => {
-                            break;
+                            self.stop_emulating_best_effort();
+
+                            return SessionRunOutcome::BackendDropped;
                         }
                     }
                 }
@@ -560,45 +736,52 @@ impl PortalEisSession {
                 event = self.events.next() => {
                     match event {
                         Some(Ok(event)) => {
-                            if !self.handle_event(event) {
-                                break;
+                            match self.handle_event(event) {
+                                EventOutcome::Continue => {}
+
+                                EventOutcome::Reconnect => {
+                                    self.stop_emulating_best_effort();
+
+                                    return SessionRunOutcome::Reconnect;
+                                }
                             }
                         }
 
                         Some(Err(error)) => {
-                            self.health
-                            .store(PortalEisHealth::Failed as u8, Ordering::Release);
+                            self.health.store(
+                                PortalEisHealth::Recovering as u8,
+                                Ordering::Release,
+                            );
 
                             tracing::warn!(
                                 error = ?error,
                                 "Portal/EIS event stream failed"
                             );
 
-                            break;
+                            self.stop_emulating_best_effort();
+
+                            return SessionRunOutcome::Reconnect;
                         }
 
                         None => {
-                            self.health
-                            .store(PortalEisHealth::Failed as u8, Ordering::Release);
+                            self.health.store(
+                                PortalEisHealth::Recovering as u8,
+                                Ordering::Release,
+                            );
 
                             tracing::warn!("Portal/EIS event stream ended");
 
-                            break;
+                            self.stop_emulating_best_effort();
+
+                            return SessionRunOutcome::Reconnect;
                         }
                     }
                 }
             }
         }
-
-        self.health
-            .store(PortalEisHealth::Failed as u8, Ordering::Release);
-
-        self.stop_emulating_best_effort();
-
-        tracing::warn!("Portal/EIS paste worker stopped");
     }
 
-    fn handle_event(&mut self, event: EiEvent) -> bool {
+    fn handle_event(&mut self, event: EiEvent) -> EventOutcome {
         match event {
             EiEvent::DeviceResumed(event) if event.device == self.keyboard_device => {
                 self.resumed = true;
@@ -627,7 +810,7 @@ impl PortalEisSession {
                         self.emulating = false;
 
                         self.health
-                            .store(PortalEisHealth::Failed as u8, Ordering::Release);
+                            .store(PortalEisHealth::Recovering as u8, Ordering::Release);
 
                         tracing::error!(
                             error = ?error,
@@ -635,6 +818,8 @@ impl PortalEisSession {
                             sequence,
                             "failed restarting Portal/EIS keyboard emulation"
                         );
+
+                        return EventOutcome::Reconnect;
                     }
                 }
             }
@@ -659,11 +844,11 @@ impl PortalEisSession {
                 self.emulating = false;
 
                 self.health
-                    .store(PortalEisHealth::Failed as u8, Ordering::Release);
+                    .store(PortalEisHealth::Recovering as u8, Ordering::Release);
 
                 tracing::warn!("Portal/EIS keyboard device removed");
 
-                return false;
+                return EventOutcome::Reconnect;
             }
 
             EiEvent::Disconnected(event) => {
@@ -671,20 +856,20 @@ impl PortalEisSession {
                 self.emulating = false;
 
                 self.health
-                    .store(PortalEisHealth::Failed as u8, Ordering::Release);
+                    .store(PortalEisHealth::Recovering as u8, Ordering::Release);
 
                 tracing::warn!(
                     event = ?event,
                     "Portal/EIS disconnected"
                 );
 
-                return false;
+                return EventOutcome::Reconnect;
             }
 
             _ => {}
         }
 
-        true
+        EventOutcome::Continue
     }
 
     fn take_next_sequence(&mut self) -> u32 {
@@ -914,6 +1099,27 @@ mod tests {
         assert_eq!(
             health_capability(PortalEisHealth::Paused),
             PasteCapability::ClipboardOnly,
+        );
+    }
+
+    #[test]
+    fn recovering_health_is_clipboard_only() {
+        assert_eq!(
+            health_capability(PortalEisHealth::Recovering),
+            PasteCapability::ClipboardOnly,
+        );
+    }
+
+    #[test]
+    fn reconnect_backoff_is_bounded() {
+        assert_eq!(
+            RECONNECT_DELAYS,
+            [
+                Duration::from_secs(1),
+                Duration::from_secs(2),
+                Duration::from_secs(5),
+                Duration::from_secs(10),
+            ],
         );
     }
 
