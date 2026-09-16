@@ -41,3 +41,5 @@ pub mod ui_launcher;
 pub mod platform_shortcut_backend;
 
 pub mod wayland_shortcut_backend;
+
+pub mod app_paths;

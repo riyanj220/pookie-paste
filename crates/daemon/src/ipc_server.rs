@@ -18,25 +18,32 @@ use tracing::{error, info};
 
 const IPC_READ_TIMEOUT: Duration = Duration::from_secs(30);
 
-pub fn bind() -> anyhow::Result<IpcServer> {
+pub enum BindOutcome {
+    Bound(IpcServer),
+    AlreadyRunning,
+}
+
+pub fn bind() -> anyhow::Result<BindOutcome> {
     let path = socket_path();
 
-    let server = IpcServer::bind(&path).map_err(|error| match error {
-        ServerError::AlreadyRunning { path } => {
-            anyhow::anyhow!(
-                "another Pookie Paste daemon is already running at {}",
-                path.display()
-            )
+    match IpcServer::bind(&path) {
+        Ok(server) => {
+            info!("IPC server listening at {}", path.display());
+
+            Ok(BindOutcome::Bound(server))
         }
 
-        other => {
-            anyhow::anyhow!("failed to bind IPC server: {other:?}")
+        Err(ServerError::AlreadyRunning { path }) => {
+            info!(
+                path = %path.display(),
+                  "Pookie Paste is already running"
+            );
+
+            Ok(BindOutcome::AlreadyRunning)
         }
-    })?;
 
-    info!("IPC server listening at {}", path.display());
-
-    Ok(server)
+        Err(error) => Err(anyhow::anyhow!("failed to bind IPC server: {error:?}")),
+    }
 }
 
 pub async fn run<B, P, F>(

@@ -2,6 +2,8 @@ mod ipc_server;
 mod logging;
 mod shutdown;
 
+use ipc_server::BindOutcome;
+
 use std::sync::Arc;
 
 use tokio::sync::Mutex;
@@ -33,13 +35,34 @@ use daemon::clipboard_backend::PlatformClipboard;
 
 use daemon::clipboard_watcher;
 
+use daemon::app_paths;
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     logging::init_logging();
 
-    let ipc_listener = ipc_server::bind()?;
+    let ipc_listener = match ipc_server::bind()? {
+        BindOutcome::Bound(listener) => listener,
 
-    let database = Database::new("sqlite:./pookie-paste.db").await?;
+        BindOutcome::AlreadyRunning => {
+            info!("Pookie Paste is already running; exiting");
+
+            return Ok(());
+        }
+    };
+
+    app_paths::ensure_data_directory()?;
+
+    let database_path = app_paths::database_path()?;
+
+    info!(
+        path = %database_path.display(),
+          "using application database"
+    );
+
+    let database_url = format!("sqlite://{}", database_path.display(),);
+
+    let database = Database::new(&database_url).await?;
 
     info!("database initialized");
 

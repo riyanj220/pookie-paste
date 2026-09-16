@@ -126,5 +126,9 @@ fn resolve_ui_binary() -> Result<PathBuf, UiLaunchError> {
 }
 
 fn ui_binary_name() -> &'static str {
-    if cfg!(windows) { "ui.exe" } else { "ui" }
+    if cfg!(windows) {
+        "pookie-paste-ui.exe"
+    } else {
+        "pookie-paste-ui"
+    }
 }

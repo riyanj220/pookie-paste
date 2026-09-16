@@ -17,3 +17,6 @@ target/
 # Database
 *.db
 *.sqlite
+
+
+dist/
