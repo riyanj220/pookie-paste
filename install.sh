@@ -217,8 +217,8 @@ tar \
 INNER_INSTALLER="$(
     find \
         "$SOURCE_DIR" \
-        -mindepth 2 \
-        -maxdepth 2 \
+        -mindepth 3 \
+        -maxdepth 3 \
         -type f \
         -path '*/scripts/install.sh' \
         -print \
