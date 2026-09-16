@@ -134,6 +134,10 @@ where
     pub fn capture_target(&self) -> Result<FocusTarget, FocusError> {
         self.focus_service.capture_target()
     }
+
+    pub fn shutdown(&self) {
+        self.paste_backend.shutdown();
+    }
 }
 
 #[cfg(test)]

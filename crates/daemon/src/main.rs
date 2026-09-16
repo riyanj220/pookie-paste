@@ -248,6 +248,10 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    info!("shutting down Pookie services");
+
+    activation_service.shutdown();
+
     info!("Pookie daemon stopped");
 
     Ok(())

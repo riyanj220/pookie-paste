@@ -45,9 +45,12 @@ const DEVICE_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(5);
 
 const PASTE_COMMAND_TIMEOUT: Duration = Duration::from_secs(2);
 
+const WORKER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
+
 const KEY_INTERVAL: Duration = Duration::from_millis(30);
 
 const RESTORE_TOKEN_FILE: &str = "remote-desktop.restore-token";
+const RESTORE_TOKEN_TEMP_FILE: &str = ".remote-desktop.restore-token.tmp";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -94,6 +97,10 @@ enum WorkerCommand {
     Paste {
         reply: SyncSender<Result<(), PasteError>>,
     },
+
+    Shutdown {
+        reply: SyncSender<()>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -106,6 +113,12 @@ enum SessionRunOutcome {
 enum EventOutcome {
     Continue,
     Reconnect,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OfflineCommandOutcome {
+    Continue,
+    Shutdown,
 }
 
 struct PortalEisSession {
@@ -248,6 +261,36 @@ impl PortalEisPasteBackend {
             }
         }
     }
+
+    fn request_shutdown(&self) {
+        let (reply_sender, reply_receiver) = mpsc::sync_channel(1);
+
+        if self
+            .sender
+            .send(WorkerCommand::Shutdown {
+                reply: reply_sender,
+            })
+            .is_err()
+        {
+            /*
+             * Worker already stopped.
+             */
+            self.health
+                .store(PortalEisHealth::Failed as u8, Ordering::Release);
+
+            return;
+        }
+
+        if let Err(error) = reply_receiver.recv_timeout(WORKER_SHUTDOWN_TIMEOUT) {
+            tracing::debug!(
+                error = ?error,
+                "Portal/EIS worker did not acknowledge shutdown"
+            );
+        }
+
+        self.health
+            .store(PortalEisHealth::Failed as u8, Ordering::Release);
+    }
 }
 
 impl PasteBackend for PortalEisPasteBackend {
@@ -263,6 +306,10 @@ impl PasteBackend for PortalEisPasteBackend {
         }
 
         self.request_paste()
+    }
+
+    fn shutdown(&self) {
+        self.request_shutdown();
     }
 }
 
@@ -306,7 +353,15 @@ async fn run_worker(
 
             tracing::info!("attempting Portal/EIS reconnection");
 
-            match PortalEisSession::connect(Arc::clone(&health)).await {
+            let reconnect_result = reconnect_session(&mut receiver, Arc::clone(&health)).await;
+
+            let Some(reconnect_result) = reconnect_result else {
+                health.store(PortalEisHealth::Failed as u8, Ordering::Release);
+
+                return;
+            };
+
+            match reconnect_result {
                 Ok(new_session) => {
                     /*
                      * Never execute paste commands that were queued while the
@@ -342,10 +397,18 @@ async fn run_worker(
     }
 }
 
-fn reject_command(command: WorkerCommand) {
+fn handle_offline_command(command: WorkerCommand) -> OfflineCommandOutcome {
     match command {
         WorkerCommand::Paste { reply } => {
             let _ = reply.send(Err(PasteError::Unavailable));
+
+            OfflineCommandOutcome::Continue
+        }
+
+        WorkerCommand::Shutdown { reply } => {
+            let _ = reply.send(());
+
+            OfflineCommandOutcome::Shutdown
         }
     }
 }
@@ -353,9 +416,13 @@ fn reject_command(command: WorkerCommand) {
 fn reject_pending_commands(receiver: &mut tokio_mpsc::UnboundedReceiver<WorkerCommand>) -> bool {
     loop {
         match receiver.try_recv() {
-            Ok(command) => {
-                reject_command(command);
-            }
+            Ok(command) => match handle_offline_command(command) {
+                OfflineCommandOutcome::Continue => {}
+
+                OfflineCommandOutcome::Shutdown => {
+                    return false;
+                }
+            },
 
             Err(tokio_mpsc::error::TryRecvError::Empty) => {
                 return true;
@@ -385,16 +452,52 @@ async fn wait_for_reconnect_delay(
             command = receiver.recv() => {
                 match command {
                     Some(command) => {
-                        /*
-                         * The caller sees immediate clipboard-only fallback.
-                         * Never retain this command for execution after
-                         * reconnection.
-                         */
-                        reject_command(command);
+                        match handle_offline_command(command) {
+                            OfflineCommandOutcome::Continue => {}
+
+                            OfflineCommandOutcome::Shutdown => {
+                                return false;
+                            }
+                        }
                     }
 
                     None => {
                         return false;
+                    }
+                }
+            }
+        }
+    }
+}
+
+async fn reconnect_session(
+    receiver: &mut tokio_mpsc::UnboundedReceiver<WorkerCommand>,
+    health: Arc<AtomicU8>,
+) -> Option<Result<PortalEisSession, PasteError>> {
+    let connect_future = PortalEisSession::connect(health);
+
+    tokio::pin!(connect_future);
+
+    loop {
+        tokio::select! {
+            result = &mut connect_future => {
+                return Some(result);
+            }
+
+            command = receiver.recv() => {
+                match command {
+                    Some(command) => {
+                        match handle_offline_command(command) {
+                            OfflineCommandOutcome::Continue => {}
+
+                            OfflineCommandOutcome::Shutdown => {
+                                return None;
+                            }
+                        }
+                    }
+
+                    None => {
+                        return None;
                     }
                 }
             }
@@ -725,6 +828,23 @@ impl PortalEisSession {
                             }
                         }
 
+                        Some(WorkerCommand::Shutdown { reply }) => {
+                            /*
+                             * Explicitly end the active emulation transaction
+                             * before dropping the portal/EIS objects.
+                             */
+                            self.stop_emulating_best_effort();
+
+                            self.health
+                            .store(PortalEisHealth::Failed as u8, Ordering::Release);
+
+                            let _ = reply.send(());
+
+                            tracing::info!("Portal/EIS paste worker shutting down");
+
+                            return SessionRunOutcome::BackendDropped;
+                        }
+
                         None => {
                             self.stop_emulating_best_effort();
 
@@ -1041,31 +1161,65 @@ fn load_restore_token() -> Option<String> {
     }
 }
 
-fn save_restore_token(token: &str) -> std::io::Result<()> {
-    let Some(path) = restore_token_path() else {
-        return Ok(());
-    };
-
+fn save_restore_token_at(path: &std::path::Path, token: &str) -> std::io::Result<()> {
     let Some(parent) = path.parent() else {
         return Ok(());
     };
 
     fs::create_dir_all(parent)?;
 
-    let mut file = OpenOptions::new()
-        .create(true)
-        .truncate(true)
-        .write(true)
-        .mode(0o600)
-        .open(&path)?;
+    let temp_path = parent.join(RESTORE_TOKEN_TEMP_FILE);
 
-    file.write_all(token.as_bytes())?;
+    /*
+     * Never modify the live token in place.
+     *
+     * A restore token is single-use. If Pookie crashes while
+     * replacing it, retaining the previous complete file is safer
+     * than leaving a partially-written new token.
+     */
+    let write_result = (|| -> std::io::Result<()> {
+        let mut file = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .mode(0o600)
+            .open(&temp_path)?;
 
-    file.flush()?;
+        file.write_all(token.as_bytes())?;
 
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+        /*
+         * sync_all() requests that file contents and metadata reach
+         * stable storage before the atomic rename.
+         */
+        file.sync_all()?;
 
-    Ok(())
+        fs::set_permissions(&temp_path, fs::Permissions::from_mode(0o600))?;
+
+        fs::rename(&temp_path, path)?;
+
+        /*
+         * Persist the directory entry containing the rename as well.
+         */
+        if let Ok(directory) = fs::File::open(parent) {
+            let _ = directory.sync_all();
+        }
+
+        Ok(())
+    })();
+
+    if write_result.is_err() {
+        let _ = fs::remove_file(&temp_path);
+    }
+
+    write_result
+}
+
+fn save_restore_token(token: &str) -> std::io::Result<()> {
+    let Some(path) = restore_token_path() else {
+        return Ok(());
+    };
+
+    save_restore_token_at(&path, token)
 }
 
 fn clear_restore_token() -> std::io::Result<()> {
@@ -1140,5 +1294,88 @@ mod tests {
     fn linux_keycodes_are_stable() {
         assert_eq!(KEY_LEFTCTRL, 29);
         assert_eq!(KEY_V, 47);
+    }
+    #[test]
+    fn atomic_token_write_stores_exact_content_and_private_permissions() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let directory =
+            std::env::temp_dir().join(format!("pookie-paste-token-test-{}", uuid::Uuid::new_v4()));
+
+        let path = directory.join(RESTORE_TOKEN_FILE);
+
+        save_restore_token_at(&path, "token-one").expect("token write should succeed");
+
+        let content = fs::read_to_string(&path).expect("token should be readable");
+        assert_eq!(content, "token-one");
+
+        let mode = fs::metadata(&path)
+            .expect("token metadata should be readable")
+            .permissions()
+            .mode()
+            & 0o777;
+
+        assert_eq!(mode, 0o600);
+
+        assert!(
+            !directory.join(RESTORE_TOKEN_TEMP_FILE).exists(),
+            "temporary token file should not remain after success",
+        );
+
+        fs::remove_dir_all(directory).expect("temporary test directory cleanup should succeed");
+    }
+
+    #[test]
+    fn atomic_token_write_replaces_previous_token() {
+        let directory =
+            std::env::temp_dir().join(format!("pookie-paste-token-test-{}", uuid::Uuid::new_v4()));
+
+        let path = directory.join(RESTORE_TOKEN_FILE);
+
+        save_restore_token_at(&path, "token-one").expect("first token write should succeed");
+        save_restore_token_at(&path, "token-two").expect("second token write should succeed");
+
+        let content = fs::read_to_string(&path).expect("token should be readable");
+        assert_eq!(content, "token-two");
+
+        assert!(
+            !directory.join(RESTORE_TOKEN_TEMP_FILE).exists(),
+            "temporary token file should not remain after replacement",
+        );
+
+        fs::remove_dir_all(directory).expect("temporary test directory cleanup should succeed");
+    }
+
+    #[test]
+    fn offline_shutdown_command_is_acknowledged() {
+        let (reply_sender, reply_receiver) = mpsc::sync_channel(1);
+
+        let outcome = handle_offline_command(WorkerCommand::Shutdown {
+            reply: reply_sender,
+        });
+
+        assert_eq!(outcome, OfflineCommandOutcome::Shutdown);
+        assert!(
+            reply_receiver
+                .recv_timeout(Duration::from_millis(50))
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn offline_paste_command_is_rejected_as_unavailable() {
+        let (reply_sender, reply_receiver) = mpsc::sync_channel(1);
+
+        let outcome = handle_offline_command(WorkerCommand::Paste {
+            reply: reply_sender,
+        });
+
+        assert_eq!(outcome, OfflineCommandOutcome::Continue);
+
+        let result = reply_receiver
+            .recv_timeout(Duration::from_millis(50))
+            .expect("offline paste reply should arrive");
+
+        assert!(matches!(result, Err(PasteError::Unavailable)));
     }
 }
