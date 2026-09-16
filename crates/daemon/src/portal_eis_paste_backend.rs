@@ -10,7 +10,11 @@ use std::{
         },
     },
     path::PathBuf,
-    sync::mpsc::{self, SyncSender},
+    sync::{
+        Arc,
+        atomic::{AtomicU8, Ordering},
+        mpsc::{self, SyncSender},
+    },
     thread,
     time::Duration,
 };
@@ -45,8 +49,34 @@ const KEY_INTERVAL: Duration = Duration::from_millis(30);
 
 const RESTORE_TOKEN_FILE: &str = "remote-desktop.restore-token";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+enum PortalEisHealth {
+    Ready = 1,
+    Paused = 2,
+    Failed = 3,
+}
+
+impl PortalEisHealth {
+    fn from_atomic(value: u8) -> Self {
+        match value {
+            1 => Self::Ready,
+            2 => Self::Paused,
+            _ => Self::Failed,
+        }
+    }
+}
+
+fn health_capability(health: PortalEisHealth) -> PasteCapability {
+    match health {
+        PortalEisHealth::Ready => PasteCapability::Direct,
+        PortalEisHealth::Paused | PortalEisHealth::Failed => PasteCapability::ClipboardOnly,
+    }
+}
+
 pub struct PortalEisPasteBackend {
     sender: tokio_mpsc::UnboundedSender<WorkerCommand>,
+    health: Arc<AtomicU8>,
 }
 
 enum WorkerCommand {
@@ -87,6 +117,8 @@ struct PortalEisSession {
     emulating: bool,
 
     next_sequence: u32,
+
+    health: Arc<AtomicU8>,
 }
 
 impl PortalEisPasteBackend {
@@ -94,6 +126,10 @@ impl PortalEisPasteBackend {
         let (command_sender, command_receiver) = tokio_mpsc::unbounded_channel();
 
         let (init_sender, init_receiver) = mpsc::sync_channel(1);
+
+        let health = Arc::new(AtomicU8::new(PortalEisHealth::Paused as u8));
+
+        let worker_health = Arc::clone(&health);
 
         thread::Builder::new()
             .name("pookie-portal-eis".to_string())
@@ -105,6 +141,8 @@ impl PortalEisPasteBackend {
                     Ok(runtime) => runtime,
 
                     Err(error) => {
+                        worker_health.store(PortalEisHealth::Failed as u8, Ordering::Release);
+
                         let _ = init_sender.send(Err(PasteError::Failed(format!(
                             "failed to create Portal/EIS runtime: {error}"
                         ))));
@@ -114,14 +152,20 @@ impl PortalEisPasteBackend {
                 };
 
                 runtime.block_on(async move {
-                    match PortalEisSession::connect().await {
+                    match PortalEisSession::connect(Arc::clone(&worker_health)).await {
                         Ok(mut session) => {
+                            worker_health.store(PortalEisHealth::Ready as u8, Ordering::Release);
+
                             let _ = init_sender.send(Ok(()));
 
                             session.run(command_receiver).await;
+
+                            worker_health.store(PortalEisHealth::Failed as u8, Ordering::Release);
                         }
 
                         Err(error) => {
+                            worker_health.store(PortalEisHealth::Failed as u8, Ordering::Release);
+
                             let _ = init_sender.send(Err(error));
                         }
                     }
@@ -142,6 +186,7 @@ impl PortalEisPasteBackend {
         match init_receiver.recv() {
             Ok(Ok(())) => Ok(Self {
                 sender: command_sender,
+                health,
             }),
 
             Ok(Err(error)) => Err(error),
@@ -159,30 +204,49 @@ impl PortalEisPasteBackend {
             .send(WorkerCommand::Paste {
                 reply: reply_sender,
             })
-            .map_err(|_| PasteError::Failed("Portal/EIS worker is unavailable".to_string()))?;
+            .map_err(|_| {
+                self.health
+                    .store(PortalEisHealth::Failed as u8, Ordering::Release);
 
-        reply_receiver
-            .recv_timeout(PASTE_COMMAND_TIMEOUT)
-            .map_err(|error| {
-                PasteError::Failed(format!(
-                    "Portal/EIS paste timed out or disconnected: {error}"
-                ))
-            })?
+                PasteError::Unavailable
+            })?;
+
+        match reply_receiver.recv_timeout(PASTE_COMMAND_TIMEOUT) {
+            Ok(result) => result,
+
+            Err(error) => {
+                self.health
+                    .store(PortalEisHealth::Failed as u8, Ordering::Release);
+
+                tracing::warn!(
+                    error = ?error,
+                    "Portal/EIS paste worker stopped responding"
+                );
+
+                Err(PasteError::Unavailable)
+            }
+        }
     }
 }
 
 impl PasteBackend for PortalEisPasteBackend {
     fn capability(&self) -> PasteCapability {
-        PasteCapability::Direct
+        let health = PortalEisHealth::from_atomic(self.health.load(Ordering::Acquire));
+
+        health_capability(health)
     }
 
     fn paste(&self) -> Result<(), PasteError> {
+        if self.capability() != PasteCapability::Direct {
+            return Err(PasteError::Unavailable);
+        }
+
         self.request_paste()
     }
 }
 
 impl PortalEisSession {
-    async fn connect() -> Result<Self, PasteError> {
+    async fn connect(health: Arc<AtomicU8>) -> Result<Self, PasteError> {
         tracing::info!("initializing Wayland Portal/EIS direct paste");
 
         let portal = RemoteDesktop::new().await.map_err(|error| {
@@ -472,6 +536,7 @@ impl PortalEisSession {
             resumed: true,
             emulating: true,
             next_sequence: 2,
+            health,
         })
     }
 
@@ -501,6 +566,9 @@ impl PortalEisSession {
                         }
 
                         Some(Err(error)) => {
+                            self.health
+                            .store(PortalEisHealth::Failed as u8, Ordering::Release);
+
                             tracing::warn!(
                                 error = ?error,
                                 "Portal/EIS event stream failed"
@@ -510,6 +578,9 @@ impl PortalEisSession {
                         }
 
                         None => {
+                            self.health
+                            .store(PortalEisHealth::Failed as u8, Ordering::Release);
+
                             tracing::warn!("Portal/EIS event stream ended");
 
                             break;
@@ -518,6 +589,9 @@ impl PortalEisSession {
                 }
             }
         }
+
+        self.health
+            .store(PortalEisHealth::Failed as u8, Ordering::Release);
 
         self.stop_emulating_best_effort();
 
@@ -539,6 +613,9 @@ impl PortalEisSession {
                     Ok(()) => {
                         self.emulating = true;
 
+                        self.health
+                            .store(PortalEisHealth::Ready as u8, Ordering::Release);
+
                         tracing::info!(
                             serial = event.serial,
                             sequence,
@@ -548,6 +625,9 @@ impl PortalEisSession {
 
                     Err(error) => {
                         self.emulating = false;
+
+                        self.health
+                            .store(PortalEisHealth::Failed as u8, Ordering::Release);
 
                         tracing::error!(
                             error = ?error,
@@ -568,12 +648,18 @@ impl PortalEisSession {
                 self.resumed = false;
                 self.emulating = false;
 
+                self.health
+                    .store(PortalEisHealth::Paused as u8, Ordering::Release);
+
                 tracing::debug!(serial = event.serial, "Portal/EIS keyboard paused");
             }
 
             EiEvent::DeviceRemoved(event) if event.device == self.keyboard_device => {
                 self.resumed = false;
                 self.emulating = false;
+
+                self.health
+                    .store(PortalEisHealth::Failed as u8, Ordering::Release);
 
                 tracing::warn!("Portal/EIS keyboard device removed");
 
@@ -583,6 +669,9 @@ impl PortalEisSession {
             EiEvent::Disconnected(event) => {
                 self.resumed = false;
                 self.emulating = false;
+
+                self.health
+                    .store(PortalEisHealth::Failed as u8, Ordering::Release);
 
                 tracing::warn!(
                     event = ?event,
@@ -650,8 +739,6 @@ impl PortalEisSession {
 
             return Err(error);
         }
-
-        tracing::info!("Portal/EIS Ctrl+V sequence sent successfully");
 
         Ok(())
     }
@@ -815,14 +902,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn direct_backend_reports_direct_capability() {
-        /*
-         * We deliberately don't construct PortalEisPasteBackend
-         * here because that would talk to the real desktop portal.
-         *
-         * Capability itself is a fixed production contract.
-         */
-        assert_eq!(PasteCapability::Direct, PasteCapability::Direct);
+    fn ready_health_is_direct() {
+        assert_eq!(
+            health_capability(PortalEisHealth::Ready),
+            PasteCapability::Direct,
+        );
+    }
+
+    #[test]
+    fn paused_health_is_clipboard_only() {
+        assert_eq!(
+            health_capability(PortalEisHealth::Paused),
+            PasteCapability::ClipboardOnly,
+        );
+    }
+
+    #[test]
+    fn failed_health_is_clipboard_only() {
+        assert_eq!(
+            health_capability(PortalEisHealth::Failed),
+            PasteCapability::ClipboardOnly,
+        );
     }
 
     #[test]

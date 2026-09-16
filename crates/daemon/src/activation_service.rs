@@ -7,7 +7,7 @@ use tokio::sync::Mutex;
 use crate::clipboard_service::ClipboardService;
 use crate::focus_backend::{FocusBackend, FocusError, FocusTarget};
 use crate::focus_service::FocusService;
-use crate::paste_backend::{PasteBackend, PasteCapability};
+use crate::paste_backend::{PasteBackend, PasteCapability, PasteError};
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum ActivationResult {
@@ -100,32 +100,34 @@ where
         }
 
         match self.paste_backend.capability() {
-            PasteCapability::Direct => {
-                tracing::info!("focus confirmed; triggering direct paste");
+            PasteCapability::Direct => match self.paste_backend.paste() {
+                Ok(()) => Ok(ActivationResult::Pasted),
 
-                match self.paste_backend.paste() {
-                    Ok(()) => {
-                        tracing::info!("direct paste completed");
+                Err(PasteError::Unavailable) => {
+                    /*
+                     * Clipboard writeback and history promotion have
+                     * already completed.
+                     *
+                     * The direct-paste backend became unavailable
+                     * between capability() and paste(), so degrade
+                     * gracefully to normal clipboard behavior.
+                     */
+                    tracing::warn!("direct paste became unavailable; clipboard remains updated");
 
-                        Ok(ActivationResult::Pasted)
-                    }
-
-                    Err(error) => {
-                        tracing::error!(
-                            error = ?error,
-                            "direct paste failed"
-                        );
-
-                        Ok(ActivationResult::PasteFailed)
-                    }
+                    Ok(ActivationResult::ClipboardUpdated)
                 }
-            }
 
-            PasteCapability::ClipboardOnly => {
-                tracing::info!("paste backend is clipboard-only");
+                Err(error) => {
+                    tracing::error!(
+                        error = ?error,
+                        "direct paste failed"
+                    );
 
-                Ok(ActivationResult::ClipboardUpdated)
-            }
+                    Ok(ActivationResult::PasteFailed)
+                }
+            },
+
+            PasteCapability::ClipboardOnly => Ok(ActivationResult::ClipboardUpdated),
         }
     }
 
@@ -211,6 +213,20 @@ mod tests {
 
         fn paste(&self) -> Result<(), PasteError> {
             Err(PasteError::Unavailable)
+        }
+    }
+
+    struct BrokenPasteBackend;
+
+    impl PasteBackend for BrokenPasteBackend {
+        fn capability(&self) -> PasteCapability {
+            PasteCapability::Direct
+        }
+
+        fn paste(&self) -> Result<(), PasteError> {
+            Err(PasteError::Failed(
+                "simulated injection failure".to_string(),
+            ))
         }
     }
 
@@ -509,7 +525,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn paste_failure_returns_partial_failure_after_clipboard_update_and_promotion() {
+    async fn direct_paste_unavailable_falls_back_after_clipboard_update_and_promotion() {
         let history_service = create_history_service().await;
 
         let written = StdArc::new(StdMutex::new(None));
@@ -568,7 +584,7 @@ mod tests {
             .await
             .expect("activation failed");
 
-        assert_eq!(result, ActivationResult::PasteFailed,);
+        assert_eq!(result, ActivationResult::ClipboardUpdated);
 
         assert_eq!(
             written
@@ -586,6 +602,86 @@ mod tests {
         assert_eq!(items[0].id, b_id,);
 
         assert_eq!(items[0].text_content.as_deref(), Some("B"),);
+    }
+
+    #[tokio::test]
+    async fn direct_paste_failure_returns_paste_failed_after_clipboard_update_and_promotion() {
+        let history_service = create_history_service().await;
+
+        let written = StdArc::new(StdMutex::new(None));
+
+        let backend = FakeClipboardBackend {
+            written: StdArc::clone(&written),
+        };
+
+        let clipboard_state = StdArc::new(ClipboardState::default());
+
+        let clipboard_service =
+            StdArc::new(Mutex::new(ClipboardService::new(backend, clipboard_state)));
+
+        let focus_service = FocusService::new(ImmediateFocusBackend::new());
+
+        let activation_service = ClipboardActivationService::new(
+            StdArc::clone(&history_service),
+            clipboard_service,
+            BrokenPasteBackend,
+            focus_service,
+        );
+
+        let base_time = chrono::Utc::now() - chrono::Duration::seconds(10);
+
+        let a = ClipboardItem {
+            id: uuid::Uuid::new_v4(),
+            content: ClipboardContent::Text("A".to_string()),
+            hash: "broken-paste-a".to_string(),
+            created_at: base_time,
+        };
+
+        let b = ClipboardItem {
+            id: uuid::Uuid::new_v4(),
+            content: ClipboardContent::Text("B".to_string()),
+            hash: "broken-paste-b".to_string(),
+            created_at: base_time + chrono::Duration::seconds(1),
+        };
+
+        let b_id = b.id.to_string();
+
+        let c = ClipboardItem {
+            id: uuid::Uuid::new_v4(),
+            content: ClipboardContent::Text("C".to_string()),
+            hash: "broken-paste-c".to_string(),
+            created_at: base_time + chrono::Duration::seconds(2),
+        };
+
+        history_service.save(a).await.expect("save A failed");
+
+        history_service.save(b).await.expect("save B failed");
+
+        history_service.save(c).await.expect("save C failed");
+
+        let result = activation_service
+            .activate(&b_id, None)
+            .await
+            .expect("activation failed");
+
+        assert_eq!(result, ActivationResult::PasteFailed);
+
+        assert_eq!(
+            written
+                .lock()
+                .expect("fake clipboard mutex poisoned")
+                .as_deref(),
+            Some("B"),
+        );
+
+        let items = history_service
+            .get_all()
+            .await
+            .expect("history retrieval failed");
+
+        assert_eq!(items[0].id, b_id);
+
+        assert_eq!(items[0].text_content.as_deref(), Some("B"));
     }
 
     #[tokio::test]
