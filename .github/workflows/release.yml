@@ -24,6 +24,18 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-rust-release-${{ hashFiles('**/Cargo.lock') }}-${{ hashFiles('**/*.rs', '**/Cargo.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-rust-release-${{ hashFiles('**/Cargo.lock') }}-
+            ${{ runner.os }}-rust-release-
+
       - name: Check formatting
         run: cargo fmt --all -- --check
 
