@@ -1,6 +1,51 @@
 #!/usr/bin/env bash
 
-install_base_dependencies() {
+install_download_dependencies() {
+    local family="$1"
+
+    case "$family" in
+        debian)
+            sudo apt-get update
+
+            sudo apt-get install -y \
+                ca-certificates \
+                coreutils \
+                curl \
+                tar
+            ;;
+
+        fedora)
+            sudo dnf install -y \
+                ca-certificates \
+                coreutils \
+                curl \
+                tar
+            ;;
+
+        arch)
+            sudo pacman -S --needed --noconfirm \
+                ca-certificates \
+                coreutils \
+                curl \
+                tar
+            ;;
+
+        opensuse)
+            sudo zypper --non-interactive install \
+                ca-certificates \
+                coreutils \
+                curl \
+                tar
+            ;;
+
+        *)
+            echo "Unsupported Linux distribution." >&2
+            return 1
+            ;;
+    esac
+}
+
+install_source_dependencies() {
     local family="$1"
 
     case "$family" in
@@ -9,6 +54,7 @@ install_base_dependencies() {
 
             sudo apt-get install -y \
                 build-essential \
+                ca-certificates \
                 curl \
                 pkg-config
             ;;
@@ -18,6 +64,7 @@ install_base_dependencies() {
                 gcc \
                 gcc-c++ \
                 make \
+                ca-certificates \
                 curl \
                 pkgconf-pkg-config
             ;;
@@ -25,6 +72,7 @@ install_base_dependencies() {
         arch)
             sudo pacman -S --needed --noconfirm \
                 base-devel \
+                ca-certificates \
                 curl
             ;;
 
@@ -33,6 +81,7 @@ install_base_dependencies() {
                 gcc \
                 gcc-c++ \
                 make \
+                ca-certificates \
                 curl \
                 pkg-config
             ;;
@@ -81,9 +130,10 @@ install_kde_dependencies() {
 
         debian)
             #
-            # Package naming varies more across Debian/Ubuntu
-            # Plasma releases. Try the Frameworks 6 package
-            # names first.
+            # KDE Plasma 6 package naming differs across
+            # Debian and Ubuntu releases.
+            #
+            # Try the expected command packages first.
             #
             sudo apt-get install -y \
                 kpackagetool6 \
@@ -98,11 +148,18 @@ install_kde_dependencies() {
 
         opensuse)
             #
-            # Plasma systems normally already have the
-            # corresponding KF6/Qt6 tools installed.
+            # Plasma systems normally already contain these.
+            #
+            # We intentionally do not guess package names here
+            # until the openSUSE packaging path is tested.
             #
             if ! command -v kpackagetool6 >/dev/null 2>&1 \
-                || ! command -v kwriteconfig6 >/dev/null 2>&1
+                || ! command -v kwriteconfig6 >/dev/null 2>&1 \
+                || ! {
+                    command -v qdbus6 >/dev/null 2>&1 \
+                    || command -v qdbus-qt6 >/dev/null 2>&1 \
+                    || command -v qdbus >/dev/null 2>&1
+                }
             then
                 echo \
                     "Required KDE Plasma 6 tools are missing on this openSUSE installation." \
@@ -112,6 +169,7 @@ install_kde_dependencies() {
             ;;
 
         *)
+            echo "Unsupported Linux distribution." >&2
             return 1
             ;;
     esac
