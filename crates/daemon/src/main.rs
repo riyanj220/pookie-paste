@@ -33,13 +33,26 @@ use daemon::clipboard_backend::PlatformClipboard;
 
 use daemon::clipboard_watcher;
 
+use daemon::app_paths;
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     logging::init_logging();
 
     let ipc_listener = ipc_server::bind()?;
 
-    let database = Database::new("sqlite:./pookie-paste.db").await?;
+    let _data_directory = app_paths::ensure_data_directory()?;
+
+    let database_path = app_paths::database_path()?;
+
+    info!(
+        path = %database_path.display(),
+          "using application database"
+    );
+
+    let database_url = format!("sqlite://{}", database_path.display(),);
+
+    let database = Database::new(&database_url).await?;
 
     info!("database initialized");
 
