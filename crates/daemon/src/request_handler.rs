@@ -3,8 +3,8 @@ use ipc::{ActivationOutcome, IpcRequest, IpcResponse};
 use pookie_clipboard::ClipboardBackend;
 
 use crate::activation_service::{ActivationResult, ClipboardActivationService};
-use crate::focus_backend::{FocusBackend, FocusError, FocusTarget};
-use crate::ipc_mapper::to_history_item;
+use crate::focus_backend::{FocusBackend, FocusError};
+use crate::ipc_mapper::{from_ipc_focus_target, to_history_item, to_ipc_focus_target};
 use crate::paste_backend::PasteBackend;
 
 pub async fn handle_request<B, P, F>(
@@ -33,7 +33,24 @@ where
         },
 
         IpcRequest::ActivateItem { id, target_id } => {
-            let target = target_id.map(FocusTarget::x11);
+            let ipc_target_for_log = target_id.clone();
+
+            let target = match target_id.map(from_ipc_focus_target).transpose() {
+                Ok(target) => target,
+
+                Err(error) => {
+                    tracing::error!(
+                        error = %error,
+                        item_id = %id,
+                        target = ?ipc_target_for_log,
+                        "invalid focus target received through IPC"
+                    );
+
+                    return IpcResponse::Error {
+                        message: "invalid focus target".to_string(),
+                    };
+                }
+            };
 
             match activation_service.activate(&id, target).await {
                 Ok(result) => {
@@ -58,7 +75,7 @@ where
                     tracing::error!(
                         error = %error,
                         item_id = %id,
-                        target_id = ?target_id,
+                        target = ?ipc_target_for_log,
                         "clipboard activation failed"
                     );
 
@@ -86,24 +103,15 @@ where
         },
 
         IpcRequest::CaptureFocusTarget => match activation_service.capture_target() {
-            Ok(target) => match target.x11_id() {
-                Some(target_id) => IpcResponse::FocusTarget {
-                    target_id: Some(target_id),
-                },
-
-                None => {
-                    tracing::error!(
-                        target = %target,
-                        "focus target cannot be represented by current IPC format"
-                    );
-
-                    IpcResponse::Error {
-                        message: "unsupported focus target type".to_string(),
-                    }
-                }
+            Ok(target) => IpcResponse::FocusTarget {
+                target_id: Some(to_ipc_focus_target(target)),
             },
 
-            Err(FocusError::Unavailable) => IpcResponse::FocusTarget { target_id: None },
+            Err(FocusError::Unavailable) => {
+                tracing::warn!("focus target capture unavailable");
+
+                IpcResponse::FocusTarget { target_id: None }
+            }
 
             Err(error) => {
                 tracing::error!(
@@ -126,6 +134,8 @@ mod tests {
     use chrono::{Duration, Utc};
 
     use history::HistoryConfig;
+
+    use ipc::IpcFocusTarget;
 
     use pookie_clipboard::{ClipboardBackend, ClipboardContent, ClipboardError};
 
@@ -252,7 +262,7 @@ mod tests {
         let response =
             handle_request(IpcRequest::Ping, service.as_ref(), &activation_service).await;
 
-        assert_eq!(response, IpcResponse::Pong);
+        assert_eq!(response, IpcResponse::Pong,);
     }
 
     #[tokio::test]
@@ -271,7 +281,7 @@ mod tests {
         assert_eq!(
             response,
             IpcResponse::FocusTarget {
-                target_id: Some(42),
+                target_id: Some(IpcFocusTarget::X11(42,),),
             },
         );
     }
@@ -315,11 +325,11 @@ mod tests {
 
         match response {
             IpcResponse::History { items } => {
-                assert_eq!(items.len(), 2);
+                assert_eq!(items.len(), 2,);
 
-                assert_eq!(items[0].text_content.as_deref(), Some("Second"));
+                assert_eq!(items[0].text_content.as_deref(), Some("Second"),);
 
-                assert_eq!(items[1].text_content.as_deref(), Some("First"));
+                assert_eq!(items[1].text_content.as_deref(), Some("First"),);
             }
 
             other => {
@@ -366,7 +376,7 @@ mod tests {
             },
         );
 
-        assert_eq!(backend_handle.content(), "Paste me");
+        assert_eq!(backend_handle.content(), "Paste me",);
     }
 
     #[tokio::test]
@@ -393,7 +403,7 @@ mod tests {
             IpcRequest::ActivateItem {
                 id: item_id.to_string(),
 
-                target_id: Some(12345),
+                target_id: Some(IpcFocusTarget::X11(12345)),
             },
             service.as_ref(),
             &activation_service,
@@ -407,7 +417,7 @@ mod tests {
             },
         );
 
-        assert_eq!(backend_handle.content(), "Paste me");
+        assert_eq!(backend_handle.content(), "Paste me",);
     }
 
     #[tokio::test]
@@ -434,7 +444,7 @@ mod tests {
             },
         );
 
-        assert_eq!(backend_handle.content(), "");
+        assert_eq!(backend_handle.content(), "",);
     }
 
     #[tokio::test]
@@ -466,11 +476,11 @@ mod tests {
         )
         .await;
 
-        assert_eq!(response, IpcResponse::Deleted { deleted: true });
+        assert_eq!(response, IpcResponse::Deleted { deleted: true },);
 
         let items = service.get_all().await.expect("history retrieval failed");
 
-        assert!(items.is_empty(), "deleted item should no longer exist");
+        assert!(items.is_empty(), "deleted item should no longer exist",);
     }
 
     #[tokio::test]
@@ -488,7 +498,7 @@ mod tests {
         )
         .await;
 
-        assert_eq!(response, IpcResponse::Deleted { deleted: false });
+        assert_eq!(response, IpcResponse::Deleted { deleted: false },);
     }
 
     #[tokio::test]
@@ -540,11 +550,11 @@ mod tests {
         )
         .await;
 
-        assert_eq!(response, IpcResponse::Cleared { count: 3 });
+        assert_eq!(response, IpcResponse::Cleared { count: 3 },);
 
         let items = service.get_all().await.expect("history retrieval failed");
 
-        assert!(items.is_empty(), "history should be empty after clear");
+        assert!(items.is_empty(), "history should be empty after clear",);
     }
 
     #[tokio::test]
@@ -560,10 +570,10 @@ mod tests {
         )
         .await;
 
-        assert_eq!(response, IpcResponse::Cleared { count: 0 });
+        assert_eq!(response, IpcResponse::Cleared { count: 0 },);
 
         let items = service.get_all().await.expect("history retrieval failed");
 
-        assert!(items.is_empty());
+        assert!(items.is_empty(),);
     }
 }

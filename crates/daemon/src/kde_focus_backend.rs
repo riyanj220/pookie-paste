@@ -221,7 +221,9 @@ impl FocusBackend for KdeFocusBackend {
     fn is_active(&self, target: FocusTarget) -> Result<bool, FocusError> {
         let target = Self::kde_target(target)?;
 
-        self.request(|reply| WorkerCommand::IsActive { target, reply })
+        let active = self.request(|reply| WorkerCommand::IsActive { target, reply })?;
+
+        Ok(active)
     }
 }
 

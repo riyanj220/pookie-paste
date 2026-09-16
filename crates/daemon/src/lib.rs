@@ -20,6 +20,8 @@ pub mod paste_backend;
 
 pub mod platform_focus_backend;
 
+pub mod portal_eis_paste_backend;
+
 pub mod request_handler;
 
 pub mod wayland_paste_backend;

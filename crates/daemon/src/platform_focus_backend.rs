@@ -79,6 +79,10 @@ impl PlatformFocusBackend {
             Self::Unavailable(_) => "unavailable",
         }
     }
+
+    pub fn can_restore_focus(&self) -> bool {
+        matches!(self, Self::X11(_) | Self::Kde(_))
+    }
 }
 
 impl FocusBackend for PlatformFocusBackend {
@@ -160,5 +164,18 @@ mod tests {
             classify_environment("unknown", "KDE",),
             FocusBackendKind::Unavailable,
         );
+    }
+
+    #[test]
+    fn unavailable_backend_cannot_restore_focus() {
+        let backend = PlatformFocusBackend::from_environment("wayland", "GNOME")
+            .expect("backend creation failed");
+
+        assert!(!backend.can_restore_focus());
+    }
+
+    #[test]
+    fn x11_backend_kind_supports_focus_restoration() {
+        assert_eq!(classify_environment("x11", "KDE",), FocusBackendKind::X11,);
     }
 }

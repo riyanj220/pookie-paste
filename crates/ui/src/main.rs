@@ -21,7 +21,7 @@ const FOCUS_ACQUISITION_TIMEOUT: Duration = Duration::from_millis(500);
 
 const FOCUS_RETRY_INTERVAL: Duration = Duration::from_millis(16);
 
-fn capture_initial_focus_target() -> Option<u64> {
+fn capture_initial_focus_target() -> Option<ipc::IpcFocusTarget> {
     let runtime = tokio::runtime::Runtime::new().ok()?;
 
     runtime
@@ -96,7 +96,7 @@ struct PookieApp {
 
     has_received_focus: bool,
 
-    target_id: Option<u64>,
+    target_id: Option<ipc::IpcFocusTarget>,
 
     activation_receiver: Option<oneshot::Receiver<Result<ipc::ActivationOutcome, String>>>,
 
@@ -106,7 +106,7 @@ struct PookieApp {
 }
 
 impl PookieApp {
-    fn new(target_id: Option<u64>) -> Self {
+    fn new(target_id: Option<ipc::IpcFocusTarget>) -> Self {
         let (sender, receiver) = oneshot::channel();
 
         std::thread::spawn(move || {
@@ -295,7 +295,14 @@ impl PookieApp {
 
         let id = item.id.clone();
 
-        let target_id = self.target_id;
+        /*
+         * IpcFocusTarget is not Copy because KDE targets
+         * contain a String.
+         *
+         * Keep the target stored in the app and send a
+         * clone to the activation worker.
+         */
+        let target_id = self.target_id.clone();
 
         let (sender, receiver) = oneshot::channel();
 
@@ -770,6 +777,6 @@ mod tests {
 
         let preview = preview_text(&input);
 
-        assert!(preview.ends_with('…',),);
+        assert!(preview.ends_with('…'),);
     }
 }

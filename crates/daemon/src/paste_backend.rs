@@ -1,5 +1,6 @@
 pub use crate::wayland_paste_backend::WaylandPasteBackend;
 
+use crate::portal_eis_paste_backend::PortalEisPasteBackend;
 use crate::x11_paste_backend::X11PasteBackend;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -24,6 +25,7 @@ pub trait PasteBackend: Send + Sync {
 enum PasteBackendKind {
     X11,
     Wayland,
+    Unknown,
 }
 
 fn classify_session_type(session_type: &str) -> PasteBackendKind {
@@ -32,36 +34,66 @@ fn classify_session_type(session_type: &str) -> PasteBackendKind {
 
         "wayland" => PasteBackendKind::Wayland,
 
-        _ => PasteBackendKind::Wayland,
+        _ => PasteBackendKind::Unknown,
     }
 }
 
 pub enum PlatformPasteBackend {
     X11(Box<X11PasteBackend>),
 
-    Wayland(WaylandPasteBackend),
+    WaylandDirect(PortalEisPasteBackend),
+
+    WaylandFallback(WaylandPasteBackend),
 }
 
 impl PlatformPasteBackend {
-    fn from_session_type(session_type: &str) -> Result<Self, PasteError> {
+    pub fn new(allow_wayland_direct: bool) -> Result<Self, PasteError> {
+        let session_type = std::env::var("XDG_SESSION_TYPE").unwrap_or_default();
+
+        Self::from_session_type(&session_type, allow_wayland_direct)
+    }
+
+    fn from_session_type(
+        session_type: &str,
+        allow_wayland_direct: bool,
+    ) -> Result<Self, PasteError> {
         match classify_session_type(session_type) {
             PasteBackendKind::X11 => Ok(Self::X11(Box::new(X11PasteBackend::new()?))),
 
-            PasteBackendKind::Wayland => Ok(Self::Wayland(WaylandPasteBackend::new())),
+            PasteBackendKind::Wayland => {
+                if !allow_wayland_direct {
+                    tracing::info!(
+                        "Wayland direct paste disabled because focus restoration is unavailable"
+                    );
+
+                    return Ok(Self::WaylandFallback(WaylandPasteBackend::new()));
+                }
+
+                match PortalEisPasteBackend::new() {
+                    Ok(backend) => Ok(Self::WaylandDirect(backend)),
+
+                    Err(error) => {
+                        tracing::warn!(
+                            error = ?error,
+                            "Portal/EIS direct paste unavailable; using clipboard-only fallback"
+                        );
+
+                        Ok(Self::WaylandFallback(WaylandPasteBackend::new()))
+                    }
+                }
+            }
+
+            PasteBackendKind::Unknown => Ok(Self::WaylandFallback(WaylandPasteBackend::new())),
         }
-    }
-
-    pub fn new() -> Result<Self, PasteError> {
-        let session_type = std::env::var("XDG_SESSION_TYPE").unwrap_or_default();
-
-        Self::from_session_type(&session_type)
     }
 
     pub fn name(&self) -> &'static str {
         match self {
             Self::X11(_) => "X11 direct paste",
 
-            Self::Wayland(_) => "Wayland clipboard-only",
+            Self::WaylandDirect(_) => "Wayland Portal/EIS direct paste",
+
+            Self::WaylandFallback(_) => "Wayland clipboard-only",
         }
     }
 }
@@ -71,7 +103,9 @@ impl PasteBackend for PlatformPasteBackend {
         match self {
             Self::X11(backend) => backend.capability(),
 
-            Self::Wayland(backend) => backend.capability(),
+            Self::WaylandDirect(backend) => backend.capability(),
+
+            Self::WaylandFallback(backend) => backend.capability(),
         }
     }
 
@@ -79,7 +113,9 @@ impl PasteBackend for PlatformPasteBackend {
         match self {
             Self::X11(backend) => backend.paste(),
 
-            Self::Wayland(backend) => backend.paste(),
+            Self::WaylandDirect(backend) => backend.paste(),
+
+            Self::WaylandFallback(backend) => backend.paste(),
         }
     }
 }
@@ -99,8 +135,8 @@ mod tests {
     }
 
     #[test]
-    fn unknown_session_uses_wayland_fallback() {
-        assert_eq!(classify_session_type("unknown"), PasteBackendKind::Wayland,);
+    fn unknown_session_uses_fallback_classification() {
+        assert_eq!(classify_session_type("unknown"), PasteBackendKind::Unknown,);
     }
 
     #[test]
@@ -121,7 +157,17 @@ mod tests {
     }
 
     #[test]
-    fn wayland_backend_remains_clipboard_only() {
+    fn wayland_without_focus_restore_stays_clipboard_only() {
+        let backend = PlatformPasteBackend::from_session_type("wayland", false)
+            .expect("backend creation failed");
+
+        assert_eq!(backend.capability(), PasteCapability::ClipboardOnly,);
+
+        assert_eq!(backend.name(), "Wayland clipboard-only",);
+    }
+
+    #[test]
+    fn fallback_backend_remains_clipboard_only() {
         let backend = WaylandPasteBackend::new();
 
         assert_eq!(backend.capability(), PasteCapability::ClipboardOnly,);

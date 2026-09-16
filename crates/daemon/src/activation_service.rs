@@ -100,13 +100,32 @@ where
         }
 
         match self.paste_backend.capability() {
-            PasteCapability::Direct => match self.paste_backend.paste() {
-                Ok(()) => Ok(ActivationResult::Pasted),
+            PasteCapability::Direct => {
+                tracing::info!("focus confirmed; triggering direct paste");
 
-                Err(_) => Ok(ActivationResult::PasteFailed),
-            },
+                match self.paste_backend.paste() {
+                    Ok(()) => {
+                        tracing::info!("direct paste completed");
 
-            PasteCapability::ClipboardOnly => Ok(ActivationResult::ClipboardUpdated),
+                        Ok(ActivationResult::Pasted)
+                    }
+
+                    Err(error) => {
+                        tracing::error!(
+                            error = ?error,
+                            "direct paste failed"
+                        );
+
+                        Ok(ActivationResult::PasteFailed)
+                    }
+                }
+            }
+
+            PasteCapability::ClipboardOnly => {
+                tracing::info!("paste backend is clipboard-only");
+
+                Ok(ActivationResult::ClipboardUpdated)
+            }
         }
     }
 

@@ -1,12 +1,17 @@
 use pookie_clipboard::{ClipboardBackend, x11::X11Clipboard};
 
-fn has_display() -> bool {
-    std::env::var("DISPLAY").is_ok()
+fn is_x11_session() -> bool {
+    let session_type = std::env::var("XDG_SESSION_TYPE")
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+
+    session_type == "x11"
 }
 
 #[test]
 fn test_x11_clipboard_read() {
-    if !has_display() {
+    if !is_x11_session() {
         return;
     }
 
@@ -17,7 +22,7 @@ fn test_x11_clipboard_read() {
 
 #[test]
 fn test_x11_clipboard_write() {
-    if !has_display() {
+    if !is_x11_session() {
         return;
     }
 

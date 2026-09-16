@@ -10,6 +10,13 @@ pub struct HistoryItem {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
+pub enum IpcFocusTarget {
+    X11(u64),
+    Kde(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum IpcRequest {
     Ping,
@@ -18,9 +25,14 @@ pub enum IpcRequest {
 
     CaptureFocusTarget,
 
-    ActivateItem { id: String, target_id: Option<u64> },
+    ActivateItem {
+        id: String,
+        target_id: Option<IpcFocusTarget>,
+    },
 
-    DeleteItem { id: String },
+    DeleteItem {
+        id: String,
+    },
 
     ClearHistory,
 }
@@ -32,7 +44,7 @@ pub enum IpcResponse {
 
     History { items: Vec<HistoryItem> },
 
-    FocusTarget { target_id: Option<u64> },
+    FocusTarget { target_id: Option<IpcFocusTarget> },
 
     Activated { outcome: ActivationOutcome },
 
@@ -55,13 +67,29 @@ pub enum ActivationOutcome {
 
 #[cfg(test)]
 mod tests {
-    use super::{ActivationOutcome, IpcRequest, IpcResponse};
+    use super::{ActivationOutcome, IpcFocusTarget, IpcRequest, IpcResponse};
 
     #[test]
-    fn activate_item_request_with_target_round_trips() {
+    fn activate_item_request_with_x11_target_round_trips() {
         let request = IpcRequest::ActivateItem {
             id: "item-123".to_string(),
-            target_id: Some(12345),
+            target_id: Some(IpcFocusTarget::X11(12345)),
+        };
+
+        let encoded = serde_json::to_string(&request).expect("serialization failed");
+
+        let decoded: IpcRequest = serde_json::from_str(&encoded).expect("deserialization failed");
+
+        assert_eq!(decoded, request);
+    }
+
+    #[test]
+    fn activate_item_request_with_kde_target_round_trips() {
+        let request = IpcRequest::ActivateItem {
+            id: "item-123".to_string(),
+            target_id: Some(IpcFocusTarget::Kde(
+                "f97159ad-a2d7-4cfb-aa57-d39940229877".to_string(),
+            )),
         };
 
         let encoded = serde_json::to_string(&request).expect("serialization failed");
@@ -99,17 +127,34 @@ mod tests {
     }
 
     #[test]
-    fn activate_item_serializes_target_id() {
+    fn activate_item_serializes_x11_target() {
         let request = IpcRequest::ActivateItem {
             id: "item-123".to_string(),
-            target_id: Some(12345),
+            target_id: Some(IpcFocusTarget::X11(12345)),
         };
 
         let encoded = serde_json::to_string(&request).expect("serialization failed");
 
         assert_eq!(
             encoded,
-            r#"{"type":"activate_item","id":"item-123","target_id":12345}"#
+            r#"{"type":"activate_item","id":"item-123","target_id":{"kind":"x11","value":12345}}"#
+        );
+    }
+
+    #[test]
+    fn activate_item_serializes_kde_target() {
+        let request = IpcRequest::ActivateItem {
+            id: "item-123".to_string(),
+            target_id: Some(IpcFocusTarget::Kde(
+                "12345678-1234-5678-1234-567812345678".to_string(),
+            )),
+        };
+
+        let encoded = serde_json::to_string(&request).expect("serialization failed");
+
+        assert_eq!(
+            encoded,
+            r#"{"type":"activate_item","id":"item-123","target_id":{"kind":"kde","value":"12345678-1234-5678-1234-567812345678"}}"#
         );
     }
 
@@ -121,19 +166,34 @@ mod tests {
 
         let decoded: IpcRequest = serde_json::from_str(&encoded).expect("deserialization failed");
 
-        assert_eq!(decoded, request,);
+        assert_eq!(decoded, request);
     }
 
     #[test]
-    fn focus_target_response_round_trips() {
+    fn x11_focus_target_response_round_trips() {
         let response = IpcResponse::FocusTarget {
-            target_id: Some(12345),
+            target_id: Some(IpcFocusTarget::X11(12345)),
         };
 
         let encoded = serde_json::to_string(&response).expect("serialization failed");
 
         let decoded: IpcResponse = serde_json::from_str(&encoded).expect("deserialization failed");
 
-        assert_eq!(decoded, response,);
+        assert_eq!(decoded, response);
+    }
+
+    #[test]
+    fn kde_focus_target_response_round_trips() {
+        let response = IpcResponse::FocusTarget {
+            target_id: Some(IpcFocusTarget::Kde(
+                "12345678-1234-5678-1234-567812345678".to_string(),
+            )),
+        };
+
+        let encoded = serde_json::to_string(&response).expect("serialization failed");
+
+        let decoded: IpcResponse = serde_json::from_str(&encoded).expect("deserialization failed");
+
+        assert_eq!(decoded, response);
     }
 }

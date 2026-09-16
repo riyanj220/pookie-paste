@@ -14,7 +14,9 @@ use daemon::request_handler::handle_request;
 
 use history::{ClipboardHistoryService, HistoryConfig};
 
-use ipc::{ActivationOutcome, IpcClient, IpcRequest, IpcResponse, IpcServer, ServerError};
+use ipc::{
+    ActivationOutcome, IpcClient, IpcFocusTarget, IpcRequest, IpcResponse, IpcServer, ServerError,
+};
 
 use pookie_clipboard::{ClipboardBackend, ClipboardContent, ClipboardError};
 
@@ -304,7 +306,7 @@ async fn capture_focus_target_round_trips_through_daemon_ipc_stack() {
     assert_eq!(
         response,
         IpcResponse::FocusTarget {
-            target_id: Some(42),
+            target_id: Some(IpcFocusTarget::X11(42)),
         },
     );
 }
@@ -777,7 +779,7 @@ async fn x11_style_direct_activation_round_trips_through_ipc() {
         .send(&IpcRequest::ActivateItem {
             id: item_id.clone(),
 
-            target_id: Some(42),
+            target_id: Some(IpcFocusTarget::X11(42)),
         })
         .await
         .expect("ActivateItem request failed");

@@ -62,13 +62,24 @@ async fn main() -> anyhow::Result<()> {
         Arc::clone(&clipboard_state),
     )));
 
-    let paste_backend = PlatformPasteBackend::new()
-        .map_err(|error| anyhow::anyhow!("failed to initialize paste backend: {error:?}"))?;
-
+    /*
+     * Focus initializes first.
+     *
+     * Wayland direct paste is only safe when
+     * Pookie can restore and confirm the
+     * original target window before Ctrl+V.
+     */
     let focus_backend = PlatformFocusBackend::new()
         .map_err(|error| anyhow::anyhow!("failed to initialize focus backend: {error:?}"))?;
 
     info!("focus backend: {}", focus_backend.name());
+
+    let allow_wayland_direct = focus_backend.can_restore_focus();
+
+    let paste_backend = PlatformPasteBackend::new(allow_wayland_direct)
+        .map_err(|error| anyhow::anyhow!("failed to initialize paste backend: {error:?}"))?;
+
+    info!("paste backend: {}", paste_backend.name());
 
     let focus_service = FocusService::new(focus_backend);
 
@@ -203,16 +214,6 @@ async fn main() -> anyhow::Result<()> {
                                     "global shortcut activated with Wayland activation context"
                                 );
 
-                                /*
-                                 * Commit 2:
-                                 *
-                                 * The Wayland activation token is now
-                                 * preserved and propagated to the daemon.
-                                 *
-                                 * Actual token usage for restoring/focusing
-                                 * the target application belongs to the
-                                 * next activation commit.
-                                 */
                                 let _ = token;
                             } else {
                                 info!(
@@ -239,7 +240,8 @@ async fn main() -> anyhow::Result<()> {
                     }
 
                     None => {
-                        shortcut_available = false;
+                        shortcut_available =
+                        false;
                     }
                 }
             }
