@@ -28,6 +28,7 @@ is_kde_session() {
         *:kde:*|*:plasma:*)
             return 0
             ;;
+
         *)
             return 1
             ;;
@@ -58,6 +59,10 @@ require_kde_tools() {
 }
 
 kwin_helper_installed() {
+    if ! command -v kpackagetool6 >/dev/null 2>&1; then
+        return 1
+    fi
+
     kpackagetool6 \
         --type=KWin/Script \
         --list 2>/dev/null |
@@ -76,6 +81,20 @@ remove_kwin_helper() {
         --remove "$POOKIE_KWIN_PLUGIN_ID"
 }
 
+disable_kwin_helper() {
+    if ! command -v kwriteconfig6 >/dev/null 2>&1; then
+        return 0
+    fi
+
+    echo "Disabling Pookie Paste KWin helper..."
+
+    kwriteconfig6 \
+        --file kwinrc \
+        --group Plugins \
+        --key "${POOKIE_KWIN_PLUGIN_ID}Enabled" \
+        false
+}
+
 install_kwin_helper() {
     local package_path="$1"
 
@@ -91,13 +110,6 @@ install_kwin_helper() {
 
     require_kde_tools
 
-    #
-    # Reinstall instead of assuming kpackagetool6 will update
-    # an existing package correctly.
-    #
-    # This makes install.sh idempotent and ensures that new
-    # helper code replaces an older installed version.
-    #
     remove_kwin_helper
 
     echo "Installing Pookie Paste KWin helper..."
@@ -155,4 +167,18 @@ install_and_enable_kwin_helper() {
     reconfigure_kwin
 
     echo "Pookie Paste KWin focus helper is ready."
+}
+
+uninstall_kwin_helper() {
+    if ! command -v kpackagetool6 >/dev/null 2>&1; then
+        return 0
+    fi
+
+    disable_kwin_helper
+
+    remove_kwin_helper
+
+    if is_kde_session && find_qdbus >/dev/null 2>&1; then
+        reconfigure_kwin || true
+    fi
 }

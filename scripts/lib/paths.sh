@@ -4,9 +4,19 @@ POOKIE_APP_ID="io.github.riyanj220.PookiePaste"
 
 POOKIE_BIN_DIR="${HOME}/.local/bin"
 
-POOKIE_APPLICATIONS_DIR="${XDG_DATA_HOME:-${HOME}/.local/share}/applications"
+POOKIE_DATA_HOME="${XDG_DATA_HOME:-${HOME}/.local/share}"
 
-POOKIE_AUTOSTART_DIR="${XDG_CONFIG_HOME:-${HOME}/.config}/autostart"
+POOKIE_CONFIG_HOME="${XDG_CONFIG_HOME:-${HOME}/.config}"
+
+POOKIE_STATE_HOME="${XDG_STATE_HOME:-${HOME}/.local/state}"
+
+POOKIE_APPLICATIONS_DIR="${POOKIE_DATA_HOME}/applications"
+
+POOKIE_AUTOSTART_DIR="${POOKIE_CONFIG_HOME}/autostart"
+
+POOKIE_DATA_DIR="${POOKIE_DATA_HOME}/pookie-paste"
+
+POOKIE_STATE_DIR="${POOKIE_STATE_HOME}/pookie-paste"
 
 POOKIE_DAEMON_DEST="${POOKIE_BIN_DIR}/pookie-paste"
 
@@ -20,5 +30,7 @@ ensure_install_directories() {
     mkdir -p \
         "$POOKIE_BIN_DIR" \
         "$POOKIE_APPLICATIONS_DIR" \
-        "$POOKIE_AUTOSTART_DIR"
+        "$POOKIE_AUTOSTART_DIR" \
+        "$POOKIE_DATA_DIR" \
+        "$POOKIE_STATE_DIR"
 }

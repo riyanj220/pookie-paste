@@ -24,6 +24,9 @@ source "${SCRIPT_DIR}/lib/paths.sh"
 # shellcheck disable=SC1091
 source "${SCRIPT_DIR}/lib/kde.sh"
 
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/lib/process.sh"
+
 echo
 echo "Pookie Paste installer"
 echo "======================"
@@ -48,6 +51,11 @@ if [[ "$DISTRO_FAMILY" == "unsupported" ]]; then
 fi
 
 echo "Detected distribution family: ${DISTRO_FAMILY}"
+
+if [[ -x "$POOKIE_DAEMON_DEST" || -x "$POOKIE_UI_DEST" ]]; then
+    echo "Existing Pookie Paste installation detected."
+    echo "This installation will be updated."
+fi
 
 echo
 echo "Checking build dependencies..."
@@ -107,6 +115,11 @@ if [[ ! -x "$UI_SOURCE" ]]; then
 fi
 
 echo
+echo "Stopping any existing Pookie Paste instance..."
+
+stop_pookie
+
+echo
 echo "Installing application files..."
 
 ensure_install_directories
@@ -135,9 +148,6 @@ echo "Installed:"
 echo "  $POOKIE_DAEMON_DEST"
 echo "  $POOKIE_UI_DEST"
 
-#
-# KDE-specific direct-paste support.
-#
 if is_kde_session; then
     echo
     echo "KDE Plasma detected."
@@ -152,9 +162,6 @@ else
     echo "Skipping KWin focus helper."
 fi
 
-#
-# ~/.local/bin is the standard user-local executable location.
-#
 case ":${PATH}:" in
     *":${POOKIE_BIN_DIR}:"*)
         ;;
@@ -171,42 +178,10 @@ case ":${PATH}:" in
 esac
 
 echo
-echo "Starting Pookie Paste..."
 
-#
-# Stop a currently running installed instance first.
-#
-if pgrep -u "$(id -u)" -x pookie-paste >/dev/null 2>&1; then
-    pkill -u "$(id -u)" -x pookie-paste || true
-
-    sleep 1
-fi
-
-#
-# Ensure the state directory exists before redirecting logs into it.
-#
-STATE_DIR="${XDG_STATE_HOME:-${HOME}/.local/state}/pookie-paste"
-
-mkdir -p "$STATE_DIR"
-
-nohup "$POOKIE_DAEMON_DEST" \
-    >"${STATE_DIR}/install-start.log" \
-    2>&1 &
-
-POOKIE_PID=$!
-
-sleep 2
-
-if kill -0 "$POOKIE_PID" 2>/dev/null; then
-    echo
-    echo "Pookie Paste is running."
-else
-    echo
-    echo "Pookie Paste did not remain running." >&2
-    echo "Check:"
-    echo "  ${STATE_DIR}/install-start.log"
-    exit 1
-fi
+start_pookie \
+    "$POOKIE_DAEMON_DEST" \
+    "$POOKIE_STATE_DIR"
 
 echo
 echo "Installation complete."
