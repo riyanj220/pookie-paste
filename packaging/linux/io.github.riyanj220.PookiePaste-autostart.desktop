@@ -1,0 +1,9 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Pookie Paste
+Comment=Start Pookie Paste clipboard history
+Exec=pookie-paste
+Terminal=false
+NoDisplay=true
+X-GNOME-Autostart-enabled=true

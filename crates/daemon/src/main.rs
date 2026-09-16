@@ -2,6 +2,8 @@ mod ipc_server;
 mod logging;
 mod shutdown;
 
+use ipc_server::BindOutcome;
+
 use std::sync::Arc;
 
 use tokio::sync::Mutex;
@@ -39,9 +41,17 @@ use daemon::app_paths;
 async fn main() -> anyhow::Result<()> {
     logging::init_logging();
 
-    let ipc_listener = ipc_server::bind()?;
+    let ipc_listener = match ipc_server::bind()? {
+        BindOutcome::Bound(listener) => listener,
 
-    let _data_directory = app_paths::ensure_data_directory()?;
+        BindOutcome::AlreadyRunning => {
+            info!("Pookie Paste is already running; exiting");
+
+            return Ok(());
+        }
+    };
+
+    app_paths::ensure_data_directory()?;
 
     let database_path = app_paths::database_path()?;
 
