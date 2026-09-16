@@ -51,7 +51,7 @@ Options:
       Install a specific prebuilt release.
 
       Examples:
-        --version v0.1.0
+        --version v0.1.1
         --version latest
 
   -h, --help
@@ -64,9 +64,9 @@ Environment:
 Examples:
   ./scripts/install.sh
 
-  ./scripts/install.sh --version v0.1.0
+  ./scripts/install.sh --version v0.1.1
 
-  POOKIE_VERSION=v0.1.0 ./scripts/install.sh
+  POOKIE_VERSION=v0.1.1 ./scripts/install.sh
 
   ./scripts/install.sh --from-source
 EOF
@@ -111,8 +111,10 @@ cleanup() {
 trap cleanup EXIT
 
 echo
-echo "Pookie Paste installer"
-echo "======================"
+echo "Pookie Paste"
+echo "============"
+echo
+echo "Setting up Pookie Paste for your Linux desktop..."
 echo
 
 if [[ "$(uname -s)" != "Linux" ]]; then
@@ -125,9 +127,9 @@ DISTRO_FAMILY="$(
 )"
 
 if [[ "$DISTRO_FAMILY" == "unsupported" ]]; then
-    echo "Unsupported Linux distribution." >&2
+    echo "This Linux distribution is not currently supported." >&2
     echo
-    echo "Supported families:"
+    echo "Supported distribution families:"
     echo "  Debian / Ubuntu"
     echo "  Fedora / RHEL"
     echo "  Arch / Manjaro"
@@ -135,13 +137,13 @@ if [[ "$DISTRO_FAMILY" == "unsupported" ]]; then
     exit 1
 fi
 
-echo "Detected distribution family: ${DISTRO_FAMILY}"
+echo "Detected Linux family: ${DISTRO_FAMILY}"
 
 if [[ -x "$POOKIE_DAEMON_DEST" \
     || -x "$POOKIE_UI_DEST" ]]
 then
-    echo "Existing Pookie Paste installation detected."
-    echo "This installation will be updated."
+    echo "Existing Pookie Paste installation found."
+    echo "It will be updated safely."
 fi
 
 DAEMON_SOURCE=""
@@ -161,7 +163,7 @@ if [[ "$FROM_SOURCE" == true ]]; then
     echo "Install mode: source build"
 
     echo
-    echo "Checking source-build dependencies..."
+    echo "Checking build requirements..."
 
     if ! command -v cc >/dev/null 2>&1 \
         || ! command -v make >/dev/null 2>&1 \
@@ -170,13 +172,13 @@ if [[ "$FROM_SOURCE" == true ]]; then
         install_source_dependencies \
             "$DISTRO_FAMILY"
     else
-        echo "Source-build dependencies already available."
+        echo "Build requirements are already available."
     fi
 
     if ! command -v cargo >/dev/null 2>&1; then
         echo
         echo "Rust is not installed."
-        echo "Installing Rust using rustup..."
+        echo "Installing Rust with rustup..."
 
         curl \
             --proto '=https' \
@@ -197,7 +199,7 @@ if [[ "$FROM_SOURCE" == true ]]; then
     fi
 
     echo
-    echo "Building Pookie Paste release binaries..."
+    echo "Building Pookie Paste..."
 
     (
         cd "$PROJECT_ROOT"
@@ -221,10 +223,10 @@ if [[ "$FROM_SOURCE" == true ]]; then
     INSTALL_DESCRIPTION="source build"
 else
     echo
-    echo "Install mode: prebuilt GitHub release"
+    echo "Install mode: prebuilt release"
 
     echo
-    echo "Checking download dependencies..."
+    echo "Checking download requirements..."
 
     if ! command -v curl >/dev/null 2>&1 \
         || ! command -v tar >/dev/null 2>&1 \
@@ -233,7 +235,7 @@ else
         install_download_dependencies \
             "$DISTRO_FAMILY"
     else
-        echo "Download dependencies already available."
+        echo "Download requirements are already available."
     fi
 
     ARCHITECTURE="$(
@@ -255,13 +257,13 @@ else
     # installer.
     #
     if [[ "$ARCHITECTURE" != "x86_64" ]]; then
-        echo "No prebuilt Pookie Paste release is currently published for:" >&2
+        echo "A prebuilt Pookie Paste release is not currently available for:" >&2
         echo "  ${ARCHITECTURE}" >&2
         echo >&2
         echo "Current prebuilt support:" >&2
         echo "  x86_64" >&2
         echo >&2
-        echo "Developers may build from source with:" >&2
+        echo "You can still build Pookie Paste from source with:" >&2
         echo "  ./scripts/install.sh --from-source" >&2
         exit 1
     fi
@@ -337,7 +339,7 @@ echo "Stopping any existing Pookie Paste instance..."
 stop_pookie
 
 echo
-echo "Installing application files..."
+echo "Installing Pookie Paste..."
 
 ensure_install_directories
 
@@ -361,23 +363,17 @@ install \
     "$AUTOSTART_SOURCE" \
     "$POOKIE_AUTOSTART_DEST"
 
-echo "Installed:"
-echo "  $POOKIE_DAEMON_DEST"
-echo "  $POOKIE_UI_DEST"
+echo "Installed application files successfully."
 
 if is_kde_session; then
     echo
-    echo "KDE Plasma detected."
+    echo "Configuring KDE Plasma integration..."
 
     install_kde_dependencies \
         "$DISTRO_FAMILY"
 
     install_and_enable_kwin_helper \
         "$KWIN_SOURCE"
-else
-    echo
-    echo "KDE Plasma not detected."
-    echo "Skipping KWin focus helper."
 fi
 
 case ":${PATH}:" in
@@ -386,23 +382,25 @@ case ":${PATH}:" in
 
     *)
         echo
-        echo "WARNING:"
-        echo "${POOKIE_BIN_DIR} is not currently in PATH."
+        echo "One small setup note:"
         echo
-        echo "Add this to your shell configuration:"
+        echo "${POOKIE_BIN_DIR} is not currently in your PATH."
+        echo
+        echo "Add this line to your shell configuration:"
         echo
         echo 'export PATH="$HOME/.local/bin:$PATH"'
         ;;
 esac
 
 echo
+echo "Starting Pookie Paste..."
 
 start_pookie \
     "$POOKIE_DAEMON_DEST" \
     "$POOKIE_STATE_DIR"
 
 echo
-echo "Installation complete."
+echo "Pookie Paste is ready."
 
 if [[ "$FROM_SOURCE" == false ]]; then
     echo "Installed version:"
@@ -410,9 +408,9 @@ if [[ "$FROM_SOURCE" == false ]]; then
     echo
 fi
 
-echo "Use:"
+echo "Press:"
 echo
 echo "    Super+V"
 echo
-echo "to open clipboard history."
+echo "to open your clipboard history."
 echo
