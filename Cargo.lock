@@ -689,6 +689,7 @@ dependencies = [
  "pookie-core",
  "reis",
  "rustix 1.1.4",
+ "serde_json",
  "storage",
  "tokio",
  "tracing",
