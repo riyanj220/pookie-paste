@@ -7,6 +7,7 @@ mod ui_style;
 use std::time::{Duration, Instant};
 
 use eframe::egui;
+use ipc::HistoryContentRef;
 use theme::AppTheme;
 use tokio::sync::oneshot;
 
@@ -16,6 +17,9 @@ const CURSOR_OFFSET: f32 = 12.0;
 
 const MAX_PREVIEW_LINES: usize = 3;
 const MAX_CHARS_PER_LINE: usize = 70;
+
+const IMAGE_ROW_HEIGHT: f32 = 72.0;
+const IMAGE_PLACEHOLDER_SIZE: f32 = 48.0;
 
 const FOCUS_ACQUISITION_TIMEOUT: Duration = Duration::from_millis(500);
 
@@ -76,6 +80,33 @@ enum HistoryState {
     Loaded(Vec<ipc::HistoryItem>),
 
     Failed(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HistoryRowKind<'a> {
+    Text(&'a str),
+
+    Image,
+
+    Invalid,
+}
+
+fn history_row_kind(item: &ipc::HistoryItem) -> HistoryRowKind<'_> {
+    match item.content() {
+        Ok(HistoryContentRef::Text(text)) => HistoryRowKind::Text(text),
+
+        Ok(HistoryContentRef::Image { .. }) => HistoryRowKind::Image,
+
+        Err(error) => {
+            tracing::debug!(
+                item_id = %item.id,
+                error = %error,
+                "invalid history item received by UI"
+            );
+
+            HistoryRowKind::Invalid
+        }
+    }
 }
 
 struct PookieApp {
@@ -489,7 +520,34 @@ fn render_header(ui: &mut egui::Ui, palette: ui_style::UiPalette) -> bool {
     close_clicked
 }
 
-fn render_history_row(
+fn paint_row_background(
+    ui: &egui::Ui,
+    rect: egui::Rect,
+    response: &egui::Response,
+    selected: bool,
+    palette: ui_style::UiPalette,
+) {
+    let background = if selected {
+        palette.row_selected
+    } else if response.hovered() {
+        palette.row_hover
+    } else {
+        palette.row_background
+    };
+
+    ui.painter()
+        .rect_filled(rect, ui_style::ROW_CORNER_RADIUS, background);
+
+    if selected {
+        let indicator_rect =
+            egui::Rect::from_min_max(rect.min, egui::pos2(rect.left() + 3.0, rect.bottom()));
+
+        ui.painter()
+            .rect_filled(indicator_rect, 2.0, palette.accent);
+    }
+}
+
+fn render_text_history_row(
     ui: &mut egui::Ui,
     text: &str,
     selected: bool,
@@ -515,24 +573,7 @@ fn render_history_row(
         egui::Sense::click(),
     );
 
-    let background = if selected {
-        palette.row_selected
-    } else if response.hovered() {
-        palette.row_hover
-    } else {
-        palette.row_background
-    };
-
-    ui.painter()
-        .rect_filled(rect, ui_style::ROW_CORNER_RADIUS, background);
-
-    if selected {
-        let indicator_rect =
-            egui::Rect::from_min_max(rect.min, egui::pos2(rect.left() + 3.0, rect.bottom()));
-
-        ui.painter()
-            .rect_filled(indicator_rect, 2.0, palette.accent);
-    }
+    paint_row_background(ui, rect, &response, selected, palette);
 
     let text_position = egui::pos2(
         rect.left() + ui_style::ROW_HORIZONTAL_PADDING,
@@ -543,6 +584,126 @@ fn render_history_row(
         .galley(text_position, galley, palette.text_primary);
 
     response
+}
+
+fn render_image_history_row(
+    ui: &mut egui::Ui,
+    selected: bool,
+    palette: ui_style::UiPalette,
+) -> egui::Response {
+    let available_width = ui.available_width();
+
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(available_width, IMAGE_ROW_HEIGHT),
+        egui::Sense::click(),
+    );
+
+    paint_row_background(ui, rect, &response, selected, palette);
+
+    /*
+     * Phase 10.9 deliberately renders a lightweight image
+     * placeholder only.
+     *
+     * Phase 10.10 will replace this box with the decoded
+     * PNG thumbnail and texture cache.
+     */
+    let image_rect = egui::Rect::from_min_size(
+        egui::pos2(
+            rect.left() + ui_style::ROW_HORIZONTAL_PADDING,
+            rect.center().y - (IMAGE_PLACEHOLDER_SIZE / 2.0),
+        ),
+        egui::vec2(IMAGE_PLACEHOLDER_SIZE, IMAGE_PLACEHOLDER_SIZE),
+    );
+
+    ui.painter()
+        .rect_filled(image_rect, ui_style::ROW_CORNER_RADIUS, palette.divider);
+
+    let icon_center = image_rect.center();
+
+    let icon_size = IMAGE_PLACEHOLDER_SIZE * 0.42;
+
+    let icon_rect =
+        egui::Rect::from_center_size(icon_center, egui::vec2(icon_size, icon_size * 0.72));
+
+    ui.painter().rect_stroke(
+        icon_rect,
+        2.0,
+        egui::Stroke::new(1.5, palette.text_secondary),
+        egui::StrokeKind::Inside,
+    );
+
+    let mountain_left = egui::pos2(icon_rect.left() + 3.0, icon_rect.bottom() - 3.0);
+
+    let mountain_peak = egui::pos2(icon_rect.center().x, icon_rect.top() + 4.0);
+
+    let mountain_right = egui::pos2(icon_rect.right() - 3.0, icon_rect.bottom() - 3.0);
+
+    ui.painter().line_segment(
+        [mountain_left, mountain_peak],
+        egui::Stroke::new(1.5, palette.text_secondary),
+    );
+
+    ui.painter().line_segment(
+        [mountain_peak, mountain_right],
+        egui::Stroke::new(1.5, palette.text_secondary),
+    );
+
+    let label_position = egui::pos2(image_rect.right() + 10.0, rect.center().y);
+
+    ui.painter().text(
+        label_position,
+        egui::Align2::LEFT_CENTER,
+        "Image",
+        egui::FontId::proportional(ui_style::BODY_TEXT_SIZE),
+        palette.text_primary,
+    );
+
+    response
+}
+
+fn render_invalid_history_row(
+    ui: &mut egui::Ui,
+    selected: bool,
+    palette: ui_style::UiPalette,
+) -> egui::Response {
+    let available_width = ui.available_width();
+
+    let (rect, response) =
+        ui.allocate_exact_size(egui::vec2(available_width, 44.0), egui::Sense::click());
+
+    paint_row_background(ui, rect, &response, selected, palette);
+
+    ui.painter().text(
+        egui::pos2(
+            rect.left() + ui_style::ROW_HORIZONTAL_PADDING,
+            rect.center().y,
+        ),
+        egui::Align2::LEFT_CENTER,
+        "Unavailable clipboard item",
+        egui::FontId::proportional(ui_style::BODY_TEXT_SIZE),
+        palette.text_secondary,
+    );
+
+    response
+}
+
+fn render_history_item_row(
+    ui: &mut egui::Ui,
+    item: &ipc::HistoryItem,
+    selected: bool,
+    palette: ui_style::UiPalette,
+) -> egui::Response {
+    match history_row_kind(item) {
+        HistoryRowKind::Text(text) => {
+            let preview = preview_text(text);
+
+            render_text_history_row(ui, &preview, selected, palette)
+        }
+
+        HistoryRowKind::Image => render_image_history_row(ui, selected, palette),
+
+        HistoryRowKind::Invalid => render_invalid_history_row(ui, selected, palette),
+    }
 }
 
 fn render_state_message(
@@ -689,13 +850,18 @@ impl eframe::App for PookieApp {
                             return;
                         }
 
+                        /*
+                         * Important mixed-history
+                         * invariant:
+                         *
+                         * every HistoryItem maps to
+                         * exactly one rendered row.
+                         *
+                         * Do not skip image or malformed
+                         * entries here. selected_index
+                         * indexes this exact vector.
+                         */
                         for (index, item) in items.iter().enumerate() {
-                            let Some(text) = &item.text_content else {
-                                continue;
-                            };
-
-                            let preview = preview_text(text);
-
                             let selected = self.selected_index == Some(index);
 
                             let mut row_response = None;
@@ -713,8 +879,8 @@ impl eframe::App for PookieApp {
                                     |ui| {
                                         ui.set_width(remaining_width);
 
-                                        row_response = Some(render_history_row(
-                                            ui, &preview, selected, palette,
+                                        row_response = Some(render_history_item_row(
+                                            ui, item, selected, palette,
                                         ));
                                     },
                                 );
@@ -759,6 +925,23 @@ impl eframe::App for PookieApp {
 mod tests {
     use super::*;
 
+    fn text_item(text: &str) -> ipc::HistoryItem {
+        ipc::HistoryItem::text(
+            "text-item".to_string(),
+            text.to_string(),
+            "2026-09-17T10:00:00Z".to_string(),
+        )
+    }
+
+    fn image_item() -> ipc::HistoryItem {
+        ipc::HistoryItem::image(
+            "550e8400-e29b-41d4-a716-446655440000".to_string(),
+            "images/550e8400-e29b-41d4-a716-446655440000.png".to_string(),
+            "2026-09-17T10:00:00Z".to_string(),
+        )
+        .expect("failed creating image history item")
+    }
+
     #[test]
     fn short_preview_is_unchanged() {
         assert_eq!(preview_text("Hello world",), "Hello world",);
@@ -777,6 +960,48 @@ mod tests {
 
         let preview = preview_text(&input);
 
-        assert!(preview.ends_with('…'),);
+        assert!(preview.ends_with('…',),);
+    }
+
+    #[test]
+    fn text_item_maps_to_text_row() {
+        let item = text_item("hello");
+
+        assert_eq!(history_row_kind(&item,), HistoryRowKind::Text("hello",),);
+    }
+
+    #[test]
+    fn image_item_maps_to_image_row() {
+        let item = image_item();
+
+        assert_eq!(history_row_kind(&item,), HistoryRowKind::Image,);
+    }
+
+    #[test]
+    fn malformed_item_still_maps_to_visible_row_kind() {
+        let item = ipc::HistoryItem {
+            id: "broken".to_string(),
+
+            content_type: "image".to_string(),
+
+            text_content: None,
+
+            file_path: None,
+
+            created_at: "2026-09-17T10:00:00Z".to_string(),
+        };
+
+        assert_eq!(history_row_kind(&item,), HistoryRowKind::Invalid,);
+    }
+
+    #[test]
+    fn mixed_items_preserve_vector_index_mapping() {
+        let items = [text_item("first"), image_item(), text_item("third")];
+
+        assert_eq!(history_row_kind(&items[0],), HistoryRowKind::Text("first",),);
+
+        assert_eq!(history_row_kind(&items[1],), HistoryRowKind::Image,);
+
+        assert_eq!(history_row_kind(&items[2],), HistoryRowKind::Text("third",),);
     }
 }
