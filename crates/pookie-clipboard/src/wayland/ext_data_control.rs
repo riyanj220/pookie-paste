@@ -37,34 +37,52 @@ pub struct ExtDataControlState {
 }
 
 impl ExtDataControlState {
-    fn request_text(&mut self) {
+    fn request_content(&mut self) {
         if self.clipboard_requested {
             tracing::debug!("clipboard request already sent");
+
             return;
         }
 
         let Some(offer) = self.current_offer.as_ref() else {
-            tracing::debug!("request_text: no current offer");
+            tracing::debug!("request_content: no current offer");
+
             return;
         };
 
-        let Some(mime) = mime::preferred_text_mime(&self.offered_mime_types) else {
+        let Some(preferred) = mime::preferred_content_mime(&self.offered_mime_types) else {
             tracing::debug!(
                 offered = ?self.offered_mime_types,
-                "no supported clipboard mime found"
+                "no supported clipboard MIME found"
             );
 
             return;
         };
 
+        let requested_mime = preferred.mime_type.to_string();
+
+        let kind = preferred.kind;
+
         tracing::debug!(
-            mime = %mime,
+            mime = %requested_mime,
+            kind = ?kind,
             "requesting clipboard data"
         );
 
-        let (read_fd, write_fd) = nix::unistd::pipe().expect("failed creating clipboard pipe");
+        let (read_fd, write_fd) = match nix::unistd::pipe() {
+            Ok(pipe) => pipe,
 
-        offer.receive(mime.to_string(), write_fd.as_fd());
+            Err(error) => {
+                tracing::error!(
+                    error = %error,
+                    "failed creating EXT clipboard pipe"
+                );
+
+                return;
+            }
+        };
+
+        offer.receive(requested_mime.clone(), write_fd.as_fd());
 
         drop(write_fd);
 
@@ -72,18 +90,38 @@ impl ExtDataControlState {
 
         let sender = self.sender.clone();
 
-        std::thread::spawn(move || match clipboard_reader::read_clipboard_fd(read_fd) {
-            Ok(value) => {
-                tracing::debug!(length = value.len(), "clipboard text received");
+        std::thread::spawn(move || {
+            match clipboard_reader::read_clipboard_fd(read_fd, &requested_mime, kind) {
+                Ok(content) => {
+                    match &content {
+                        crate::ClipboardContent::Text(text) => {
+                            tracing::debug!(
+                                length = text.len(),
+                                            mime = %requested_mime,
+                                            "Wayland EXT clipboard text received"
+                            );
+                        }
 
-                clipboard_reader::send_clipboard_event(sender, value);
-            }
+                        crate::ClipboardContent::Image(image) => {
+                            tracing::debug!(
+                                encoded_bytes =
+                                image.len(),
+                                            mime = %requested_mime,
+                                            "Wayland EXT clipboard image received"
+                            );
+                        }
+                    }
 
-            Err(error) => {
-                tracing::error!(
-                    error = %error,
-                    "failed reading clipboard fd"
-                );
+                    clipboard_reader::send_clipboard_event(sender, content);
+                }
+
+                Err(error) => {
+                    tracing::error!(
+                        error = %error,
+                        mime = %requested_mime,
+                        "failed reading EXT clipboard payload"
+                    );
+                }
             }
         });
     }
@@ -128,15 +166,10 @@ impl Dispatch<ext_data_control_manager_v1::ExtDataControlManagerV1, ()> for ExtD
 impl Dispatch<ext_data_control_device_v1::ExtDataControlDeviceV1, ()> for ExtDataControlState {
     fn event(
         state: &mut Self,
-
         _proxy: &ext_data_control_device_v1::ExtDataControlDeviceV1,
-
         event: ext_data_control_device_v1::Event,
-
         _data: &(),
-
         _conn: &Connection,
-
         _qh: &QueueHandle<Self>,
     ) {
         tracing::debug!(
@@ -164,7 +197,7 @@ impl Dispatch<ext_data_control_device_v1::ExtDataControlDeviceV1, ()> for ExtDat
                         state.clipboard_requested = false;
 
                         if !state.offered_mime_types.is_empty() {
-                            state.request_text();
+                            state.request_content();
                         }
                     }
 
@@ -186,7 +219,6 @@ impl Dispatch<ext_data_control_device_v1::ExtDataControlDeviceV1, ()> for ExtDat
 
     fn event_created_child(
         _opcode: u16,
-
         qhandle: &QueueHandle<Self>,
     ) -> std::sync::Arc<dyn wayland_client::backend::ObjectData> {
         qhandle.make_data::<ext_data_control_offer_v1::ExtDataControlOfferV1, ()>(())
@@ -196,23 +228,18 @@ impl Dispatch<ext_data_control_device_v1::ExtDataControlDeviceV1, ()> for ExtDat
 impl Dispatch<ext_data_control_offer_v1::ExtDataControlOfferV1, ()> for ExtDataControlState {
     fn event(
         state: &mut Self,
-
         _proxy: &ext_data_control_offer_v1::ExtDataControlOfferV1,
-
         event: ext_data_control_offer_v1::Event,
-
         _data: &(),
-
         _conn: &Connection,
-
         _qh: &QueueHandle<Self>,
     ) {
         match event {
             ext_data_control_offer_v1::Event::Offer { mime_type } => {
-                if mime::is_supported_text_mime(&mime_type) {
+                if mime::is_supported_clipboard_mime(&mime_type) {
                     tracing::debug!(
                         mime = %mime_type,
-                        "supported clipboard mime received"
+                        "supported EXT clipboard MIME received"
                     );
 
                     if !state.offered_mime_types.contains(&mime_type) {
@@ -220,14 +247,11 @@ impl Dispatch<ext_data_control_offer_v1::ExtDataControlOfferV1, ()> for ExtDataC
                     }
 
                     /*
-                     * Handles:
-                     *
-                     * Offer -> Selection
-                     *
-                     * ordering.
+                     * Preserve the existing support for
+                     * Selection -> Offer event ordering.
                      */
                     if state.has_selection {
-                        state.request_text();
+                        state.request_content();
                     }
                 }
             }
