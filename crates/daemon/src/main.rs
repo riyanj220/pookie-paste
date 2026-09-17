@@ -57,7 +57,7 @@ async fn main() -> anyhow::Result<()> {
 
     info!(
         path = %database_path.display(),
-        "using application database"
+          "using application database"
     );
 
     let database_url = format!("sqlite://{}", database_path.display(),);
@@ -148,7 +148,7 @@ async fn main() -> anyhow::Result<()> {
     loop {
         tokio::select! {
             event =
-                clipboard_events.recv() =>
+            clipboard_events.recv() =>
             {
                 match event {
                     Some(event) => {
@@ -157,46 +157,54 @@ async fn main() -> anyhow::Result<()> {
                             event.id
                         );
 
-                        let text =
-                            match &event.content {
-                                pookie_clipboard::ClipboardContent::Text(text) =>
-                                    Some(text.as_str()),
+                        /*
+                         * Both text and image clipboard
+                         * writes performed by Pookie produce
+                         * normal watcher events.
+                         *
+                         * Compare the complete canonical
+                         * content fingerprint before sending
+                         * the event through processing/history.
+                         */
+                        if clipboard_state
+                            .is_self_write(
+                                &event.content,
+                            )
+                            {
+                                info!(
+                                    "ignoring self-generated clipboard event"
+                                );
 
-                                _ => None,
-                            };
+                                continue;
+                            }
 
-                        if let Some(text) = text
-                            && clipboard_state.is_self_write(text)
-                        {
-                            info!(
-                                "ignoring self-generated clipboard event"
-                            );
-
-                            continue;
-                        }
-
-                        let core_event =
+                            let core_event =
                             ClipboardEvent {
-                                content: event.content,
-                                created_at: event.created_at,
+                                content:
+                                event.content,
+
+                                created_at:
+                                event.created_at,
                             };
 
-                        if let Some(item) =
-                            processor.process(core_event)
-                        {
-                            info!(
-                                "Clipboard item created: {:?}",
-                                item.id
-                            );
+                            if let Some(item) =
+                                processor.process(
+                                    core_event,
+                                )
+                                {
+                                    info!(
+                                        "Clipboard item created: {:?}",
+                                        item.id
+                                    );
 
-                            history_service
-                                .save(item)
-                                .await?;
+                                    history_service
+                                    .save(item)
+                                    .await?;
 
-                            info!(
-                                "Clipboard item saved"
-                            );
-                        }
+                                    info!(
+                                        "Clipboard item saved"
+                                    );
+                                }
                     }
 
                     None => {
@@ -210,7 +218,7 @@ async fn main() -> anyhow::Result<()> {
             }
 
             _ =
-                shutdown::wait_for_shutdown() =>
+            shutdown::wait_for_shutdown() =>
             {
                 info!(
                     "Shutdown signal received"
@@ -220,7 +228,7 @@ async fn main() -> anyhow::Result<()> {
             }
 
             result =
-                &mut ipc_future =>
+            &mut ipc_future =>
             {
                 match result {
                     Ok(()) => {
@@ -232,55 +240,59 @@ async fn main() -> anyhow::Result<()> {
                     }
 
                     Err(error) => {
-                        return Err(error);
+                        return Err(
+                            error,
+                        );
                     }
                 }
             }
 
             activation =
-                shortcut_listener.activated(),
+            shortcut_listener.activated(),
             if shortcut_available =>
             {
                 match activation {
                     Some(activation) => {
                         if let Some(token) =
                             activation
-                                .activation_token
-                                .as_deref()
-                        {
-                            info!(
-                                token_present = true,
-                                "global shortcut activated with Wayland activation context"
-                            );
+                            .activation_token
+                            .as_deref()
+                            {
+                                info!(
+                                    token_present = true,
+                                    "global shortcut activated with Wayland activation context"
+                                );
 
-                            let _ = token;
-                        } else {
-                            info!(
-                                "global shortcut activated"
-                            );
-                        }
-
-                        match ui_launcher.launch() {
-                            Ok(
-                                UiLaunchOutcome::Launched
-                            )
-                            |
-                            Ok(
-                                UiLaunchOutcome::AlreadyRunning
-                            ) => {}
-
-                            Err(error) => {
-                                warn!(
-                                    error = ?error,
-                                    "failed to launch Pookie UI"
+                                let _ = token;
+                            } else {
+                                info!(
+                                    "global shortcut activated"
                                 );
                             }
-                        }
+
+                            match ui_launcher
+                            .launch()
+                            {
+                                Ok(
+                                    UiLaunchOutcome::Launched
+                                )
+                                |
+                                Ok(
+                                    UiLaunchOutcome::AlreadyRunning
+                                ) => {}
+
+                                Err(error) => {
+                                    warn!(
+                                        error = ?error,
+                                        "failed to launch Pookie UI"
+                                    );
+                                }
+                            }
                     }
 
                     None => {
                         shortcut_available =
-                            false;
+                        false;
                     }
                 }
             }

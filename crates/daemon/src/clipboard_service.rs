@@ -38,19 +38,17 @@ where
     {
         let content = content.into();
 
+        /*
+         * Only mark the write after the backend has
+         * successfully accepted the clipboard content.
+         *
+         * A failed clipboard write must never leave behind
+         * a suppression fingerprint for content that Pookie
+         * did not actually place on the clipboard.
+         */
         self.backend.write_content(&content)?;
 
-        /*
-         * Phase 10.7 will generalize self-write
-         * suppression to both text and images using
-         * content fingerprints.
-         *
-         * For Phase 10.4 we intentionally preserve the
-         * existing proven text behavior unchanged.
-         */
-        if let ClipboardContent::Text(text) = &content {
-            self.clipboard_state.mark_written(text.clone());
-        }
+        self.clipboard_state.mark_written(&content);
 
         Ok(())
     }
@@ -68,61 +66,72 @@ mod tests {
 
     #[derive(Clone)]
     struct FakeClipboardBackend {
-        text: Arc<StdMutex<String>>,
+        content: Arc<StdMutex<ClipboardContent>>,
 
-        image: Arc<StdMutex<Option<Vec<u8>>>>,
+        fail_writes: Arc<StdMutex<bool>>,
     }
 
     impl FakeClipboardBackend {
-        fn new(initial: &str) -> Self {
+        fn new(initial: ClipboardContent) -> Self {
             Self {
-                text: Arc::new(StdMutex::new(initial.to_string())),
+                content: Arc::new(StdMutex::new(initial)),
 
-                image: Arc::new(StdMutex::new(None)),
+                fail_writes: Arc::new(StdMutex::new(false)),
             }
         }
 
-        fn text_content(&self) -> String {
-            self.text
+        fn text(initial: &str) -> Self {
+            Self::new(ClipboardContent::Text(initial.to_string()))
+        }
+
+        fn content(&self) -> ClipboardContent {
+            self.content
                 .lock()
                 .expect("fake clipboard mutex poisoned")
                 .clone()
         }
 
-        fn image_content(&self) -> Option<Vec<u8>> {
-            self.image
+        fn set_fail_writes(&self, fail: bool) {
+            *self
+                .fail_writes
                 .lock()
-                .expect("fake clipboard mutex poisoned")
-                .clone()
+                .expect("fake clipboard mutex poisoned") = fail;
         }
     }
 
     impl ClipboardBackend for FakeClipboardBackend {
         fn read(&self) -> Result<String, ClipboardError> {
-            Ok(self
-                .text
-                .lock()
-                .expect("fake clipboard mutex poisoned")
-                .clone())
+            match self.content() {
+                ClipboardContent::Text(text) => Ok(text),
+
+                ClipboardContent::Image(_) => Err(ClipboardError::UnsupportedContent(
+                    "fake clipboard contains image".to_string(),
+                )),
+            }
         }
 
         fn write(&self, content: &str) -> Result<(), ClipboardError> {
-            *self.text.lock().expect("fake clipboard mutex poisoned") = content.to_string();
+            self.write_content(&ClipboardContent::Text(content.to_string()))
+        }
 
-            Ok(())
+        fn read_content(&self) -> Result<ClipboardContent, ClipboardError> {
+            Ok(self.content())
         }
 
         fn write_content(&self, content: &ClipboardContent) -> Result<(), ClipboardError> {
-            match content {
-                ClipboardContent::Text(text) => self.write(text),
-
-                ClipboardContent::Image(image) => {
-                    *self.image.lock().expect("fake clipboard mutex poisoned") =
-                        Some(image.clone());
-
-                    Ok(())
-                }
+            if *self
+                .fail_writes
+                .lock()
+                .expect("fake clipboard mutex poisoned")
+            {
+                return Err(ClipboardError::WriteFailed(
+                    "simulated write failure".to_string(),
+                ));
             }
+
+            *self.content.lock().expect("fake clipboard mutex poisoned") = content.clone();
+
+            Ok(())
         }
     }
 
@@ -131,8 +140,8 @@ mod tests {
     }
 
     #[test]
-    fn read_returns_current_clipboard_content() {
-        let backend = FakeClipboardBackend::new("hello");
+    fn read_returns_current_text_clipboard_content() {
+        let backend = FakeClipboardBackend::text("hello");
 
         let service = create_service(backend);
 
@@ -142,8 +151,21 @@ mod tests {
     }
 
     #[test]
+    fn read_returns_current_image_clipboard_content() {
+        let image = vec![1, 2, 3, 4];
+
+        let backend = FakeClipboardBackend::new(ClipboardContent::Image(image.clone()));
+
+        let service = create_service(backend);
+
+        let content = service.read().expect("clipboard read failed");
+
+        assert_eq!(content, ClipboardContent::Image(image,),);
+    }
+
+    #[test]
     fn write_text_updates_clipboard_content() {
-        let backend = FakeClipboardBackend::new("");
+        let backend = FakeClipboardBackend::text("");
 
         let backend_handle = backend.clone();
 
@@ -151,12 +173,15 @@ mod tests {
 
         service.write("hello").expect("clipboard write failed");
 
-        assert_eq!(backend_handle.text_content(), "hello",);
+        assert_eq!(
+            backend_handle.content(),
+            ClipboardContent::Text("hello".to_string(),),
+        );
     }
 
     #[test]
     fn write_owned_text_updates_clipboard_content() {
-        let backend = FakeClipboardBackend::new("");
+        let backend = FakeClipboardBackend::text("");
 
         let backend_handle = backend.clone();
 
@@ -166,27 +191,15 @@ mod tests {
             .write(String::from("owned text"))
             .expect("clipboard write failed");
 
-        assert_eq!(backend_handle.text_content(), "owned text",);
+        assert_eq!(
+            backend_handle.content(),
+            ClipboardContent::Text("owned text".to_string(),),
+        );
     }
 
     #[test]
-    fn write_content_text_updates_clipboard_content() {
-        let backend = FakeClipboardBackend::new("");
-
-        let backend_handle = backend.clone();
-
-        let mut service = create_service(backend);
-
-        service
-            .write(ClipboardContent::Text("content-aware".to_string()))
-            .expect("clipboard write failed");
-
-        assert_eq!(backend_handle.text_content(), "content-aware",);
-    }
-
-    #[test]
-    fn write_image_passes_image_to_content_aware_backend() {
-        let backend = FakeClipboardBackend::new("");
+    fn write_image_updates_clipboard_content() {
+        let backend = FakeClipboardBackend::text("");
 
         let backend_handle = backend.clone();
 
@@ -198,36 +211,57 @@ mod tests {
             .write(ClipboardContent::Image(image.clone()))
             .expect("clipboard image write failed");
 
-        assert_eq!(backend_handle.image_content(), Some(image),);
+        assert_eq!(backend_handle.content(), ClipboardContent::Image(image,),);
     }
 
     #[test]
-    fn write_marks_self_generated_text_content() {
-        let backend = FakeClipboardBackend::new("");
+    fn successful_text_write_marks_self_generated_content() {
+        let backend = FakeClipboardBackend::text("");
 
         let state = Arc::new(ClipboardState::default());
 
         let mut service = ClipboardService::new(backend, Arc::clone(&state));
 
+        let content = ClipboardContent::Text("pookie-write".to_string());
+
         service
-            .write("pookie-write")
+            .write(content.clone())
             .expect("clipboard write failed");
 
-        assert!(state.is_self_write("pookie-write",),);
+        assert!(state.is_self_write(&content,));
     }
 
     #[test]
-    fn image_write_does_not_use_text_self_write_marker_yet() {
-        let backend = FakeClipboardBackend::new("");
+    fn successful_image_write_marks_self_generated_content() {
+        let backend = FakeClipboardBackend::text("");
 
         let state = Arc::new(ClipboardState::default());
 
         let mut service = ClipboardService::new(backend, Arc::clone(&state));
 
+        let content = ClipboardContent::Image(vec![1, 2, 3, 4]);
+
         service
-            .write(ClipboardContent::Image(vec![1, 2, 3]))
+            .write(content.clone())
             .expect("clipboard image write failed");
 
-        assert!(!state.is_self_write("anything",),);
+        assert!(state.is_self_write(&content,));
+    }
+
+    #[test]
+    fn failed_write_does_not_mark_self_generated_content() {
+        let backend = FakeClipboardBackend::text("");
+
+        backend.set_fail_writes(true);
+
+        let state = Arc::new(ClipboardState::default());
+
+        let mut service = ClipboardService::new(backend, Arc::clone(&state));
+
+        let content = ClipboardContent::Image(vec![9, 8, 7]);
+
+        assert!(service.write(content.clone(),).is_err());
+
+        assert!(!state.is_self_write(&content,));
     }
 }
