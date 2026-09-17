@@ -1,3 +1,4 @@
+mod image_thumbnail;
 mod ipc_client;
 mod popup_focus;
 mod popup_position;
@@ -7,6 +8,7 @@ mod ui_style;
 use std::time::{Duration, Instant};
 
 use eframe::egui;
+use image_thumbnail::{ImageThumbnail, ImageThumbnailCache};
 use ipc::HistoryContentRef;
 use theme::AppTheme;
 use tokio::sync::oneshot;
@@ -18,8 +20,17 @@ const CURSOR_OFFSET: f32 = 12.0;
 const MAX_PREVIEW_LINES: usize = 3;
 const MAX_CHARS_PER_LINE: usize = 70;
 
-const IMAGE_ROW_HEIGHT: f32 = 72.0;
-const IMAGE_PLACEHOLDER_SIZE: f32 = 48.0;
+/*
+ * Compact Windows-style image history card.
+ *
+ * The thumbnail is large enough to recognize at a glance
+ * without turning the clipboard panel into an image gallery.
+ */
+const IMAGE_ROW_HEIGHT: f32 = 96.0;
+
+const IMAGE_THUMBNAIL_MAX_WIDTH: f32 = 132.0;
+
+const IMAGE_THUMBNAIL_MAX_HEIGHT: f32 = 72.0;
 
 const FOCUS_ACQUISITION_TIMEOUT: Duration = Duration::from_millis(500);
 
@@ -86,7 +97,7 @@ enum HistoryState {
 enum HistoryRowKind<'a> {
     Text(&'a str),
 
-    Image,
+    Image { file_path: &'a str },
 
     Invalid,
 }
@@ -95,7 +106,7 @@ fn history_row_kind(item: &ipc::HistoryItem) -> HistoryRowKind<'_> {
     match item.content() {
         Ok(HistoryContentRef::Text(text)) => HistoryRowKind::Text(text),
 
-        Ok(HistoryContentRef::Image { .. }) => HistoryRowKind::Image,
+        Ok(HistoryContentRef::Image { file_path }) => HistoryRowKind::Image { file_path },
 
         Err(error) => {
             tracing::debug!(
@@ -115,6 +126,8 @@ struct PookieApp {
     history_receiver: Option<oneshot::Receiver<Result<Vec<ipc::HistoryItem>, String>>>,
 
     selected_index: Option<usize>,
+
+    image_thumbnails: ImageThumbnailCache,
 
     /*
      * Focus acquisition is bounded.
@@ -156,6 +169,8 @@ impl PookieApp {
 
             selected_index: None,
 
+            image_thumbnails: ImageThumbnailCache::new(),
+
             focus_started_at: Instant::now(),
 
             has_received_focus: false,
@@ -173,60 +188,24 @@ impl PookieApp {
     fn ensure_popup_focus(&mut self, ui: &mut egui::Ui) {
         let focused = ui.input(|input| input.viewport().focused.unwrap_or(false));
 
-        /*
-         * Only mark focus as received when egui confirms
-         * the native viewport genuinely owns focus.
-         */
         if focused {
             self.has_received_focus = true;
 
             return;
         }
 
-        /*
-         * Once the popup has received focus once, we must
-         * not try to steal it back.
-         *
-         * A later focus loss is intentional click-away
-         * behavior and is handled in ui().
-         */
         if self.has_received_focus {
             return;
         }
 
-        /*
-         * Limit active focus acquisition to the first
-         * 500 ms of the popup's lifetime.
-         *
-         * This isn't a sleep or UX delay. We retry across
-         * normal UI frames because the native X11 window
-         * may not yet appear in the WM client list during
-         * the very first frame.
-         */
         if self.focus_started_at.elapsed() > FOCUS_ACQUISITION_TIMEOUT {
             return;
         }
 
-        /*
-         * Layer 1:
-         * Ask eframe/egui to focus its viewport.
-         */
         ui.ctx().send_viewport_cmd(egui::ViewportCommand::Focus);
 
-        /*
-         * Layer 2:
-         * On X11, send a WM-friendly
-         * _NET_ACTIVE_WINDOW request for this UI process.
-         *
-         * On unsupported sessions this simply returns
-         * false and causes no failure.
-         */
         popup_focus::request_focus();
 
-        /*
-         * Keep generating frames briefly while focus is
-         * still being acquired.
-         */
         ui.ctx().request_repaint_after(FOCUS_RETRY_INTERVAL);
     }
 
@@ -326,13 +305,6 @@ impl PookieApp {
 
         let id = item.id.clone();
 
-        /*
-         * IpcFocusTarget is not Copy because KDE targets
-         * contain a String.
-         *
-         * Keep the target stored in the app and send a
-         * clone to the activation worker.
-         */
         let target_id = self.target_id.clone();
 
         let (sender, receiver) = oneshot::channel();
@@ -343,10 +315,6 @@ impl PookieApp {
 
         self.activation_receiver = Some(receiver);
 
-        /*
-         * Hide before asking the daemon to restore the
-         * original application and paste.
-         */
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
 
         std::thread::spawn(move || {
@@ -586,10 +554,73 @@ fn render_text_history_row(
     response
 }
 
+fn fit_thumbnail_size(thumbnail: ImageThumbnail) -> egui::Vec2 {
+    let aspect = thumbnail.aspect_ratio;
+
+    if !aspect.is_finite() || aspect <= 0.0 {
+        return egui::vec2(IMAGE_THUMBNAIL_MAX_HEIGHT, IMAGE_THUMBNAIL_MAX_HEIGHT);
+    }
+
+    let available_aspect = IMAGE_THUMBNAIL_MAX_WIDTH / IMAGE_THUMBNAIL_MAX_HEIGHT;
+
+    if aspect >= available_aspect {
+        egui::vec2(
+            IMAGE_THUMBNAIL_MAX_WIDTH,
+            IMAGE_THUMBNAIL_MAX_WIDTH / aspect,
+        )
+    } else {
+        egui::vec2(
+            IMAGE_THUMBNAIL_MAX_HEIGHT * aspect,
+            IMAGE_THUMBNAIL_MAX_HEIGHT,
+        )
+    }
+}
+
+fn paint_missing_image_placeholder(ui: &egui::Ui, rect: egui::Rect, palette: ui_style::UiPalette) {
+    let size = 48.0;
+
+    let placeholder = egui::Rect::from_min_size(
+        egui::pos2(
+            rect.left() + ui_style::ROW_HORIZONTAL_PADDING,
+            rect.center().y - size / 2.0,
+        ),
+        egui::vec2(size, size),
+    );
+
+    ui.painter()
+        .rect_filled(placeholder, ui_style::ROW_CORNER_RADIUS, palette.divider);
+
+    let icon_rect = placeholder.shrink(13.0);
+
+    ui.painter().rect_stroke(
+        icon_rect,
+        2.0,
+        egui::Stroke::new(1.4, palette.text_secondary),
+        egui::StrokeKind::Inside,
+    );
+
+    let left = egui::pos2(icon_rect.left() + 2.0, icon_rect.bottom() - 3.0);
+
+    let peak = egui::pos2(icon_rect.center().x, icon_rect.top() + 3.0);
+
+    let right = egui::pos2(icon_rect.right() - 2.0, icon_rect.bottom() - 3.0);
+
+    ui.painter()
+        .line_segment([left, peak], egui::Stroke::new(1.4, palette.text_secondary));
+
+    ui.painter().line_segment(
+        [peak, right],
+        egui::Stroke::new(1.4, palette.text_secondary),
+    );
+}
+
 fn render_image_history_row(
     ui: &mut egui::Ui,
+    item_id: &str,
+    file_path: &str,
     selected: bool,
     palette: ui_style::UiPalette,
+    thumbnails: &mut ImageThumbnailCache,
 ) -> egui::Response {
     let available_width = ui.available_width();
 
@@ -600,62 +631,44 @@ fn render_image_history_row(
 
     paint_row_background(ui, rect, &response, selected, palette);
 
-    /*
-     * Phase 10.9 deliberately renders a lightweight image
-     * placeholder only.
-     *
-     * Phase 10.10 will replace this box with the decoded
-     * PNG thumbnail and texture cache.
-     */
+    let thumbnail = thumbnails.get_or_load(ui.ctx(), item_id, file_path);
+
+    let Some(thumbnail) = thumbnail else {
+        paint_missing_image_placeholder(ui, rect, palette);
+
+        return response;
+    };
+
+    let thumbnail_size = fit_thumbnail_size(thumbnail);
+
     let image_rect = egui::Rect::from_min_size(
         egui::pos2(
             rect.left() + ui_style::ROW_HORIZONTAL_PADDING,
-            rect.center().y - (IMAGE_PLACEHOLDER_SIZE / 2.0),
+            rect.center().y - thumbnail_size.y / 2.0,
         ),
-        egui::vec2(IMAGE_PLACEHOLDER_SIZE, IMAGE_PLACEHOLDER_SIZE),
+        thumbnail_size,
     );
 
-    ui.painter()
-        .rect_filled(image_rect, ui_style::ROW_CORNER_RADIUS, palette.divider);
+    /*
+     * Very subtle surface behind transparent PNGs.
+     *
+     * This keeps screenshots/photos visually clean while
+     * still making transparent images readable in both
+     * light and dark themes.
+     */
+    let image_background = image_rect.expand(2.0);
 
-    let icon_center = image_rect.center();
-
-    let icon_size = IMAGE_PLACEHOLDER_SIZE * 0.42;
-
-    let icon_rect =
-        egui::Rect::from_center_size(icon_center, egui::vec2(icon_size, icon_size * 0.72));
-
-    ui.painter().rect_stroke(
-        icon_rect,
-        2.0,
-        egui::Stroke::new(1.5, palette.text_secondary),
-        egui::StrokeKind::Inside,
+    ui.painter().rect_filled(
+        image_background,
+        ui_style::ROW_CORNER_RADIUS,
+        palette.divider,
     );
 
-    let mountain_left = egui::pos2(icon_rect.left() + 3.0, icon_rect.bottom() - 3.0);
-
-    let mountain_peak = egui::pos2(icon_rect.center().x, icon_rect.top() + 4.0);
-
-    let mountain_right = egui::pos2(icon_rect.right() - 3.0, icon_rect.bottom() - 3.0);
-
-    ui.painter().line_segment(
-        [mountain_left, mountain_peak],
-        egui::Stroke::new(1.5, palette.text_secondary),
-    );
-
-    ui.painter().line_segment(
-        [mountain_peak, mountain_right],
-        egui::Stroke::new(1.5, palette.text_secondary),
-    );
-
-    let label_position = egui::pos2(image_rect.right() + 10.0, rect.center().y);
-
-    ui.painter().text(
-        label_position,
-        egui::Align2::LEFT_CENTER,
-        "Image",
-        egui::FontId::proportional(ui_style::BODY_TEXT_SIZE),
-        palette.text_primary,
+    ui.painter().image(
+        thumbnail.texture_id,
+        image_rect,
+        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+        egui::Color32::WHITE,
     );
 
     response
@@ -692,6 +705,7 @@ fn render_history_item_row(
     item: &ipc::HistoryItem,
     selected: bool,
     palette: ui_style::UiPalette,
+    thumbnails: &mut ImageThumbnailCache,
 ) -> egui::Response {
     match history_row_kind(item) {
         HistoryRowKind::Text(text) => {
@@ -700,7 +714,9 @@ fn render_history_item_row(
             render_text_history_row(ui, &preview, selected, palette)
         }
 
-        HistoryRowKind::Image => render_image_history_row(ui, selected, palette),
+        HistoryRowKind::Image { file_path } => {
+            render_image_history_row(ui, &item.id, file_path, selected, palette, thumbnails)
+        }
 
         HistoryRowKind::Invalid => render_invalid_history_row(ui, selected, palette),
     }
@@ -754,11 +770,6 @@ impl eframe::App for PookieApp {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        /*
-         * Focus acquisition must happen before keyboard
-         * input handling so arrows/Enter can work as soon
-         * as the popup receives native focus.
-         */
         self.ensure_popup_focus(ui);
 
         self.poll_history();
@@ -767,23 +778,10 @@ impl eframe::App for PookieApp {
 
         let viewport_focused = ui.input(|input| input.viewport().focused.unwrap_or(false));
 
-        /*
-         * Keep this separate from the focus-request code.
-         *
-         * has_received_focus means "the WM actually gave
-         * us focus", not merely "we requested it".
-         */
         if viewport_focused {
             self.has_received_focus = true;
         }
 
-        /*
-         * Do not close the popup merely because its first
-         * frame wasn't focused yet.
-         *
-         * Only treat focus loss as dismissal after focus
-         * has genuinely been obtained at least once.
-         */
         if self.has_received_focus && !viewport_focused && !self.activation_in_progress {
             ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
 
@@ -828,12 +826,25 @@ impl eframe::App for PookieApp {
 
         let mut clicked_index = None;
 
+        /*
+         * Borrow these fields independently before entering
+         * the scroll closure.
+         *
+         * History is immutable while the image cache is
+         * updated lazily as rows become visible.
+         */
+        let history = &self.history;
+
+        let selected_index = self.selected_index;
+
+        let image_thumbnails = &mut self.image_thumbnails;
+
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 ui.add_space(2.0);
 
-                match &self.history {
+                match history {
                     HistoryState::Loading => {
                         render_state_message(ui, "Loading…", None, palette);
                     }
@@ -850,19 +861,8 @@ impl eframe::App for PookieApp {
                             return;
                         }
 
-                        /*
-                         * Important mixed-history
-                         * invariant:
-                         *
-                         * every HistoryItem maps to
-                         * exactly one rendered row.
-                         *
-                         * Do not skip image or malformed
-                         * entries here. selected_index
-                         * indexes this exact vector.
-                         */
                         for (index, item) in items.iter().enumerate() {
-                            let selected = self.selected_index == Some(index);
+                            let selected = selected_index == Some(index);
 
                             let mut row_response = None;
 
@@ -880,7 +880,11 @@ impl eframe::App for PookieApp {
                                         ui.set_width(remaining_width);
 
                                         row_response = Some(render_history_item_row(
-                                            ui, item, selected, palette,
+                                            ui,
+                                            item,
+                                            selected,
+                                            palette,
+                                            image_thumbnails,
                                         ));
                                     },
                                 );
@@ -971,10 +975,15 @@ mod tests {
     }
 
     #[test]
-    fn image_item_maps_to_image_row() {
+    fn image_item_maps_to_image_row_with_path() {
         let item = image_item();
 
-        assert_eq!(history_row_kind(&item,), HistoryRowKind::Image,);
+        assert_eq!(
+            history_row_kind(&item,),
+            HistoryRowKind::Image {
+                file_path: "images/550e8400-e29b-41d4-a716-446655440000.png",
+            },
+        );
     }
 
     #[test]
@@ -995,13 +1004,32 @@ mod tests {
     }
 
     #[test]
-    fn mixed_items_preserve_vector_index_mapping() {
-        let items = [text_item("first"), image_item(), text_item("third")];
+    fn landscape_thumbnail_fits_available_bounds() {
+        let aspect = 16.0 / 9.0;
 
-        assert_eq!(history_row_kind(&items[0],), HistoryRowKind::Text("first",),);
+        let size = fit_thumbnail_size(ImageThumbnail {
+            texture_id: egui::TextureId::Managed(1),
 
-        assert_eq!(history_row_kind(&items[1],), HistoryRowKind::Image,);
+            aspect_ratio: aspect,
+        });
 
-        assert_eq!(history_row_kind(&items[2],), HistoryRowKind::Text("third",),);
+        assert_eq!(size.y, IMAGE_THUMBNAIL_MAX_HEIGHT,);
+
+        assert_eq!(size.x, IMAGE_THUMBNAIL_MAX_HEIGHT * aspect,);
+
+        assert!(size.x <= IMAGE_THUMBNAIL_MAX_WIDTH);
+    }
+
+    #[test]
+    fn portrait_thumbnail_fits_height() {
+        let size = fit_thumbnail_size(ImageThumbnail {
+            texture_id: egui::TextureId::Managed(1),
+
+            aspect_ratio: 9.0 / 16.0,
+        });
+
+        assert_eq!(size.y, IMAGE_THUMBNAIL_MAX_HEIGHT,);
+
+        assert!(size.x <= IMAGE_THUMBNAIL_MAX_WIDTH);
     }
 }
