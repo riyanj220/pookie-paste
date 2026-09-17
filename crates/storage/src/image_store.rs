@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::fmt;
 use std::io;
@@ -7,6 +8,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 const IMAGE_DIRECTORY: &str = "images";
 
 const IMAGE_EXTENSION: &str = ".png";
+
+const TEMP_FILE_PREFIX: &str = ".pookie-image-";
+
+const TEMP_FILE_SUFFIX: &str = ".tmp";
 
 static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -56,7 +61,6 @@ impl std::error::Error for ImageStoreError {
     }
 }
 
-///
 /// Filesystem-backed storage for canonical Pookie image
 /// payloads.
 ///
@@ -74,7 +78,6 @@ impl std::error::Error for ImageStoreError {
 ///
 /// This keeps persisted database rows independent from a
 /// user's exact HOME or XDG_DATA_HOME.
-///
 #[derive(Debug, Clone)]
 pub struct ImageStore {
     data_directory: PathBuf,
@@ -122,7 +125,6 @@ impl ImageStore {
     ///
     /// Absolute paths, traversal, nested paths, and arbitrary
     /// files are rejected.
-    ///
     pub fn resolve_relative_path(&self, relative_path: &str) -> Result<PathBuf, ImageStoreError> {
         let path = validate_relative_image_path(relative_path)?;
 
@@ -136,13 +138,7 @@ impl ImageStore {
     /// ClipboardPolicy.
     ///
     /// Writes use a temporary file in the same directory and
-    /// then rename it into place. Keeping the temporary file
-    /// on the same filesystem means the final rename is
-    /// atomic on the supported Linux filesystems.
-    ///
-    /// On a normal write/rename failure, the temporary file is
-    /// removed best-effort before returning the error.
-    ///
+    /// then rename it into place.
     pub async fn write_image(
         &self,
         item_id: &str,
@@ -188,15 +184,6 @@ impl ImageStore {
         Ok(path_to_storage_string(&relative_path))
     }
 
-    /// Read one persisted canonical image.
-    ///
-    /// The supplied path must be an application-owned relative
-    /// path such as:
-    ///
-    /// ```text
-    /// images/<uuid>.png
-    /// ```
-    ///
     pub async fn read_image(&self, relative_path: &str) -> Result<Vec<u8>, ImageStoreError> {
         let absolute_path = self.resolve_relative_path(relative_path)?;
 
@@ -244,6 +231,110 @@ impl ImageStore {
                 source,
             }),
         }
+    }
+
+    /// Remove image files that are no longer referenced by
+    /// SQLite.
+    ///
+    /// This also removes temporary files left behind if the
+    /// process crashed between temporary-file creation and
+    /// final rename.
+    ///
+    /// Only files owned by Pookie are considered:
+    ///
+    /// ```text
+    /// images/<safe-id>.png
+    /// .pookie-image-*.tmp
+    /// ```
+    pub async fn cleanup_unreferenced(
+        &self,
+        referenced_paths: &HashSet<String>,
+    ) -> Result<usize, ImageStoreError> {
+        let images_directory = self.images_directory();
+
+        let mut entries = match tokio::fs::read_dir(&images_directory).await {
+            Ok(entries) => entries,
+
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return Ok(0);
+            }
+
+            Err(source) => {
+                return Err(ImageStoreError::Io {
+                    operation: "failed opening image storage directory",
+                    source,
+                });
+            }
+        };
+
+        let mut removed = 0usize;
+
+        while let Some(entry) =
+            entries
+                .next_entry()
+                .await
+                .map_err(|source| ImageStoreError::Io {
+                    operation: "failed reading image storage directory",
+                    source,
+                })?
+        {
+            let file_type = entry
+                .file_type()
+                .await
+                .map_err(|source| ImageStoreError::Io {
+                    operation: "failed reading image file type",
+                    source,
+                })?;
+
+            if !file_type.is_file() {
+                continue;
+            }
+
+            let file_name = entry.file_name();
+
+            let Some(file_name) = file_name.to_str() else {
+                continue;
+            };
+
+            let is_temp =
+                file_name.starts_with(TEMP_FILE_PREFIX) && file_name.ends_with(TEMP_FILE_SUFFIX);
+
+            if is_temp {
+                tokio::fs::remove_file(entry.path())
+                    .await
+                    .map_err(|source| ImageStoreError::Io {
+                        operation: "failed removing stale temporary image file",
+                        source,
+                    })?;
+
+                removed += 1;
+
+                continue;
+            }
+
+            let relative_path = PathBuf::from(IMAGE_DIRECTORY).join(file_name);
+
+            let relative_path_string = path_to_storage_string(&relative_path);
+
+            if validate_relative_image_path(&relative_path_string).is_err() {
+                continue;
+            }
+
+            if referenced_paths.contains(&relative_path_string) {
+                continue;
+            }
+
+            tokio::fs::remove_file(entry.path())
+                .await
+                .map_err(|source| ImageStoreError::Io {
+                    operation: "failed removing orphan image file",
+                    source,
+                })?;
+
+            removed += 1;
+        }
+
+        Ok(removed)
     }
 }
 
@@ -323,20 +414,18 @@ fn temporary_path(images_directory: &Path) -> PathBuf {
 
     let process_id = std::process::id();
 
-    images_directory.join(format!(".pookie-image-{process_id}-{counter}.tmp"))
+    images_directory.join(format!(
+        "{TEMP_FILE_PREFIX}{process_id}-{counter}{TEMP_FILE_SUFFIX}"
+    ))
 }
 
 fn path_to_storage_string(path: &Path) -> String {
-    /*
-     * Every path generated by ImageStore consists entirely
-     * of known ASCII components, so lossy conversion cannot
-     * alter one of Pookie's generated paths.
-     */
     path.to_string_lossy().into_owned()
 }
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
     use std::fs;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -388,7 +477,7 @@ mod tests {
 
         assert_eq!(
             path,
-            PathBuf::from("images/550e8400-e29b-41d4-a716-446655440000.png",),
+            PathBuf::from("images/550e8400-e29b-41d4-a716-446655440000.png"),
         );
     }
 
@@ -428,7 +517,7 @@ mod tests {
             absolute,
             directory
                 .path
-                .join("images/550e8400-e29b-41d4-a716-446655440000.png",),
+                .join("images/550e8400-e29b-41d4-a716-446655440000.png"),
         );
     }
 
@@ -439,7 +528,7 @@ mod tests {
         let store = ImageStore::new(&directory.path);
 
         assert!(matches!(
-            store.resolve_relative_path("/tmp/image.png",),
+            store.resolve_relative_path("/tmp/image.png"),
             Err(ImageStoreError::InvalidRelativePath(_))
         ));
     }
@@ -451,7 +540,7 @@ mod tests {
         let store = ImageStore::new(&directory.path);
 
         assert!(matches!(
-            store.resolve_relative_path("images/../outside.png",),
+            store.resolve_relative_path("images/../outside.png"),
             Err(ImageStoreError::InvalidRelativePath(_))
         ));
     }
@@ -463,7 +552,7 @@ mod tests {
         let store = ImageStore::new(&directory.path);
 
         assert!(matches!(
-            store.resolve_relative_path("images/nested/item.png",),
+            store.resolve_relative_path("images/nested/item.png"),
             Err(ImageStoreError::InvalidRelativePath(_))
         ));
     }
@@ -504,14 +593,14 @@ mod tests {
 
         let image_directory = store.images_directory();
 
-        assert!(!image_directory.exists(),);
+        assert!(!image_directory.exists());
 
         store
             .write_image("550e8400-e29b-41d4-a716-446655440000", &[1, 2, 3])
             .await
             .expect("image write failed");
 
-        assert!(image_directory.is_dir(),);
+        assert!(image_directory.is_dir());
     }
 
     #[tokio::test]
@@ -540,9 +629,9 @@ mod tests {
 
         assert!(
             store
-                .image_exists(&relative_path,)
+                .image_exists(&relative_path)
                 .await
-                .expect("existence check failed",),
+                .expect("existence check failed"),
         );
     }
 
@@ -602,51 +691,68 @@ mod tests {
             .collect::<Result<Vec<_>, _>>()
             .expect("failed reading directory entry");
 
-        assert_eq!(entries.len(), 1,);
-
-        assert_eq!(
-            entries[0].file_name().to_string_lossy(),
-            "550e8400-e29b-41d4-a716-446655440000.png",
-        );
+        assert_eq!(entries.len(), 1);
     }
 
     #[tokio::test]
-    async fn rename_failure_cleans_temporary_file() {
+    async fn cleanup_removes_orphan_images() {
         let directory = TestDirectory::new();
 
         let store = ImageStore::new(&directory.path);
 
-        let item_id = "550e8400-e29b-41d4-a716-446655440000";
+        let kept = store
+            .write_image("550e8400-e29b-41d4-a716-446655440000", &[1])
+            .await
+            .expect("kept image write failed");
 
-        let images_directory = store.images_directory();
+        let orphan = store
+            .write_image("550e8400-e29b-41d4-a716-446655440001", &[2])
+            .await
+            .expect("orphan image write failed");
 
-        fs::create_dir_all(&images_directory).expect("failed creating image directory");
+        let referenced = HashSet::from([kept.clone()]);
 
-        /*
-         * A directory at the final file path forces the
-         * rename to fail on Linux.
-         */
-        fs::create_dir(images_directory.join(format!("{item_id}.png")))
-            .expect("failed creating blocking directory");
+        let removed = store
+            .cleanup_unreferenced(&referenced)
+            .await
+            .expect("cleanup failed");
 
-        let result = store.write_image(item_id, &[1, 2, 3]).await;
-
-        assert!(result.is_err());
-
-        let temp_files = fs::read_dir(&images_directory)
-            .expect("failed reading image directory")
-            .filter_map(Result::ok)
-            .filter(|entry| {
-                entry
-                    .file_name()
-                    .to_string_lossy()
-                    .starts_with(".pookie-image-")
-            })
-            .collect::<Vec<_>>();
+        assert_eq!(removed, 1);
 
         assert!(
-            temp_files.is_empty(),
-            "temporary file leaked after failed rename",
+            store
+                .image_exists(&kept)
+                .await
+                .expect("kept image existence check failed"),
         );
+
+        assert!(
+            !store
+                .image_exists(&orphan)
+                .await
+                .expect("orphan image existence check failed"),
+        );
+    }
+
+    #[tokio::test]
+    async fn cleanup_removes_stale_temp_files() {
+        let directory = TestDirectory::new();
+
+        let store = ImageStore::new(&directory.path);
+
+        fs::create_dir_all(store.images_directory()).expect("failed creating images directory");
+
+        let temp_path = store.images_directory().join(".pookie-image-test.tmp");
+
+        fs::write(&temp_path, [1, 2, 3]).expect("failed writing stale temp file");
+
+        let removed = store
+            .cleanup_unreferenced(&HashSet::new())
+            .await
+            .expect("cleanup failed");
+
+        assert_eq!(removed, 1);
+
+        assert!(!temp_path.exists());
     }
 }

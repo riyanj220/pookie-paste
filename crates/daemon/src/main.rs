@@ -14,7 +14,7 @@ use pookie_core::{ClipboardEvent, ClipboardProcessor};
 
 use history::{ClipboardHistoryService, HistoryConfig};
 
-use storage::Database;
+use storage::{Database, ImageStore};
 
 use daemon::{
     activation_service::ClipboardActivationService, clipboard_service::ClipboardService,
@@ -51,13 +51,13 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
-    app_paths::ensure_data_directory()?;
+    let data_directory = app_paths::ensure_data_directory()?;
 
     let database_path = app_paths::database_path()?;
 
     info!(
         path = %database_path.display(),
-          "using application database"
+        "using application database"
     );
 
     let database_url = format!("sqlite://{}", database_path.display(),);
@@ -70,7 +70,21 @@ async fn main() -> anyhow::Result<()> {
 
     let history_config = HistoryConfig::default();
 
-    let history_service = Arc::new(ClipboardHistoryService::new(repository, history_config));
+    let image_store = ImageStore::new(data_directory);
+
+    let history_service =
+        ClipboardHistoryService::new(repository, history_config).with_image_store(image_store);
+
+    let removed_orphans = history_service.reconcile_image_store().await?;
+
+    if removed_orphans > 0 {
+        info!(
+            removed = removed_orphans,
+            "removed orphan clipboard image files"
+        );
+    }
+
+    let history_service = Arc::new(history_service);
 
     let clipboard_state = Arc::new(ClipboardState::default());
 
@@ -134,7 +148,7 @@ async fn main() -> anyhow::Result<()> {
     loop {
         tokio::select! {
             event =
-            clipboard_events.recv() =>
+                clipboard_events.recv() =>
             {
                 match event {
                     Some(event) => {
@@ -144,45 +158,45 @@ async fn main() -> anyhow::Result<()> {
                         );
 
                         let text =
-                        match &event.content {
-                            pookie_clipboard::ClipboardContent::Text(text) =>
-                            Some(text.as_str()),
+                            match &event.content {
+                                pookie_clipboard::ClipboardContent::Text(text) =>
+                                    Some(text.as_str()),
 
-                            _ => None,
-                        };
+                                _ => None,
+                            };
 
                         if let Some(text) = text
                             && clipboard_state.is_self_write(text)
-                            {
-                                info!(
-                                    "ignoring self-generated clipboard event"
-                                );
+                        {
+                            info!(
+                                "ignoring self-generated clipboard event"
+                            );
 
-                                continue;
-                            }
+                            continue;
+                        }
 
-                            let core_event =
+                        let core_event =
                             ClipboardEvent {
                                 content: event.content,
                                 created_at: event.created_at,
                             };
 
-                            if let Some(item) =
-                                processor.process(core_event)
-                                {
-                                    info!(
-                                        "Clipboard item created: {:?}",
-                                        item.id
-                                    );
+                        if let Some(item) =
+                            processor.process(core_event)
+                        {
+                            info!(
+                                "Clipboard item created: {:?}",
+                                item.id
+                            );
 
-                                    history_service
-                                    .save(item)
-                                    .await?;
+                            history_service
+                                .save(item)
+                                .await?;
 
-                                    info!(
-                                        "Clipboard item saved"
-                                    );
-                                }
+                            info!(
+                                "Clipboard item saved"
+                            );
+                        }
                     }
 
                     None => {
@@ -196,7 +210,7 @@ async fn main() -> anyhow::Result<()> {
             }
 
             _ =
-            shutdown::wait_for_shutdown() =>
+                shutdown::wait_for_shutdown() =>
             {
                 info!(
                     "Shutdown signal received"
@@ -206,7 +220,7 @@ async fn main() -> anyhow::Result<()> {
             }
 
             result =
-            &mut ipc_future =>
+                &mut ipc_future =>
             {
                 match result {
                     Ok(()) => {
@@ -224,47 +238,49 @@ async fn main() -> anyhow::Result<()> {
             }
 
             activation =
-            shortcut_listener.activated(),
+                shortcut_listener.activated(),
             if shortcut_available =>
             {
                 match activation {
                     Some(activation) => {
                         if let Some(token) =
-                            activation.activation_token.as_deref()
-                            {
-                                info!(
-                                    token_present = true,
-                                    "global shortcut activated with Wayland activation context"
-                                );
+                            activation
+                                .activation_token
+                                .as_deref()
+                        {
+                            info!(
+                                token_present = true,
+                                "global shortcut activated with Wayland activation context"
+                            );
 
-                                let _ = token;
-                            } else {
-                                info!(
-                                    "global shortcut activated"
+                            let _ = token;
+                        } else {
+                            info!(
+                                "global shortcut activated"
+                            );
+                        }
+
+                        match ui_launcher.launch() {
+                            Ok(
+                                UiLaunchOutcome::Launched
+                            )
+                            |
+                            Ok(
+                                UiLaunchOutcome::AlreadyRunning
+                            ) => {}
+
+                            Err(error) => {
+                                warn!(
+                                    error = ?error,
+                                    "failed to launch Pookie UI"
                                 );
                             }
-
-                            match ui_launcher.launch() {
-                                Ok(
-                                    UiLaunchOutcome::Launched
-                                )
-                                |
-                                Ok(
-                                    UiLaunchOutcome::AlreadyRunning
-                                ) => {}
-
-                                Err(error) => {
-                                    warn!(
-                                        error = ?error,
-                                        "failed to launch Pookie UI"
-                                    );
-                                }
-                            }
+                        }
                     }
 
                     None => {
                         shortcut_available =
-                        false;
+                            false;
                     }
                 }
             }

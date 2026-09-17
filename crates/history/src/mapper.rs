@@ -1,25 +1,45 @@
-use pookie_clipboard::ClipboardContent;
-use pookie_core::ClipboardItem;
+use chrono::{DateTime, Utc};
 use storage::StoredClipboardItem;
+use uuid::Uuid;
 
-pub fn to_stored_item(item: ClipboardItem) -> StoredClipboardItem {
-    let (content_type, text_content, file_path) = match item.content {
-        ClipboardContent::Text(text) => ("text".to_string(), Some(text), None),
-
-        ClipboardContent::Image(_) => ("image".to_string(), None, None),
-    };
-
+pub fn to_stored_text_item(
+    id: Uuid,
+    text: String,
+    hash: String,
+    created_at: DateTime<Utc>,
+) -> StoredClipboardItem {
     StoredClipboardItem {
-        id: item.id.to_string(),
+        id: id.to_string(),
 
-        content_type,
+        content_type: "text".to_string(),
 
-        text_content,
+        text_content: Some(text),
+
+        file_path: None,
+
+        content_hash: hash,
+
+        created_at: created_at.to_rfc3339(),
+    }
+}
+
+pub fn to_stored_image_item(
+    id: Uuid,
+    file_path: Option<String>,
+    hash: String,
+    created_at: DateTime<Utc>,
+) -> StoredClipboardItem {
+    StoredClipboardItem {
+        id: id.to_string(),
+
+        content_type: "image".to_string(),
+
+        text_content: None,
 
         file_path,
 
-        content_hash: item.hash,
+        content_hash: hash,
 
-        created_at: item.created_at.to_rfc3339(),
+        created_at: created_at.to_rfc3339(),
     }
 }

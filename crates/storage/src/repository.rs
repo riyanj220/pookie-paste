@@ -44,16 +44,16 @@ impl StorageRepository {
     pub async fn get_all(&self) -> Result<Vec<StoredClipboardItem>, sqlx::Error> {
         let items = sqlx::query_as::<_, StoredClipboardItem>(
             "
-                SELECT
-                    id,
-                    content_type,
-                    text_content,
-                    file_path,
-                    content_hash,
-                    created_at
-                FROM clipboard_items
-                ORDER BY created_at DESC
-                ",
+            SELECT
+                id,
+                content_type,
+                text_content,
+                file_path,
+                content_hash,
+                created_at
+            FROM clipboard_items
+            ORDER BY created_at DESC
+            ",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -100,9 +100,9 @@ impl StorageRepository {
         for id in ids {
             sqlx::query(
                 "
-            DELETE FROM clipboard_items
-            WHERE id = ?
-            ",
+                DELETE FROM clipboard_items
+                WHERE id = ?
+                ",
             )
             .bind(id)
             .execute(&self.pool)
@@ -115,9 +115,9 @@ impl StorageRepository {
     pub async fn delete_by_id(&self, id: &str) -> Result<bool, sqlx::Error> {
         let result = sqlx::query(
             "
-        DELETE FROM clipboard_items
-        WHERE id = ?
-        ",
+            DELETE FROM clipboard_items
+            WHERE id = ?
+            ",
         )
         .bind(id)
         .execute(&self.pool)
@@ -129,8 +129,8 @@ impl StorageRepository {
     pub async fn clear(&self) -> Result<u64, sqlx::Error> {
         let result = sqlx::query(
             "
-        DELETE FROM clipboard_items
-        ",
+            DELETE FROM clipboard_items
+            ",
         )
         .execute(&self.pool)
         .await?;
@@ -144,19 +144,45 @@ impl StorageRepository {
     ) -> Result<Option<StoredClipboardItem>, sqlx::Error> {
         sqlx::query_as::<_, StoredClipboardItem>(
             "
-        SELECT
-            id,
-            content_type,
-            text_content,
-            file_path,
-            content_hash,
-            created_at
-        FROM clipboard_items
-        WHERE content_hash = ?
-        LIMIT 1
-        ",
+            SELECT
+                id,
+                content_type,
+                text_content,
+                file_path,
+                content_hash,
+                created_at
+            FROM clipboard_items
+            WHERE content_hash = ?
+            LIMIT 1
+            ",
         )
         .bind(hash)
+        .fetch_optional(&self.pool)
+        .await
+    }
+
+    pub async fn find_by_hash_and_type(
+        &self,
+        hash: &str,
+        content_type: &str,
+    ) -> Result<Option<StoredClipboardItem>, sqlx::Error> {
+        sqlx::query_as::<_, StoredClipboardItem>(
+            "
+            SELECT
+                id,
+                content_type,
+                text_content,
+                file_path,
+                content_hash,
+                created_at
+            FROM clipboard_items
+            WHERE content_hash = ?
+              AND content_type = ?
+            LIMIT 1
+            ",
+        )
+        .bind(hash)
+        .bind(content_type)
         .fetch_optional(&self.pool)
         .await
     }
@@ -164,17 +190,17 @@ impl StorageRepository {
     pub async fn get_by_id(&self, id: &str) -> Result<Option<StoredClipboardItem>, sqlx::Error> {
         sqlx::query_as::<_, StoredClipboardItem>(
             "
-        SELECT
-            id,
-            content_type,
-            text_content,
-            file_path,
-            content_hash,
-            created_at
-        FROM clipboard_items
-        WHERE id = ?
-        LIMIT 1
-        ",
+            SELECT
+                id,
+                content_type,
+                text_content,
+                file_path,
+                content_hash,
+                created_at
+            FROM clipboard_items
+            WHERE id = ?
+            LIMIT 1
+            ",
         )
         .bind(id)
         .fetch_optional(&self.pool)
@@ -184,10 +210,10 @@ impl StorageRepository {
     pub async fn update_created_at(&self, id: &str, created_at: &str) -> Result<bool, sqlx::Error> {
         let result = sqlx::query(
             "
-        UPDATE clipboard_items
-        SET created_at = ?
-        WHERE id = ?
-        ",
+            UPDATE clipboard_items
+            SET created_at = ?
+            WHERE id = ?
+            ",
         )
         .bind(created_at)
         .bind(id)
