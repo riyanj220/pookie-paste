@@ -125,9 +125,10 @@ impl ClipboardHistoryService {
 
         let Some(image_store) = self.image_store.as_ref() else {
             /*
-             * Preserve the pre-image behavior for isolated
-             * tests until all callers have moved to the
-             * image-aware constructor path.
+             * Preserve compatibility for isolated tests that
+             * construct a history service without ImageStore.
+             *
+             * Production always configures ImageStore.
              */
             let stored_item = to_stored_image_item(id, None, hash, created_at);
 
@@ -221,6 +222,31 @@ impl ClipboardHistoryService {
 
     pub async fn get_by_id(&self, id: &str) -> Result<Option<StoredClipboardItem>, HistoryError> {
         Ok(self.repository.get_by_id(id).await?)
+    }
+
+    /// Load one canonical PNG payload through the history
+    /// persistence layer.
+    ///
+    /// Returns:
+    /// ``` text
+    ///     Some(bytes) -> ImageStore is configured and the
+    ///                    image was read successfully.
+    ///
+    ///     None        -> This service has no ImageStore.
+    /// ```
+    /// Missing/invalid image files return a normal
+    /// HistoryError rather than crashing the daemon.
+    pub async fn read_image_content(
+        &self,
+        file_path: &str,
+    ) -> Result<Option<Vec<u8>>, HistoryError> {
+        let Some(image_store) = self.image_store.as_ref() else {
+            return Ok(None);
+        };
+
+        let image = image_store.read_image(file_path).await?;
+
+        Ok(Some(image))
     }
 
     pub async fn promote(&self, id: &str) -> Result<bool, HistoryError> {
