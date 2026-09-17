@@ -37,6 +37,31 @@ pub struct ExtDataControlState {
 }
 
 impl ExtDataControlState {
+    fn reset_offer_state(&mut self) {
+        /*
+         * A DataOffer starts a completely new clipboard
+         * offer lifecycle.
+         *
+         * MIME types collected for the previous selection
+         * must never be reused with the new offer. Doing so
+         * can make an image MIME such as image/png survive
+         * an image -> text clipboard transition.
+         *
+         * Reset current_offer/has_selection as well so MIME
+         * events belonging to the new offer cannot
+         * accidentally request data from the previous
+         * selection while we wait for Selection { ... } to
+         * bind the new offer.
+         */
+        self.current_offer = None;
+
+        self.offered_mime_types.clear();
+
+        self.clipboard_requested = false;
+
+        self.has_selection = false;
+    }
+
     fn request_content(&mut self) {
         if self.clipboard_requested {
             tracing::debug!("clipboard request already sent");
@@ -97,17 +122,16 @@ impl ExtDataControlState {
                         crate::ClipboardContent::Text(text) => {
                             tracing::debug!(
                                 length = text.len(),
-                                            mime = %requested_mime,
-                                            "Wayland EXT clipboard text received"
+                                mime = %requested_mime,
+                                "Wayland EXT clipboard text received"
                             );
                         }
 
                         crate::ClipboardContent::Image(image) => {
                             tracing::debug!(
-                                encoded_bytes =
-                                image.len(),
-                                            mime = %requested_mime,
-                                            "Wayland EXT clipboard image received"
+                                encoded_bytes = image.len(),
+                                mime = %requested_mime,
+                                "Wayland EXT clipboard image received"
                             );
                         }
                     }
@@ -179,9 +203,18 @@ impl Dispatch<ext_data_control_device_v1::ExtDataControlDeviceV1, ()> for ExtDat
 
         match event {
             ext_data_control_device_v1::Event::DataOffer { id } => {
+                /*
+                 * Every new data offer owns its own MIME
+                 * advertisement set.
+                 *
+                 * Never carry MIME state from the previous
+                 * clipboard selection into this offer.
+                 */
+                state.reset_offer_state();
+
                 tracing::debug!(
                     id = ?id.id(),
-                                "clipboard data offer created"
+                    "clipboard data offer created; previous offer state reset"
                 );
             }
 
@@ -196,6 +229,17 @@ impl Dispatch<ext_data_control_device_v1::ExtDataControlDeviceV1, ()> for ExtDat
 
                         state.clipboard_requested = false;
 
+                        /*
+                         * Handles:
+                         *
+                         * DataOffer
+                         * -> Offer MIME(s)
+                         * -> Selection
+                         *
+                         * If the MIME events arrived first,
+                         * request immediately now that the
+                         * selection has been bound.
+                         */
                         if !state.offered_mime_types.is_empty() {
                             state.request_content();
                         }
@@ -247,8 +291,14 @@ impl Dispatch<ext_data_control_offer_v1::ExtDataControlOfferV1, ()> for ExtDataC
                     }
 
                     /*
-                     * Preserve the existing support for
-                     * Selection -> Offer event ordering.
+                     * Handles:
+                     *
+                     * DataOffer
+                     * -> Selection
+                     * -> Offer MIME(s)
+                     *
+                     * If Selection arrived first, request as
+                     * soon as a supported MIME is available.
                      */
                     if state.has_selection {
                         state.request_content();

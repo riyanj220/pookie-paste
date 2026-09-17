@@ -35,6 +35,31 @@ pub struct WaylandState {
 }
 
 impl WaylandState {
+    fn reset_offer_state(&mut self) {
+        /*
+         * A new Wayland data offer must start with a fresh
+         * MIME/request state.
+         *
+         * Without this reset, image/png from an earlier
+         * image selection can remain in offered_mime_types
+         * after the clipboard changes to text. Since Pookie
+         * intentionally prefers images over text, that stale
+         * MIME could then be requested from the new text
+         * owner and produce an empty payload.
+         *
+         * Clearing current_offer and has_selection also
+         * prevents MIME events for the new offer from being
+         * accidentally sent to the previous selection.
+         */
+        self.current_offer = None;
+
+        self.offered_mime_types.clear();
+
+        self.clipboard_requested = false;
+
+        self.has_selection = false;
+    }
+
     fn request_content(&mut self) {
         if self.clipboard_requested {
             return;
@@ -91,17 +116,16 @@ impl WaylandState {
                         crate::ClipboardContent::Text(text) => {
                             tracing::debug!(
                                 length = text.len(),
-                                            mime = %requested_mime,
-                                            "Wayland WLR clipboard text received"
+                                mime = %requested_mime,
+                                "Wayland WLR clipboard text received"
                             );
                         }
 
                         crate::ClipboardContent::Image(image) => {
                             tracing::debug!(
-                                encoded_bytes =
-                                image.len(),
-                                            mime = %requested_mime,
-                                            "Wayland WLR clipboard image received"
+                                encoded_bytes = image.len(),
+                                mime = %requested_mime,
+                                "Wayland WLR clipboard image received"
                             );
                         }
                     }
@@ -168,9 +192,15 @@ impl Dispatch<zwlr_data_control_device_v1::ZwlrDataControlDeviceV1, ()> for Wayl
     ) {
         match event {
             zwlr_data_control_device_v1::Event::DataOffer { id } => {
+                /*
+                 * Start this offer with a completely clean
+                 * MIME/request state.
+                 */
+                state.reset_offer_state();
+
                 tracing::debug!(
                     id = ?id.id(),
-                                "WLR data offer created"
+                    "WLR data offer created; previous offer state reset"
                 );
             }
 
@@ -185,6 +215,13 @@ impl Dispatch<zwlr_data_control_device_v1::ZwlrDataControlDeviceV1, ()> for Wayl
 
                         state.has_selection = true;
 
+                        /*
+                         * Handles:
+                         *
+                         * DataOffer
+                         * -> Offer MIME(s)
+                         * -> Selection
+                         */
                         if !state.offered_mime_types.is_empty() {
                             state.request_content();
                         }
@@ -235,6 +272,13 @@ impl Dispatch<zwlr_data_control_offer_v1::ZwlrDataControlOfferV1, ()> for Waylan
                         state.offered_mime_types.push(mime_type);
                     }
 
+                    /*
+                     * Handles:
+                     *
+                     * DataOffer
+                     * -> Selection
+                     * -> Offer MIME(s)
+                     */
                     if state.has_selection {
                         state.request_content();
                     }
