@@ -27,14 +27,14 @@ impl ClipboardWatcher for X11ClipboardWatcher {
         let clipboard = Arc::clone(&self.clipboard);
 
         tokio::spawn(async move {
-            let mut previous = None::<String>;
+            let mut previous = None::<ClipboardContent>;
 
             let mut interval = time::interval(POLL_INTERVAL);
 
             loop {
                 interval.tick().await;
 
-                let current = match clipboard.read() {
+                let current = match clipboard.read_content() {
                     Ok(value) => value,
 
                     Err(error) => {
@@ -47,23 +47,25 @@ impl ClipboardWatcher for X11ClipboardWatcher {
                     }
                 };
 
-                if current.is_empty() {
+                if content_is_empty(&current) {
                     continue;
                 }
 
-                let changed = match &previous {
-                    Some(old) => old != &current,
-
-                    None => true,
-                };
-
-                if !changed {
+                if previous.as_ref() == Some(&current) {
                     continue;
                 }
 
+                /*
+                 * Keep one previous content value so the
+                 * polling watcher does not repeatedly
+                 * emit the same X11 selection.
+                 *
+                 * This works for both text and canonical
+                 * PNG bytes.
+                 */
                 previous = Some(current.clone());
 
-                let event = ClipboardEvent::new(ClipboardContent::Text(current));
+                let event = ClipboardEvent::new(current);
 
                 if sender.send(event).await.is_err() {
                     tracing::debug!("clipboard watcher receiver dropped");
@@ -74,5 +76,42 @@ impl ClipboardWatcher for X11ClipboardWatcher {
         });
 
         receiver
+    }
+}
+
+fn content_is_empty(content: &ClipboardContent) -> bool {
+    match content {
+        ClipboardContent::Text(text) => text.is_empty(),
+
+        ClipboardContent::Image(image) => image.is_empty(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::content_is_empty;
+
+    use crate::ClipboardContent;
+
+    #[test]
+    fn empty_text_is_empty_content() {
+        assert!(content_is_empty(&ClipboardContent::Text(String::new(),),));
+    }
+
+    #[test]
+    fn non_empty_text_is_not_empty_content() {
+        assert!(!content_is_empty(&ClipboardContent::Text(
+            "hello".to_string(),
+        ),));
+    }
+
+    #[test]
+    fn empty_image_is_empty_content() {
+        assert!(content_is_empty(&ClipboardContent::Image(Vec::new(),),));
+    }
+
+    #[test]
+    fn non_empty_image_is_not_empty_content() {
+        assert!(!content_is_empty(&ClipboardContent::Image(vec![1, 2, 3],),));
     }
 }

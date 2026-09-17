@@ -2,7 +2,9 @@ use std::fmt;
 use std::io::Cursor;
 
 use image::codecs::png::PngEncoder;
-use image::{DynamicImage, ExtendedColorType, ImageEncoder, ImageFormat, ImageReader, Limits};
+use image::{
+    DynamicImage, ExtendedColorType, ImageEncoder, ImageFormat, ImageReader, Limits, RgbaImage,
+};
 
 ///
 /// Maximum width or height accepted from clipboard image input.
@@ -77,6 +79,13 @@ pub enum ImageCodecError {
         maximum: u64,
     },
 
+    InvalidRgbaLength {
+        width: u32,
+        height: u32,
+        expected: u64,
+        actual: usize,
+    },
+
     DimensionReadFailed(String),
 
     DecodeFailed(String),
@@ -127,6 +136,19 @@ impl fmt::Display for ImageCodecError {
                 )
             }
 
+            Self::InvalidRgbaLength {
+                width,
+                height,
+                expected,
+                actual,
+            } => {
+                write!(
+                    formatter,
+                    "clipboard RGBA image {width}x{height} requires \
+                     {expected} bytes but received {actual}"
+                )
+            }
+
             Self::DimensionReadFailed(error) => {
                 write!(
                     formatter,
@@ -151,23 +173,14 @@ impl fmt::Display for ImageCodecError {
 impl std::error::Error for ImageCodecError {}
 
 ///
-/// Convert an application-provided clipboard image into
-/// Pookie's canonical image representation.
+/// Convert an application-provided encoded clipboard image
+/// into Pookie's canonical representation.
 ///
 /// Canonical representation:
 ///
+/// ```text
 /// PNG-encoded RGBA8 bytes
-///
-/// All supported input formats are decoded into pixels and
-/// re-encoded as RGBA8 PNG.
-///
-/// This means `ClipboardContent::Image(Vec<u8>)` can have one
-/// predictable meaning throughout Pookie.
-///
-/// The caller is still responsible for applying Pookie's
-/// normal ClipboardPolicy afterwards. In particular, the
-/// existing MAX_IMAGE_SIZE policy remains the single source
-/// of truth for the maximum canonical clipboard payload size.
+/// ```
 ///
 pub fn canonicalize_image(encoded: &[u8], mime_type: &str) -> Result<Vec<u8>, ImageCodecError> {
     if encoded.is_empty() {
@@ -177,54 +190,80 @@ pub fn canonicalize_image(encoded: &[u8], mime_type: &str) -> Result<Vec<u8>, Im
     let format = image_format_for_mime(mime_type)
         .ok_or_else(|| ImageCodecError::UnsupportedMimeType(mime_type.to_string()))?;
 
-    /*
-     * Read dimensions before decoding the complete image.
-     *
-     * This prevents obviously unreasonable images from
-     * causing a large decoded allocation.
-     */
-    let (width, height) = ImageReader::with_format(Cursor::new(encoded), format)
-        .into_dimensions()
-        .map_err(|error| ImageCodecError::DimensionReadFailed(error.to_string()))?;
+    let decoded = decode_encoded_image(encoded, format)?;
 
+    encode_canonical_png(decoded.to_rgba8())
+}
+
+///
+/// Convert raw RGBA8 pixels into Pookie's canonical PNG.
+///
+/// This is primarily used by X11 because `arboard` returns
+/// decoded RGBA pixels rather than the original encoded
+/// clipboard payload.
+///
+pub fn canonicalize_rgba(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>, ImageCodecError> {
     validate_dimensions(width, height)?;
 
-    /*
-     * Apply decoder-level limits as a second layer.
-     *
-     * max_image_width / max_image_height are strict limits
-     * in the image crate.
-     *
-     * max_alloc is an additional best-effort allocation
-     * limit because not every decoder can enforce it
-     * identically.
-     */
-    let mut limits = Limits::default();
+    let expected = u64::from(width)
+        .checked_mul(u64::from(height))
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or(ImageCodecError::InvalidRgbaLength {
+            width,
+            height,
+            expected: u64::MAX,
+            actual: rgba.len(),
+        })?;
 
-    limits.max_image_width = Some(MAX_IMAGE_DIMENSION);
-    limits.max_image_height = Some(MAX_IMAGE_DIMENSION);
-    limits.max_alloc = Some(MAX_DECODE_ALLOCATION);
+    if rgba.len() as u64 != expected {
+        return Err(ImageCodecError::InvalidRgbaLength {
+            width,
+            height,
+            expected,
+            actual: rgba.len(),
+        });
+    }
 
-    let mut reader = ImageReader::with_format(Cursor::new(encoded), format);
+    let image = RgbaImage::from_raw(width, height, rgba.to_vec()).ok_or(
+        ImageCodecError::InvalidRgbaLength {
+            width,
+            height,
+            expected,
+            actual: rgba.len(),
+        },
+    )?;
 
-    reader.limits(limits);
+    encode_canonical_png(image)
+}
 
-    let decoded = reader
-        .decode()
-        .map_err(|error| ImageCodecError::DecodeFailed(error.to_string()))?;
+///
+/// Decode a canonical Pookie PNG back into RGBA8 pixels.
+///
+/// X11 uses this when an image history item is written back
+/// through `arboard`.
+///
+/// Returns:
+///
+/// ```text
+/// (width, height, rgba8 pixels)
+/// ```
+///
+pub fn decode_canonical_png_to_rgba(
+    encoded: &[u8],
+) -> Result<(u32, u32, Vec<u8>), ImageCodecError> {
+    if encoded.is_empty() {
+        return Err(ImageCodecError::EmptyInput);
+    }
 
-    /*
-     * Force every supported source format into exactly the
-     * same pixel representation before PNG encoding.
-     *
-     * Without this step, one image could remain RGB while
-     * another could remain RGBA, producing different
-     * canonical PNG bytes even when their decoded pixels
-     * otherwise represent the same content.
-     */
+    let decoded = decode_encoded_image(encoded, ImageFormat::Png)?;
+
     let rgba = decoded.to_rgba8();
 
-    encode_canonical_png(DynamicImage::ImageRgba8(rgba))
+    let width = rgba.width();
+
+    let height = rgba.height();
+
+    Ok((width, height, rgba.into_raw()))
 }
 
 pub fn is_supported_image_mime(mime_type: &str) -> bool {
@@ -238,9 +277,6 @@ pub fn is_supported_image_mime(mime_type: &str) -> bool {
 /// The returned value is the exact MIME string supplied by
 /// the clipboard owner, not one of Pookie's static strings.
 ///
-/// This matters because Wayland receive requests must use
-/// the MIME type exactly as it was offered.
-///
 pub fn preferred_image_mime(offered: &[String]) -> Option<&str> {
     for preferred in SUPPORTED_IMAGE_MIME_TYPES {
         if let Some(value) = offered
@@ -252,6 +288,39 @@ pub fn preferred_image_mime(offered: &[String]) -> Option<&str> {
     }
 
     None
+}
+
+fn decode_encoded_image(
+    encoded: &[u8],
+    format: ImageFormat,
+) -> Result<DynamicImage, ImageCodecError> {
+    /*
+     * Read dimensions before decoding the complete image.
+     *
+     * This rejects unreasonable dimensions before a large
+     * decoded pixel allocation can occur.
+     */
+    let (width, height) = ImageReader::with_format(Cursor::new(encoded), format)
+        .into_dimensions()
+        .map_err(|error| ImageCodecError::DimensionReadFailed(error.to_string()))?;
+
+    validate_dimensions(width, height)?;
+
+    let mut limits = Limits::default();
+
+    limits.max_image_width = Some(MAX_IMAGE_DIMENSION);
+
+    limits.max_image_height = Some(MAX_IMAGE_DIMENSION);
+
+    limits.max_alloc = Some(MAX_DECODE_ALLOCATION);
+
+    let mut reader = ImageReader::with_format(Cursor::new(encoded), format);
+
+    reader.limits(limits);
+
+    reader
+        .decode()
+        .map_err(|error| ImageCodecError::DecodeFailed(error.to_string()))
 }
 
 fn image_format_for_mime(mime_type: &str) -> Option<ImageFormat> {
@@ -317,16 +386,11 @@ fn validate_dimensions(width: u32, height: u32) -> Result<(), ImageCodecError> {
     Ok(())
 }
 
-fn encode_canonical_png(image: DynamicImage) -> Result<Vec<u8>, ImageCodecError> {
-    let rgba = image.to_rgba8();
-
+fn encode_canonical_png(rgba: RgbaImage) -> Result<Vec<u8>, ImageCodecError> {
     let width = rgba.width();
+
     let height = rgba.height();
 
-    /*
-     * The decoded image already passed validation, but keep
-     * the invariant local to the encoder as well.
-     */
     validate_dimensions(width, height)?;
 
     let mut output = Vec::new();
@@ -346,7 +410,8 @@ mod tests {
 
     use super::{
         ImageCodecError, MAX_IMAGE_DIMENSION, MAX_IMAGE_PIXELS, canonicalize_image,
-        is_supported_image_mime, preferred_image_mime, validate_dimensions,
+        canonicalize_rgba, decode_canonical_png_to_rgba, is_supported_image_mime,
+        preferred_image_mime, validate_dimensions,
     };
 
     fn sample_image() -> DynamicImage {
@@ -372,10 +437,15 @@ mod tests {
     #[test]
     fn recognizes_supported_image_mime_types() {
         assert!(is_supported_image_mime("image/png"));
+
         assert!(is_supported_image_mime("image/jpeg"));
+
         assert!(is_supported_image_mime("image/jpg"));
+
         assert!(is_supported_image_mime("image/webp"));
+
         assert!(is_supported_image_mime("image/bmp"));
+
         assert!(is_supported_image_mime("image/gif"));
     }
 
@@ -415,7 +485,9 @@ mod tests {
             .expect("canonical PNG failed to decode");
 
         assert_eq!(decoded.width(), 4);
+
         assert_eq!(decoded.height(), 3);
+
         assert_eq!(decoded.to_rgba8(), sample_image().to_rgba8(),);
     }
 
@@ -431,6 +503,7 @@ mod tests {
             .expect("canonical JPEG-derived PNG failed to decode");
 
         assert_eq!(decoded.width(), 4);
+
         assert_eq!(decoded.height(), 3);
     }
 
@@ -446,6 +519,7 @@ mod tests {
             .expect("canonical WebP-derived PNG failed to decode");
 
         assert_eq!(decoded.width(), 4);
+
         assert_eq!(decoded.height(), 3);
     }
 
@@ -461,6 +535,7 @@ mod tests {
             .expect("canonical BMP-derived PNG failed to decode");
 
         assert_eq!(decoded.width(), 4);
+
         assert_eq!(decoded.height(), 3);
     }
 
@@ -476,7 +551,35 @@ mod tests {
             .expect("canonical GIF-derived PNG failed to decode");
 
         assert_eq!(decoded.width(), 4);
+
         assert_eq!(decoded.height(), 3);
+    }
+
+    #[test]
+    fn canonicalizes_raw_rgba_pixels() {
+        let expected = sample_image().to_rgba8();
+
+        let canonical = canonicalize_rgba(expected.width(), expected.height(), expected.as_raw())
+            .expect("RGBA canonicalization failed");
+
+        let (width, height, actual) =
+            decode_canonical_png_to_rgba(&canonical).expect("canonical PNG decode failed");
+
+        assert_eq!(width, expected.width(),);
+
+        assert_eq!(height, expected.height(),);
+
+        assert_eq!(actual, expected.into_raw(),);
+    }
+
+    #[test]
+    fn rejects_invalid_rgba_length() {
+        let result = canonicalize_rgba(2, 2, &[1, 2, 3]);
+
+        assert!(matches!(
+            result,
+            Err(ImageCodecError::InvalidRgbaLength { .. })
+        ));
     }
 
     #[test]
@@ -534,7 +637,7 @@ mod tests {
             "image/png".to_string(),
         ];
 
-        assert_eq!(preferred_image_mime(&offered), Some("image/png"),);
+        assert_eq!(preferred_image_mime(&offered,), Some("image/png"),);
     }
 
     #[test]
@@ -542,7 +645,7 @@ mod tests {
         let offered = vec!["IMAGE/PNG; charset=binary".to_string()];
 
         assert_eq!(
-            preferred_image_mime(&offered),
+            preferred_image_mime(&offered,),
             Some("IMAGE/PNG; charset=binary"),
         );
     }
