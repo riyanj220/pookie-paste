@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 use eframe::egui;
 use image_thumbnail::{ImageThumbnail, ImageThumbnailCache};
 use ipc::HistoryContentRef;
+use popup_focus::FocusRequestState;
 use theme::AppTheme;
 use tokio::sync::oneshot;
 
@@ -32,7 +33,15 @@ const IMAGE_THUMBNAIL_MAX_WIDTH: f32 = 132.0;
 
 const IMAGE_THUMBNAIL_MAX_HEIGHT: f32 = 72.0;
 
-const FOCUS_ACQUISITION_TIMEOUT: Duration = Duration::from_millis(500);
+/*
+ * Native X11 acquisition owns its own timeout and starts
+ * that clock only after the native popup window exists.
+ *
+ * This fallback timeout is retained for sessions where the
+ * X11-specific helper does not apply, preserving the existing
+ * eframe/Wayland focus behavior.
+ */
+const FALLBACK_FOCUS_ACQUISITION_TIMEOUT: Duration = Duration::from_millis(500);
 
 const FOCUS_RETRY_INTERVAL: Duration = Duration::from_millis(16);
 
@@ -130,13 +139,12 @@ struct PookieApp {
     image_thumbnails: ImageThumbnailCache,
 
     /*
-     * Focus acquisition is bounded.
+     * Non-X11 fallback only.
      *
-     * We actively request focus only during the popup's
-     * initial appearance. Once focus has genuinely been
-     * received, ordinary focus-loss dismissal takes over.
+     * X11 focus timing is owned by popup_focus and starts
+     * only after the native popup has been discovered.
      */
-    focus_started_at: Instant,
+    fallback_focus_started_at: Instant,
 
     has_received_focus: bool,
 
@@ -171,7 +179,7 @@ impl PookieApp {
 
             image_thumbnails: ImageThumbnailCache::new(),
 
-            focus_started_at: Instant::now(),
+            fallback_focus_started_at: Instant::now(),
 
             has_received_focus: false,
 
@@ -194,19 +202,69 @@ impl PookieApp {
             return;
         }
 
+        /*
+         * Once focus has genuinely been received, never
+         * try to steal it back.
+         *
+         * A later focus loss means the user intentionally
+         * clicked elsewhere and normal popup dismissal
+         * should take over.
+         */
         if self.has_received_focus {
             return;
         }
 
-        if self.focus_started_at.elapsed() > FOCUS_ACQUISITION_TIMEOUT {
-            return;
-        }
-
+        /*
+         * Ask eframe for native viewport focus regardless
+         * of platform.
+         */
         ui.ctx().send_viewport_cmd(egui::ViewportCommand::Focus);
 
-        popup_focus::request_focus();
+        match popup_focus::request_focus() {
+            FocusRequestState::WaitingForWindow
+            | FocusRequestState::Activating
+            | FocusRequestState::Acquired => {
+                /*
+                 * On X11 the native helper owns the state
+                 * machine and timeout.
+                 *
+                 * Continue generating lightweight frames
+                 * while:
+                 *
+                 *   waiting for the WM to publish the window
+                 *   or
+                 *   waiting for _NET_ACTIVE_WINDOW to settle.
+                 *
+                 * The activation timer does not begin until
+                 * the native window actually exists.
+                 */
+                ui.ctx().request_repaint_after(FOCUS_RETRY_INTERVAL);
+            }
 
-        ui.ctx().request_repaint_after(FOCUS_RETRY_INTERVAL);
+            FocusRequestState::Unavailable => {
+                /*
+                 * Preserve the previous generic focus behavior
+                 * for non-X11 sessions such as Wayland.
+                 *
+                 * This path intentionally does not affect the
+                 * X11 state machine.
+                 */
+                if self.fallback_focus_started_at.elapsed() <= FALLBACK_FOCUS_ACQUISITION_TIMEOUT {
+                    ui.ctx().request_repaint_after(FOCUS_RETRY_INTERVAL);
+                }
+            }
+
+            FocusRequestState::TimedOut => {
+                /*
+                 * A valid X11 popup existed, but the WM did
+                 * not activate it within the bounded native
+                 * focus window.
+                 *
+                 * Stop retrying rather than creating an
+                 * unbounded focus-stealing loop.
+                 */
+            }
+        }
     }
 
     fn poll_history(&mut self) {
