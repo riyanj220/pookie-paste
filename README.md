@@ -4,6 +4,12 @@ Pookie Paste is a lightweight clipboard history manager for Linux, inspired by *
 
 Copy text or images, press `Super+V`, choose an item, and Pookie Paste restores it to the clipboard and pastes it back into the previously active application when direct paste is supported.
 
+## Demo
+<img width="800" height="800" alt="ezgif-1812d21b3a903346" src="https://github.com/user-attachments/assets/8ec013de-61c6-41b7-9389-97fafcc39d94" />
+
+## Screenshot
+<img width="1919" height="1041" alt="ss 1" src="https://github.com/user-attachments/assets/70f570af-ecb7-4006-88e0-4b835816b5ac" />
+
 ## Features
 
 - Text and image clipboard history
