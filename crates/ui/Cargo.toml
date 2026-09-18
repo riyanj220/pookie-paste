@@ -1,6 +1,6 @@
 [package]
 name = "ui"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2024"
 
 [[bin]]
@@ -9,6 +9,17 @@ path = "src/main.rs"
 
 [dependencies]
 eframe = { version = "0.36.1", default-features = false, features = ["glow", "x11", "wayland", "default_fonts"] }
+
 ipc = { version = "0.1.0", path = "../ipc" }
+
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "sync"] }
+
 x11rb = "0.14.0"
+
+tracing = "0.1"
+
+image = {
+    version = "0.25.10",
+    default-features = false,
+    features = ["png"]
+}

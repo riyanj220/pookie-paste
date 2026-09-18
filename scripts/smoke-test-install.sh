@@ -22,7 +22,13 @@ TEST_ROOT=""
 
 TEST_HOME=""
 
+REAL_HOME="${HOME:-}"
+
 REAL_XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-}"
+
+REAL_CARGO_HOME="${CARGO_HOME:-${REAL_HOME}/.cargo}"
+
+REAL_RUSTUP_HOME="${RUSTUP_HOME:-${REAL_HOME}/.rustup}"
 
 usage() {
     cat <<EOF
@@ -74,6 +80,11 @@ Important:
   Persistent application data is isolated in a temporary
   HOME, but the real XDG_RUNTIME_DIR is preserved so the
   daemon can access Wayland/X11 session resources.
+
+  Source-build smoke tests also preserve the invoking
+  developer's Cargo/rustup toolchain locations. This keeps
+  application data isolated without hiding the installed
+  Rust toolchain when HOME is redirected.
 
   KDE-specific integration is intentionally skipped by
   this isolated smoke test. KDE is tested separately in
@@ -340,6 +351,30 @@ export XDG_STATE_HOME="${TEST_HOME}/.local/state"
 export XDG_RUNTIME_DIR="$REAL_XDG_RUNTIME_DIR"
 
 #
+# A source-build smoke test must use the developer's existing
+# Rust toolchain even though HOME is redirected above.
+#
+# rustup normally resolves its toolchains from:
+#
+#   $HOME/.rustup
+#
+# and Cargo normally resolves its home from:
+#
+#   $HOME/.cargo
+#
+# Without preserving these locations, the rustup proxy can be
+# found through the inherited PATH but cannot find the default
+# toolchain, causing cargo to fail before the source build
+# starts.
+#
+if [[ "$FROM_SOURCE" == true ]]; then
+    export CARGO_HOME="$REAL_CARGO_HOME"
+    export RUSTUP_HOME="$REAL_RUSTUP_HOME"
+
+    export PATH="${CARGO_HOME}/bin:${PATH}"
+fi
+
+#
 # The generic installation smoke test intentionally skips KDE
 # helper installation.
 #
@@ -378,6 +413,13 @@ echo "  ${TEST_HOME}"
 echo
 echo "Graphical session runtime:"
 echo "  ${XDG_RUNTIME_DIR}"
+
+if [[ "$FROM_SOURCE" == true ]]; then
+    echo
+    echo "Rust toolchain:"
+    echo "  CARGO_HOME=${CARGO_HOME}"
+    echo "  RUSTUP_HOME=${RUSTUP_HOME}"
+fi
 
 echo
 

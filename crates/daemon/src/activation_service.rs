@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use history::ClipboardHistoryService;
-use pookie_clipboard::ClipboardBackend;
+use pookie_clipboard::{ClipboardBackend, ClipboardContent, canonicalize_image};
 use tokio::sync::Mutex;
 
 use crate::clipboard_service::ClipboardService;
@@ -63,22 +63,74 @@ where
             }
         };
 
-        if item.content_type != "text" {
-            return Ok(ActivationResult::UnsupportedContent);
-        }
+        /*
+         * Reconstruct the history row into the same
+         * ClipboardContent abstraction used everywhere else.
+         *
+         * Text is stored inline in SQLite.
+         *
+         * Image rows store only an application-relative
+         * canonical PNG reference, so load the bytes through
+         * ClipboardHistoryService/ImageStore.
+         */
+        let content = match item.content_type.as_str() {
+            "text" => {
+                let Some(text) = item.text_content else {
+                    return Ok(ActivationResult::UnsupportedContent);
+                };
 
-        let text = match item.text_content {
-            Some(text) => text,
+                ClipboardContent::Text(text)
+            }
 
-            None => {
+            "image" => {
+                let Some(file_path) = item.file_path.as_deref() else {
+                    return Ok(ActivationResult::UnsupportedContent);
+                };
+
+                let Some(stored_png) = self.history_service.read_image_content(file_path).await?
+                else {
+                    return Ok(ActivationResult::UnsupportedContent);
+                };
+
+                /*
+                 * Files created by Pookie are already
+                 * canonical PNGs.
+                 *
+                 * Re-validating here makes activation robust
+                 * against an externally deleted/corrupted/
+                 * replaced image file and keeps both X11 and
+                 * Wayland writeback paths safe.
+                 */
+                let canonical_png =
+                    canonicalize_image(&stored_png, "image/png").map_err(|error| {
+                        anyhow::anyhow!("stored clipboard image is invalid: {error}")
+                    })?;
+
+                ClipboardContent::Image(canonical_png)
+            }
+
+            _ => {
                 return Ok(ActivationResult::UnsupportedContent);
             }
         };
 
+        /*
+         * Activation invariant:
+         *
+         * 1. retrieve content
+         * 2. write clipboard
+         * 3. promote history
+         * 4. restore/confirm focus
+         * 5. direct paste only after focus is safe
+         *
+         * ClipboardService also records the self-write
+         * fingerprint, so the watcher will not insert this
+         * activation as a new history item.
+         */
         {
             let mut clipboard = self.clipboard_service.lock().await;
 
-            clipboard.write(&text)?;
+            clipboard.write(content)?;
         }
 
         let promoted = self.history_service.promote(id).await?;
@@ -355,7 +407,7 @@ mod tests {
             paste_backend,
         );
 
-        assert!(!pasted.load(Ordering::SeqCst,));
+        assert!(!pasted.load(Ordering::SeqCst));
 
         let base_time = chrono::Utc::now() - chrono::Duration::seconds(10);
 
@@ -397,12 +449,12 @@ mod tests {
 
         assert_eq!(result, ActivationResult::Pasted,);
 
-        assert!(pasted.load(Ordering::SeqCst,));
+        assert!(pasted.load(Ordering::SeqCst),);
 
         assert_eq!(
             written
                 .lock()
-                .expect("fake clipboard mutex poisoned",)
+                .expect("fake clipboard mutex poisoned")
                 .as_deref(),
             Some("B")
         );
@@ -412,15 +464,15 @@ mod tests {
             .await
             .expect("history retrieval failed");
 
-        assert_eq!(items.len(), 3,);
+        assert_eq!(items.len(), 3);
 
-        assert_eq!(items[0].id, b_id,);
+        assert_eq!(items[0].id, b_id);
 
         assert_eq!(items[0].text_content.as_deref(), Some("B"),);
 
-        assert_eq!(items[1].id, c_id,);
+        assert_eq!(items[1].id, c_id);
 
-        assert_eq!(items[2].id, a_id,);
+        assert_eq!(items[2].id, a_id);
     }
 
     #[tokio::test]
@@ -443,12 +495,12 @@ mod tests {
 
         assert_eq!(result, ActivationResult::NotFound,);
 
-        assert!(!pasted.load(Ordering::SeqCst,));
+        assert!(!pasted.load(Ordering::SeqCst),);
 
         assert_eq!(
             written
                 .lock()
-                .expect("fake clipboard mutex poisoned",)
+                .expect("fake clipboard mutex poisoned")
                 .as_deref(),
             None,
         );
@@ -508,12 +560,12 @@ mod tests {
 
         assert_eq!(result, ActivationResult::ClipboardUpdated,);
 
-        assert!(!pasted.load(Ordering::SeqCst,));
+        assert!(!pasted.load(Ordering::SeqCst),);
 
         assert_eq!(
             written
                 .lock()
-                .expect("fake clipboard mutex poisoned",)
+                .expect("fake clipboard mutex poisoned")
                 .as_deref(),
             Some("B"),
         );
@@ -523,7 +575,7 @@ mod tests {
             .await
             .expect("history retrieval failed");
 
-        assert_eq!(items[0].id, b_id,);
+        assert_eq!(items[0].id, b_id);
 
         assert_eq!(items[0].text_content.as_deref(), Some("B"),);
     }
@@ -588,12 +640,12 @@ mod tests {
             .await
             .expect("activation failed");
 
-        assert_eq!(result, ActivationResult::ClipboardUpdated);
+        assert_eq!(result, ActivationResult::ClipboardUpdated,);
 
         assert_eq!(
             written
                 .lock()
-                .expect("fake clipboard mutex poisoned",)
+                .expect("fake clipboard mutex poisoned")
                 .as_deref(),
             Some("B"),
         );
@@ -603,7 +655,7 @@ mod tests {
             .await
             .expect("history retrieval failed");
 
-        assert_eq!(items[0].id, b_id,);
+        assert_eq!(items[0].id, b_id);
 
         assert_eq!(items[0].text_content.as_deref(), Some("B"),);
     }
@@ -668,7 +720,7 @@ mod tests {
             .await
             .expect("activation failed");
 
-        assert_eq!(result, ActivationResult::PasteFailed);
+        assert_eq!(result, ActivationResult::PasteFailed,);
 
         assert_eq!(
             written
@@ -685,7 +737,7 @@ mod tests {
 
         assert_eq!(items[0].id, b_id);
 
-        assert_eq!(items[0].text_content.as_deref(), Some("B"));
+        assert_eq!(items[0].text_content.as_deref(), Some("B"),);
     }
 
     #[tokio::test]
@@ -702,6 +754,7 @@ mod tests {
 
         let focus_backend = ImmediateFocusBackend {
             restore_called: StdArc::clone(&restore_called),
+
             active_checked: StdArc::clone(&active_checked),
         };
 
@@ -727,8 +780,11 @@ mod tests {
 
         let item = ClipboardItem {
             id: uuid::Uuid::new_v4(),
+
             content: ClipboardContent::Text("Focused paste".to_string()),
+
             hash: "focused-activation".to_string(),
+
             created_at: chrono::Utc::now() - chrono::Duration::seconds(10),
         };
 
@@ -747,21 +803,21 @@ mod tests {
         assert_eq!(result, ActivationResult::Pasted,);
 
         assert!(
-            restore_called.load(Ordering::SeqCst,),
+            restore_called.load(Ordering::SeqCst),
             "focus restore should be called",
         );
 
         assert!(
-            active_checked.load(Ordering::SeqCst,),
+            active_checked.load(Ordering::SeqCst),
             "focus should be confirmed before paste",
         );
 
-        assert!(pasted.load(Ordering::SeqCst,), "paste should be triggered",);
+        assert!(pasted.load(Ordering::SeqCst), "paste should be triggered",);
 
         assert_eq!(
             written
                 .lock()
-                .expect("fake clipboard mutex poisoned",)
+                .expect("fake clipboard mutex poisoned")
                 .as_deref(),
             Some("Focused paste"),
         );
@@ -781,6 +837,7 @@ mod tests {
 
         let focus_backend = FailingFocusBackend {
             restore_called: StdArc::clone(&restore_called),
+
             active_checked: StdArc::clone(&active_checked),
         };
 
@@ -808,22 +865,31 @@ mod tests {
 
         let a = ClipboardItem {
             id: uuid::Uuid::new_v4(),
+
             content: ClipboardContent::Text("A".to_string()),
+
             hash: "focus-failure-a".to_string(),
+
             created_at: base_time,
         };
 
         let b = ClipboardItem {
             id: uuid::Uuid::new_v4(),
+
             content: ClipboardContent::Text("B".to_string()),
+
             hash: "focus-failure-b".to_string(),
+
             created_at: base_time + chrono::Duration::seconds(1),
         };
 
         let c = ClipboardItem {
             id: uuid::Uuid::new_v4(),
+
             content: ClipboardContent::Text("C".to_string()),
+
             hash: "focus-failure-c".to_string(),
+
             created_at: base_time + chrono::Duration::seconds(2),
         };
 
@@ -892,10 +958,20 @@ mod tests {
             paste_backend,
         );
 
+        /*
+         * This service intentionally has no ImageStore.
+         *
+         * The row therefore has no usable image reference
+         * and remains unsupported, preserving the legacy
+         * malformed-row safety behavior.
+         */
         let item = ClipboardItem {
             id: uuid::Uuid::new_v4(),
+
             content: ClipboardContent::Image(vec![1, 2, 3, 4]),
+
             hash: "unsupported-image".to_string(),
+
             created_at: chrono::Utc::now(),
         };
 
@@ -914,14 +990,14 @@ mod tests {
         assert_eq!(result, ActivationResult::UnsupportedContent,);
 
         assert!(
-            !pasted.load(Ordering::SeqCst),
+            !pasted.load(Ordering::SeqCst,),
             "paste backend must not be called for unsupported content",
         );
 
         assert_eq!(
             written
                 .lock()
-                .expect("fake clipboard mutex poisoned")
+                .expect("fake clipboard mutex poisoned",)
                 .as_deref(),
             None,
             "clipboard must remain unchanged for unsupported content",
@@ -932,7 +1008,7 @@ mod tests {
             .await
             .expect("history retrieval failed");
 
-        assert_eq!(items.len(), 1);
+        assert_eq!(items.len(), 1,);
 
         assert_eq!(
             items[0].id, item_id,

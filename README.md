@@ -1,241 +1,125 @@
 # Pookie Paste
 
-Pookie Paste is a fast, lightweight clipboard history manager for Linux.
+Pookie Paste is a lightweight clipboard history manager for Linux, inspired by **Windows Clipboard History**.
 
-It is inspired by Windows Clipboard History and is designed around a simple workflow:
+Copy text or images, press `Super+V`, choose an item, and Pookie Paste restores it to the clipboard and pastes it back into the previously active application when direct paste is supported.
 
-1. Copy something.
-2. Press `Super+V`.
-3. Select an item from clipboard history.
-4. Paste it directly into the previously active application.
+## Features
 
-## Current Status
-
-Pookie Paste currently supports text clipboard history with:
-
-- Persistent clipboard history
+- Text and image clipboard history
 - `Super+V` global shortcut
-- Searchable popup interface
+- Persistent history across restarts
+- Mixed text/image popup with image thumbnails
+- Keyboard and mouse navigation
 - Direct paste on X11
 - Direct paste on KDE Plasma Wayland
-- Clipboard-only fallback where direct paste is unavailable
-- Persistent SQLite storage
+- Safe clipboard-only fallback when direct paste is unavailable
 - Automatic startup after login
-- Safe application updates
 - User-local installation
-- Clean uninstall and optional data purge
+- Update, uninstall, and optional full data purge
 
-Image clipboard history is planned for a future release.
+## Platform Support
 
-## Linux Support
+Pookie Paste currently targets:
 
-Pookie Paste currently targets the following Linux distribution families:
+- **X11** — supported
+- **KDE Plasma + Wayland** — supported
+- **Other Wayland desktops, including GNOME** — not currently supported for the full Pookie Paste experience
 
-- Debian / Ubuntu based distributions
-- Fedora / RHEL based distributions
-- Arch / Manjaro based distributions
-- openSUSE based distributions
-
-Desktop/session capabilities currently differ.
-
-### X11
-
-Direct paste is supported.
-
-### KDE Plasma + Wayland
-
-Direct paste is supported using:
-
-- XDG Desktop Portal
-- EIS/libei
-- Pookie Paste KWin focus integration
-
-### Other Wayland Desktops
-
-Clipboard history can work, but direct paste currently falls back when a supported focus-restoration backend is unavailable.
-
-Additional Wayland desktop support is planned.
+Support for additional Wayland desktop environments is planned.
 
 ## Install
 
-### Latest Stable Release
-
-Install the latest published Pookie Paste release:
+Install the latest stable release:
 
 ```bash
-curl -fsSL \
-  https://raw.githubusercontent.com/riyanj220/pookie-paste/main/install.sh \
-  | bash
+curl -fsSL   https://raw.githubusercontent.com/riyanj220/pookie-paste/main/install.sh   | bash
 ```
-
-The bootstrap installer:
-
-1. Determines the latest stable GitHub release.
-2. Downloads the installer files from that exact release tag.
-3. Detects your Linux distribution and architecture.
-4. Downloads the matching prebuilt Pookie Paste binary.
-5. Verifies its SHA256 checksum.
-6. Installs Pookie Paste into your user account.
-7. Configures desktop startup.
-8. Installs the KDE KWin helper when running KDE Plasma.
-9. Starts Pookie Paste.
 
 Rust is not required for normal installation.
 
 ### Install a Specific Version
 
+```bash
+curl -fsSL   https://raw.githubusercontent.com/riyanj220/pookie-paste/main/install.sh   | bash -s -- --version <version>
+```
+
 Example:
 
 ```bash
-curl -fsSL \
-  https://raw.githubusercontent.com/riyanj220/pookie-paste/main/install.sh \
-  | bash -s -- --version v0.1.0
-```
-
-You can also use:
-
-```bash
-curl -fsSL \
-  https://raw.githubusercontent.com/riyanj220/pookie-paste/main/install.sh \
-  | POOKIE_VERSION=v0.1.0 bash
-```
-
-## Developer Installation
-
-Clone the repository:
-
-```bash
-git clone \
-  https://github.com/riyanj220/pookie-paste.git
-
-cd pookie-paste
-```
-
-Install from source:
-
-```bash
-./scripts/install.sh --from-source
-```
-
-This builds Pookie Paste locally using Cargo.
-
-## Installed Files
-
-Pookie Paste uses a user-local installation.
-
-Binaries:
-
-```text
-~/.local/bin/pookie-paste
-~/.local/bin/pookie-paste-ui
-```
-
-Desktop entry:
-
-```text
-~/.local/share/applications/io.github.riyanj220.PookiePaste.desktop
-```
-
-Autostart entry:
-
-```text
-~/.config/autostart/io.github.riyanj220.PookiePaste-autostart.desktop
-```
-
-Application data:
-
-```text
-~/.local/share/pookie-paste/
-```
-
-Application state:
-
-```text
-~/.local/state/pookie-paste/
-```
-
-On KDE Plasma, the KWin helper is installed through KDE's package system and normally resides under:
-
-```text
-~/.local/share/kwin/scripts/pookie-focus/
+curl -fsSL   https://raw.githubusercontent.com/riyanj220/pookie-paste/main/install.sh   | bash -s -- --version v0.1.1
 ```
 
 ## Update
 
-Running the installer again updates the application while preserving clipboard history and application state.
+Run the installer again:
 
 ```bash
-curl -fsSL \
-  https://raw.githubusercontent.com/riyanj220/pookie-paste/main/install.sh \
-  | bash
+curl -fsSL   https://raw.githubusercontent.com/riyanj220/pookie-paste/main/install.sh   | bash
 ```
 
-The new release is downloaded and verified before the currently installed Pookie Paste instance is stopped.
+Existing clipboard history and application state are preserved.
 
 ## Uninstall
 
-From a cloned Pookie Paste repository:
+From a cloned repository:
 
 ```bash
 ./scripts/uninstall.sh
 ```
 
-This removes:
+This removes Pookie Paste while preserving clipboard history and application state.
 
-- Pookie Paste binaries
-- Desktop integration
-- Autostart integration
-- KDE KWin helper
-
-Clipboard history and application state are preserved.
-
-To also remove all Pookie Paste user data:
+To remove everything:
 
 ```bash
 ./scripts/uninstall.sh --purge
 ```
 
+## Data Locations
+
+Pookie Paste uses user-local Linux directories.
+
+```text
+~/.local/bin/pookie-paste
+~/.local/bin/pookie-paste-ui
+
+~/.local/share/pookie-paste/
+├── pookie-paste.db
+└── images/
+
+~/.local/state/pookie-paste/
+```
+
+On KDE Plasma, the KWin focus helper is installed under:
+
+```text
+~/.local/share/kwin/scripts/pookie-focus/
+```
+
+XDG directory overrides are respected when configured.
+
 ## Development
 
-Development documentation:
+Install from source:
 
-[Development Guide](docs/DEVELOPMENT.md)
+```bash
+git clone https://github.com/riyanj220/pookie-paste.git
+cd pookie-paste
+./scripts/install.sh --from-source
+```
 
-## Architecture
+Project documentation:
 
-Pookie Paste uses a modular Rust workspace.
-
-Major components include:
-
-- Daemon
-- Clipboard backends and watchers
-- Processing engine
-- History service
-- SQLite storage
-- IPC layer
-- Popup UI
-- Global shortcut integration
-- Focus restoration
-- Direct-paste backends
-
-Detailed architecture:
-
-[Architecture Documentation](docs/ARCHITECTURE.md)
-
-## Roadmap
-
-Project roadmap:
-
-[Roadmap](docs/ROADMAP.md)
+- [Architecture](docs/ARCHITECTURE.md)
+- [Development Guide](docs/DEVELOPMENT.md)
+- [Roadmap](docs/ROADMAP.md)
+- [Release Testing](docs/RELEASE_TESTING.md)
 
 ## Contributing
 
-Contributions are welcome.
-
-Please review the development documentation before contributing.
+Contributions are welcome. Please read the [Development Guide](docs/DEVELOPMENT.md) before contributing.
 
 ## License
 
-Pookie Paste is licensed under the MIT License.
-
-See [LICENSE](LICENSE).
+Pookie Paste is licensed under the [MIT License](LICENSE).

@@ -14,7 +14,7 @@ use pookie_core::{ClipboardEvent, ClipboardProcessor};
 
 use history::{ClipboardHistoryService, HistoryConfig};
 
-use storage::Database;
+use storage::{Database, ImageStore};
 
 use daemon::{
     activation_service::ClipboardActivationService, clipboard_service::ClipboardService,
@@ -51,7 +51,7 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
-    app_paths::ensure_data_directory()?;
+    let data_directory = app_paths::ensure_data_directory()?;
 
     let database_path = app_paths::database_path()?;
 
@@ -70,7 +70,21 @@ async fn main() -> anyhow::Result<()> {
 
     let history_config = HistoryConfig::default();
 
-    let history_service = Arc::new(ClipboardHistoryService::new(repository, history_config));
+    let image_store = ImageStore::new(data_directory);
+
+    let history_service =
+        ClipboardHistoryService::new(repository, history_config).with_image_store(image_store);
+
+    let removed_orphans = history_service.reconcile_image_store().await?;
+
+    if removed_orphans > 0 {
+        info!(
+            removed = removed_orphans,
+            "removed orphan clipboard image files"
+        );
+    }
+
+    let history_service = Arc::new(history_service);
 
     let clipboard_state = Arc::new(ClipboardState::default());
 
@@ -143,16 +157,19 @@ async fn main() -> anyhow::Result<()> {
                             event.id
                         );
 
-                        let text =
-                        match &event.content {
-                            pookie_clipboard::ClipboardContent::Text(text) =>
-                            Some(text.as_str()),
-
-                            _ => None,
-                        };
-
-                        if let Some(text) = text
-                            && clipboard_state.is_self_write(text)
+                        /*
+                         * Both text and image clipboard
+                         * writes performed by Pookie produce
+                         * normal watcher events.
+                         *
+                         * Compare the complete canonical
+                         * content fingerprint before sending
+                         * the event through processing/history.
+                         */
+                        if clipboard_state
+                            .is_self_write(
+                                &event.content,
+                            )
                             {
                                 info!(
                                     "ignoring self-generated clipboard event"
@@ -163,12 +180,17 @@ async fn main() -> anyhow::Result<()> {
 
                             let core_event =
                             ClipboardEvent {
-                                content: event.content,
-                                created_at: event.created_at,
+                                content:
+                                event.content,
+
+                                created_at:
+                                event.created_at,
                             };
 
                             if let Some(item) =
-                                processor.process(core_event)
+                                processor.process(
+                                    core_event,
+                                )
                                 {
                                     info!(
                                         "Clipboard item created: {:?}",
@@ -218,7 +240,9 @@ async fn main() -> anyhow::Result<()> {
                     }
 
                     Err(error) => {
-                        return Err(error);
+                        return Err(
+                            error,
+                        );
                     }
                 }
             }
@@ -230,7 +254,9 @@ async fn main() -> anyhow::Result<()> {
                 match activation {
                     Some(activation) => {
                         if let Some(token) =
-                            activation.activation_token.as_deref()
+                            activation
+                            .activation_token
+                            .as_deref()
                             {
                                 info!(
                                     token_present = true,
@@ -244,7 +270,9 @@ async fn main() -> anyhow::Result<()> {
                                 );
                             }
 
-                            match ui_launcher.launch() {
+                            match ui_launcher
+                            .launch()
+                            {
                                 Ok(
                                     UiLaunchOutcome::Launched
                                 )

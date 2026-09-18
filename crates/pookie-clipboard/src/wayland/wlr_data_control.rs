@@ -35,7 +35,32 @@ pub struct WaylandState {
 }
 
 impl WaylandState {
-    fn request_text(&mut self) {
+    fn reset_offer_state(&mut self) {
+        /*
+         * A new Wayland data offer must start with a fresh
+         * MIME/request state.
+         *
+         * Without this reset, image/png from an earlier
+         * image selection can remain in offered_mime_types
+         * after the clipboard changes to text. Since Pookie
+         * intentionally prefers images over text, that stale
+         * MIME could then be requested from the new text
+         * owner and produce an empty payload.
+         *
+         * Clearing current_offer and has_selection also
+         * prevents MIME events for the new offer from being
+         * accidentally sent to the previous selection.
+         */
+        self.current_offer = None;
+
+        self.offered_mime_types.clear();
+
+        self.clipboard_requested = false;
+
+        self.has_selection = false;
+    }
+
+    fn request_content(&mut self) {
         if self.clipboard_requested {
             return;
         }
@@ -44,23 +69,39 @@ impl WaylandState {
             return;
         };
 
-        let Some(mime) = mime::preferred_text_mime(&self.offered_mime_types) else {
+        let Some(preferred) = mime::preferred_content_mime(&self.offered_mime_types) else {
             tracing::debug!(
                 offered = ?self.offered_mime_types,
-                "no supported WLR mime"
+                "no supported WLR clipboard MIME"
             );
 
             return;
         };
 
+        let requested_mime = preferred.mime_type.to_string();
+
+        let kind = preferred.kind;
+
         tracing::debug!(
-            mime = %mime,
-            "requesting WLR clipboard"
+            mime = %requested_mime,
+            kind = ?kind,
+            "requesting WLR clipboard data"
         );
 
-        let (read_fd, write_fd) = nix::unistd::pipe().expect("failed creating clipboard pipe");
+        let (read_fd, write_fd) = match nix::unistd::pipe() {
+            Ok(pipe) => pipe,
 
-        offer.receive(mime.to_string(), write_fd.as_fd());
+            Err(error) => {
+                tracing::error!(
+                    error = %error,
+                    "failed creating WLR clipboard pipe"
+                );
+
+                return;
+            }
+        };
+
+        offer.receive(requested_mime.clone(), write_fd.as_fd());
 
         drop(write_fd);
 
@@ -68,16 +109,37 @@ impl WaylandState {
 
         let sender = self.sender.clone();
 
-        std::thread::spawn(move || match clipboard_reader::read_clipboard_fd(read_fd) {
-            Ok(value) => {
-                clipboard_reader::send_clipboard_event(sender, value);
-            }
+        std::thread::spawn(move || {
+            match clipboard_reader::read_clipboard_fd(read_fd, &requested_mime, kind) {
+                Ok(content) => {
+                    match &content {
+                        crate::ClipboardContent::Text(text) => {
+                            tracing::debug!(
+                                length = text.len(),
+                                mime = %requested_mime,
+                                "Wayland WLR clipboard text received"
+                            );
+                        }
 
-            Err(error) => {
-                tracing::error!(
-                    error = %error,
-                    "failed reading WLR clipboard"
-                );
+                        crate::ClipboardContent::Image(image) => {
+                            tracing::debug!(
+                                encoded_bytes = image.len(),
+                                mime = %requested_mime,
+                                "Wayland WLR clipboard image received"
+                            );
+                        }
+                    }
+
+                    clipboard_reader::send_clipboard_event(sender, content);
+                }
+
+                Err(error) => {
+                    tracing::error!(
+                        error = %error,
+                        mime = %requested_mime,
+                        "failed reading WLR clipboard payload"
+                    );
+                }
             }
         });
     }
@@ -122,22 +184,23 @@ impl Dispatch<zwlr_data_control_manager_v1::ZwlrDataControlManagerV1, ()> for Wa
 impl Dispatch<zwlr_data_control_device_v1::ZwlrDataControlDeviceV1, ()> for WaylandState {
     fn event(
         state: &mut Self,
-
         _proxy: &zwlr_data_control_device_v1::ZwlrDataControlDeviceV1,
-
         event: zwlr_data_control_device_v1::Event,
-
         _data: &(),
-
         _conn: &Connection,
-
         _qh: &QueueHandle<Self>,
     ) {
         match event {
             zwlr_data_control_device_v1::Event::DataOffer { id } => {
+                /*
+                 * Start this offer with a completely clean
+                 * MIME/request state.
+                 */
+                state.reset_offer_state();
+
                 tracing::debug!(
                     id = ?id.id(),
-                    "WLR data offer created"
+                    "WLR data offer created; previous offer state reset"
                 );
             }
 
@@ -152,8 +215,15 @@ impl Dispatch<zwlr_data_control_device_v1::ZwlrDataControlDeviceV1, ()> for Wayl
 
                         state.has_selection = true;
 
+                        /*
+                         * Handles:
+                         *
+                         * DataOffer
+                         * -> Offer MIME(s)
+                         * -> Selection
+                         */
                         if !state.offered_mime_types.is_empty() {
-                            state.request_text();
+                            state.request_content();
                         }
                     }
 
@@ -175,7 +245,6 @@ impl Dispatch<zwlr_data_control_device_v1::ZwlrDataControlDeviceV1, ()> for Wayl
 
     fn event_created_child(
         _opcode: u16,
-
         qhandle: &QueueHandle<Self>,
     ) -> std::sync::Arc<dyn wayland_client::backend::ObjectData> {
         qhandle.make_data::<zwlr_data_control_offer_v1::ZwlrDataControlOfferV1, ()>(())
@@ -185,31 +254,33 @@ impl Dispatch<zwlr_data_control_device_v1::ZwlrDataControlDeviceV1, ()> for Wayl
 impl Dispatch<zwlr_data_control_offer_v1::ZwlrDataControlOfferV1, ()> for WaylandState {
     fn event(
         state: &mut Self,
-
         _proxy: &zwlr_data_control_offer_v1::ZwlrDataControlOfferV1,
-
         event: zwlr_data_control_offer_v1::Event,
-
         _data: &(),
-
         _conn: &Connection,
-
         _qh: &QueueHandle<Self>,
     ) {
         match event {
             zwlr_data_control_offer_v1::Event::Offer { mime_type } => {
-                if mime::is_supported_text_mime(&mime_type) {
+                if mime::is_supported_clipboard_mime(&mime_type) {
                     tracing::debug!(
                         mime = %mime_type,
-                        "WLR supported mime"
+                        "WLR supported clipboard MIME"
                     );
 
                     if !state.offered_mime_types.contains(&mime_type) {
                         state.offered_mime_types.push(mime_type);
                     }
 
+                    /*
+                     * Handles:
+                     *
+                     * DataOffer
+                     * -> Selection
+                     * -> Offer MIME(s)
+                     */
                     if state.has_selection {
-                        state.request_text();
+                        state.request_content();
                     }
                 }
             }
