@@ -89,7 +89,7 @@ fn main() -> eframe::Result<()> {
         Box::new(move |cc| {
             ui_style::apply_theme(&cc.egui_ctx, app_theme);
 
-            Ok(Box::new(PookieApp::new(target_id)))
+            Ok(Box::new(PookieApp::new(target_id, cc.egui_ctx.clone())))
         }),
     )
 }
@@ -158,16 +158,28 @@ struct PookieApp {
 }
 
 impl PookieApp {
-    fn new(target_id: Option<ipc::IpcFocusTarget>) -> Self {
+    fn new(target_id: Option<ipc::IpcFocusTarget>, repaint_context: egui::Context) -> Self {
         let (sender, receiver) = oneshot::channel();
 
+        /*
+         * History loading happens off the UI thread.
+         *
+         * Explicitly wake egui when the worker finishes rather
+         * than relying on unrelated window/input events to cause
+         * another frame.
+         *
+         * This keeps background-to-UI communication event-driven
+         * and avoids continuous polling.
+         */
         std::thread::spawn(move || {
             let runtime =
                 tokio::runtime::Runtime::new().expect("failed to create UI Tokio runtime");
 
             let result = runtime.block_on(ipc_client::get_history());
 
-            let _ = sender.send(result);
+            if sender.send(result).is_ok() {
+                repaint_context.request_repaint();
+            }
         });
 
         Self {
@@ -367,6 +379,18 @@ impl PookieApp {
 
         let (sender, receiver) = oneshot::channel();
 
+        /*
+         * The popup becomes hidden while the daemon performs
+         * clipboard writeback, focus restoration, and optional
+         * direct paste.
+         *
+         * Once hidden, the native window system may stop
+         * producing frames entirely. Therefore the activation
+         * worker must explicitly wake egui when its result is
+         * ready.
+         */
+        let repaint_context = ctx.clone();
+
         self.status_message = None;
 
         self.activation_in_progress = true;
@@ -381,7 +405,19 @@ impl PookieApp {
 
             let result = runtime.block_on(ipc_client::activate_item(id, target_id));
 
-            let _ = sender.send(result);
+            /*
+             * Publish the result first, then wake the UI.
+             *
+             * That ordering guarantees poll_activation() can
+             * observe the completed result on the repaint
+             * triggered below.
+             *
+             * If the receiver has already disappeared because
+             * the UI is shutting down, no repaint is necessary.
+             */
+            if sender.send(result).is_ok() {
+                repaint_context.request_repaint();
+            }
         });
     }
 
