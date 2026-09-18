@@ -1,8 +1,13 @@
 # Pookie Paste Release Testing
 
-This document defines the validation process used before publishing or approving a Pookie Paste Linux release.
+This document defines the validation process used before publishing a Pookie Paste Linux release.
 
-The purpose is to ensure that installation, startup, clipboard integration, direct paste, updates, uninstall, and data preservation behave consistently across supported Linux environments.
+The goal is to verify installation, startup, clipboard history, direct paste, updates, uninstall behavior, data preservation, and release artifacts on the platforms Pookie Paste currently supports.
+
+Current primary validation targets:
+
+- X11
+- KDE Plasma Wayland
 
 ---
 
@@ -16,110 +21,101 @@ Pookie Paste provides:
 
 The smoke test validates the generic installation lifecycle in an isolated temporary user environment.
 
-It does not use the normal Pookie Paste application data directories.
-
-The test redirects:
+It redirects:
 
 ```text
 HOME
 XDG_DATA_HOME
 XDG_CONFIG_HOME
 XDG_STATE_HOME
-XDG_RUNTIME_DIR
 ```
 
 into a temporary directory.
 
-This protects the tester's normal Pookie Paste database and application state.
+The real `XDG_RUNTIME_DIR` is preserved so the daemon can still access the current graphical X11 or Wayland session.
+
+This protects the tester's normal Pookie Paste database, image history, and application state.
 
 ### Requirements
 
-The test must be run:
+Run the smoke test:
 
 - On Linux
 - From a graphical X11 or Wayland session
 - With no existing `pookie-paste` daemon running
 
-Because the application process is currently identified by process name, the smoke test refuses to start while another Pookie Paste daemon is running.
+The smoke test refuses to start while another Pookie Paste daemon is active.
 
 ---
 
-## 2. Test Latest Prebuilt Release
+## 2. Test Source Installation
 
-Stop the normal Pookie Paste instance first.
-
-Then run:
+Before publishing a release, validate the current source tree:
 
 ```bash
-./scripts/smoke-test-install.sh
+./scripts/smoke-test-install.sh   --from-source
 ```
 
-The test uses the public bootstrap installer and the latest stable GitHub release.
-
----
-
-## 3. Test a Specific Release
-
-Example:
-
-```bash
-./scripts/smoke-test-install.sh \
-  --version v0.1.0
-```
-
-This validates the public bootstrap path using exactly that release.
-
----
-
-## 4. Test Source Installation
-
-Run:
-
-```bash
-./scripts/smoke-test-install.sh \
-  --from-source
-```
-
-This validates the developer installation path:
+This tests the developer installation path:
 
 ```text
 scripts/install.sh --from-source
 ```
 
-instead of the prebuilt release path.
+Use this before creating the final release artifact.
 
 ---
 
-## 5. Preserve the Temporary Environment
+## 3. Test the Published Release
 
-For debugging a failed test:
+After publishing the release, validate the exact version users will install:
 
 ```bash
-./scripts/smoke-test-install.sh \
-  --keep-temp
+./scripts/smoke-test-install.sh   --version <version>
 ```
 
-The script prints the temporary directory when it exits.
+Example:
 
-This makes it possible to inspect:
+```bash
+./scripts/smoke-test-install.sh   --version v0.2.0
+```
+
+To test the latest stable release:
+
+```bash
+./scripts/smoke-test-install.sh
+```
+
+---
+
+## 4. Preserve the Temporary Environment
+
+For debugging a failed smoke test:
+
+```bash
+./scripts/smoke-test-install.sh   --keep-temp
+```
+
+The script prints the temporary test directory when it exits.
+
+Useful paths to inspect include:
 
 ```text
 installed binaries
 desktop files
 autostart files
 database
-state
+images/
+application state
 startup logs
 runtime socket
 ```
 
-after the test.
-
 ---
 
-## 6. Automated Smoke-Test Coverage
+## 5. Automated Smoke-Test Coverage
 
-The automated smoke test verifies:
+The automated smoke test verifies the generic installation lifecycle.
 
 ### Installation
 
@@ -127,8 +123,8 @@ The automated smoke test verifies:
 - Pookie UI binary is installed
 - Desktop entry is installed
 - Autostart entry is installed
-- Data directory is created
-- State directory is created
+- Application data directory is created
+- Application state directory is created
 - Startup log is created
 
 ### Runtime
@@ -143,13 +139,16 @@ The automated smoke test verifies:
 - Binaries are removed
 - Desktop entry is removed
 - Autostart entry is removed
-- Database remains present
-- Application state remains present
+- Application data is preserved
+- Clipboard database is preserved
+- Stored image history is preserved
+- Application state is preserved
 
 ### Reinstallation
 
 - Binaries are installed again
-- Existing database survives
+- Existing clipboard history survives
+- Existing image history survives
 - Daemon starts again
 - IPC socket is recreated
 
@@ -158,173 +157,212 @@ The automated smoke test verifies:
 - Daemon stops
 - Binaries are removed
 - Application data is deleted
+- Stored image files are deleted
 - Application state is deleted
 
 ---
 
-## 7. What the Automated Smoke Test Does Not Validate
+## 6. What the Smoke Test Does Not Validate
 
-The isolated automated smoke test intentionally does not validate desktop-specific behavior.
+The isolated smoke test intentionally does not validate desktop-specific interaction.
 
-The following require separate real-session testing:
+The following require real-session testing:
 
-- `Super+V` portal registration
+- `Super+V`
 - Popup positioning
 - Popup focus behavior
-- X11 focus restoration
+- Keyboard and mouse navigation
+- Text activation
+- Image activation
+- Image thumbnail rendering
+- Focus restoration
 - X11 direct paste
 - KDE Plasma Wayland focus capture
 - KDE Plasma Wayland focus restoration
-- KWin helper installation
-- KWin shortcut registration
+- KWin helper behavior
 - Portal/EIS direct paste
-- GNOME Wayland fallback behavior
-- Other compositor behavior
+- Mixed text/image history behavior
 
-These are covered by the platform validation matrix below.
-
----
-
-# Platform Validation Matrix
-
-## Fedora KDE Plasma Wayland
-
-Validate:
-
-- Bootstrap installation
-- Autostart
-- `Super+V`
-- Clipboard history popup
-- Focus capture
-- Focus restoration
-- Portal/EIS direct paste
-- KWin helper installation
-- Restart after login
-- Update
-- Standard uninstall
-- Purge
-
-Expected direct-paste capability:
-
-```text
-Direct
-```
+These are covered by the real-session validation below.
 
 ---
 
-## Ubuntu / Debian Family
-
-Validate:
-
-- Bootstrap installation
-- Dependency installation
-- Desktop entry
-- Autostart
-- Clipboard monitoring
-- Global shortcut behavior
-- Uninstall lifecycle
-
-On GNOME Wayland, direct paste may fall back when no supported focus-restoration backend is available.
-
-Expected behavior must be recorded during testing rather than assumed.
-
----
-
-## Arch / Manjaro Family
-
-Validate:
-
-- `pacman` dependency handling
-- Bootstrap installation
-- Desktop integration
-- KDE helper installation when Plasma is used
-- Clipboard history
-- Direct paste
-- Update
-- Uninstall
-
----
-
-## openSUSE Family
-
-Validate:
-
-- `zypper` dependency handling
-- Bootstrap installation
-- Desktop integration
-- Plasma behavior when applicable
-- Clipboard history
-- Update
-- Uninstall
-
----
-
-# Session Validation
+# Real-Session Validation
 
 ## X11
 
-Expected:
+Expected capabilities:
 
 ```text
-Clipboard monitoring: supported
+Text capture: supported
+Image capture: supported
 Focus restoration: supported
 Direct paste: supported
 ```
 
-Verify:
+Validate:
 
-1. Focus an application.
+1. Start Pookie Paste.
 2. Copy text.
-3. Press `Super+V`.
-4. Select a history item.
-5. Confirm the original application regains focus.
-6. Confirm the selected text is pasted directly.
+3. Copy an image.
+4. Press `Super+V`.
+5. Confirm mixed text/image history appears correctly.
+6. Confirm image thumbnails render with the correct aspect ratio.
+7. Navigate using keyboard arrows.
+8. Select entries using the mouse.
+9. Activate a text item and confirm:
+   - the original application regains focus
+   - the selected text pastes directly
+10. Activate an image in an image-capable target and confirm:
+   - the original application regains focus
+   - the selected image pastes directly
+11. Confirm activated items move to the most-recent position.
+12. Confirm self-generated clipboard writes do not create duplicate history rows.
+13. Restart Pookie Paste and confirm text and image history still exists.
+14. Confirm the popup can be opened repeatedly after activation without leaving a stale UI process.
+
+For image testing, use an application that accepts pasted images.
+
+A plain text editor rejecting an image is expected behavior.
 
 ---
 
 ## KDE Plasma Wayland
 
-Expected:
+Expected capabilities:
 
 ```text
-Clipboard monitoring: supported
+Text capture: supported
+Image capture: supported
 KWin focus helper: supported
 Focus restoration: supported
 Portal/EIS direct paste: supported
 ```
 
-Verify:
+Validate:
 
-1. `pookie-focus` is installed.
-2. KWin helper is enabled.
-3. Focus a text application.
-4. Press `Super+V`.
-5. Select a clipboard entry.
-6. Confirm the original KDE window regains focus.
-7. Confirm direct paste occurs.
+1. Confirm `pookie-focus` is installed and enabled.
+2. Start Pookie Paste.
+3. Copy text.
+4. Copy an image.
+5. Press `Super+V`.
+6. Confirm mixed text/image history appears correctly.
+7. Confirm image thumbnails render correctly.
+8. Navigate using keyboard and mouse.
+9. Activate text and confirm focus restoration + direct paste.
+10. Activate an image in an image-capable target and confirm focus restoration + direct paste.
+11. Confirm activated items are promoted without creating duplicates.
+12. Restart Pookie Paste and confirm mixed history persists.
+
+Also validate clipboard-content transitions:
+
+```text
+image → text
+text → image
+image → text → image
+activate old image → copy fresh text
+activate old text → copy fresh image
+```
+
+The daemon must not repeatedly report stale MIME errors such as:
+
+```text
+clipboard payload is empty mime=image/png
+```
+
+If focus restoration cannot confirm the intended target, direct paste must be aborted rather than injected into another application.
 
 ---
 
-## Non-KDE Wayland
+## Known KDE Focus Edge Case
 
-Expected behavior depends on available focus-restoration support.
+Temporary Plasma surfaces such as the application launcher can become the active KWin window immediately before `Super+V`.
+
+If Pookie captures such a temporary target and that target disappears before activation, focus restoration may fail.
+
+Expected safe behavior:
+
+```text
+focus target no longer exists
+→ activation reports paste failure
+→ direct input is not injected into another window
+```
+
+This is currently treated as a focus-selection edge case rather than a release-blocking safety issue, provided the failure remains safe.
+
+---
+
+# Mixed Content Validation
+
+Before release, verify this sequence on both X11 and KDE Plasma Wayland:
+
+```text
+copy text A
+copy image A
+copy text B
+copy image B
+```
+
+Open `Super+V`.
+
+Expected order:
+
+```text
+image B
+text B
+image A
+text A
+```
+
+Then:
+
+1. Activate `image A`.
+2. Open `Super+V` again.
+3. Confirm `image A` is now the most recent item.
+4. Confirm no duplicate image row was created.
+5. Activate `text A`.
+6. Confirm text activation still works correctly after image activation.
+
+---
+
+# Persistence Validation
+
+Create mixed history containing both text and images.
+
+Stop and restart Pookie Paste.
 
 Verify:
 
-- Clipboard history works
-- Popup opens
-- Selected history item is written to the clipboard
-- Application does not inject input into an unconfirmed target
+- SQLite history survives
+- Image files survive
+- Image rows still reference valid files
+- Thumbnails reload
+- Old text items still activate
+- Old image items still activate
 
-A clipboard-only fallback is acceptable where direct paste cannot be safely performed.
+Expected data layout:
+
+```text
+$XDG_DATA_HOME/pookie-paste/
+├── pookie-paste.db
+└── images/
+    └── <uuid>.png
+```
+
+When `XDG_DATA_HOME` is unset, the normal fallback is:
+
+```text
+~/.local/share/pookie-paste/
+```
 
 ---
 
 # Release Artifact Validation
 
-Before publishing a release, verify:
+Before publishing a release, verify the generated checksum:
 
 ```bash
+cd dist
 sha256sum -c SHA256SUMS
 ```
 
@@ -337,8 +375,7 @@ pookie-paste-<version>-linux-x86_64.tar.gz: OK
 Inspect the archive:
 
 ```bash
-tar -tzf \
-  pookie-paste-<version>-linux-x86_64.tar.gz
+tar -tzf   pookie-paste-<version>-linux-x86_64.tar.gz
 ```
 
 The release must contain:
@@ -357,6 +394,8 @@ README.md
 RELEASE_VERSION
 ```
 
+Runtime-created clipboard history and image files must not be included in the release archive.
+
 ---
 
 # Runtime Compatibility
@@ -368,21 +407,17 @@ ldd pookie-paste
 ldd pookie-paste-ui
 ```
 
-Inspect required glibc versions:
+Inspect required glibc symbol versions:
 
 ```bash
-objdump -T pookie-paste \
-  | grep GLIBC_ \
-  | sort -V
+objdump -T pookie-paste   | grep GLIBC_   | sort -V
 
-objdump -T pookie-paste-ui \
-  | grep GLIBC_ \
-  | sort -V
+objdump -T pookie-paste-ui   | grep GLIBC_   | sort -V
 ```
 
-The highest required glibc symbol version should be recorded for each published binary release.
+Record the highest required glibc version for published binaries.
 
-Do not claim compatibility with Linux distributions older than the verified runtime baseline.
+Do not claim compatibility with distributions older than the verified runtime baseline.
 
 ---
 
@@ -390,21 +425,22 @@ Do not claim compatibility with Linux distributions older than the verified runt
 
 Before considering a release validated:
 
--  CI passes
--  Release workflow passes
--  SHA256 verification passes
--  Automated installation smoke test passes
--  Source-install smoke test passes
--  Fedora KDE Wayland test passes
--  X11 test passes
--  At least one Debian/Ubuntu-family test passes
--  At least one Arch-family test passes
--  openSUSE test completed or explicitly marked unverified
--  Non-KDE Wayland fallback tested
--  Update preserves database
--  Standard uninstall preserves data
--  Purge removes data
--  Runtime/glibc baseline recorded
--  README installation instructions match released behavior
+- [ ] CI passes
+- [ ] Release workflow passes
+- [ ] `cargo check --workspace` passes
+- [ ] `cargo test --workspace` passes
+- [ ] Workspace Clippy passes with warnings denied
+- [ ] Source-install smoke test passes
+- [ ] Published-release smoke test passes
+- [ ] SHA256 verification passes
+- [ ] X11 text + image E2E validation passes
+- [ ] KDE Plasma Wayland text + image E2E validation passes
+- [ ] Mixed text/image history behaves correctly
+- [ ] Image activation does not create duplicate history rows
+- [ ] Update preserves database and image history
+- [ ] Standard uninstall preserves application data
+- [ ] Purge removes database, image files, and application state
+- [ ] Runtime/glibc baseline is recorded
+- [ ] README installation instructions match the released behavior
 
 A release should only be described as supported on environments that have actually passed the relevant validation.

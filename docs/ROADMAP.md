@@ -1,177 +1,70 @@
 # Pookie Paste Roadmap
 
+Pookie Paste is actively evolving. This roadmap highlights planned areas of work rather than fixed implementation phases.
 
-## Phase 0 — Foundation
+## Current
 
-Goal:
+### Clipboard History Actions
 
-Create the project foundation.
+Planned improvements to the history experience:
 
-Completed:
+- Delete individual history items
+- Clear clipboard history
+- Pin or favorite items
+- Small context-menu actions
+- Related history utilities
 
-- Rust workspace
-- Project structure
-- Development tooling
-- Documentation
-- CI pipeline
+## Next
 
+### Reliability and UX Hardening
 
-## Phase 1 — Daemon Foundation
+- Continue X11 and Wayland edge-case testing
+- Improve popup and focus behavior
+- Improve handling of transient desktop surfaces
+- Performance and memory profiling
+- Additional regression coverage
 
-Goal:
+### Desktop Support
 
-Create the background clipboard service.
+Current primary targets:
 
-Tasks:
+- X11
+- KDE Plasma Wayland
 
-- Daemon lifecycle
-- Async runtime
-- Logging
-- Configuration
-- Graceful shutdown
+Future work:
 
+- GNOME Wayland
+- Additional Wayland compositors where practical
 
-## Phase 2 — Clipboard Engine
+## Future Content Types
 
-Goal:
+The current clipboard model supports:
 
-Capture clipboard changes.
+- Text
+- Images
 
-Tasks:
+Potential future additions:
 
-- X11 clipboard support
-- Wayland clipboard support
-- Clipboard abstraction layer
+- File clipboard entries
+- HTML / rich text
+- Additional clipboard formats
 
+These will be added only when they fit cleanly into the existing clipboard-content and persistence architecture.
 
-## Phase 3 — Clipboard Processing
+## Distribution
 
-Goal:
+Future distribution work may include:
 
-Process clipboard data.
+- `.deb` packages
+- `.rpm` packages
+- Arch / AUR packaging
+- Additional release automation
 
-Tasks:
+## Longer-Term Ideas
 
-- Content detection
-- Hash generation
-- Duplicate filtering
-- Normalization
+Possible future improvements:
 
-
-## Phase 4 — Storage Layer
-
-Goal:
-
-Persist clipboard history.
-
-Tasks:
-
-- SQLite integration
-- Repository pattern
-- Database migrations
-
-
-## Phase 5 — IPC Layer
-
-Goal:
-
-Connect UI and daemon.
-
-Tasks:
-
-- IPC protocol
-- Request handling
-- Event communication
-
-
-## Phase 6 — User Interface
-
-Goal:
-
-Build the clipboard history experience.
-
-Features:
-
-- History popup
-- Keyboard navigation
-- Clipboard selection
-
-
-## Phase 7 — Windows Clipboard Features
-
-Goal:
-
-Match Windows Clipboard History experience.
-
-Features:
-
-- Pin items
-- Recent history
-- Quick retrieval
-
-
-## Phase 8 — Search
-
-Goal:
-
-Fast clipboard discovery.
-
-Features:
-
-- Full-text search
-- Filtering
-- Ranking
-
-
-## Phase 9 — Optimization
-
-Goal:
-
-Improve performance.
-
-Tasks:
-
-- Memory optimization
-- Startup optimization
-- Benchmarking
-
-
-## Phase 10 — Security
-
-Goal:
-
-Improve reliability and privacy.
-
-Tasks:
-
-- Data protection
-- Permission handling
-- Secure storage
-
-
-## Phase 11 — Linux Integration
-
-Goal:
-
-Better desktop integration.
-
-Support:
-
-- GNOME
-- KDE
-- System startup
-- Notifications
-
-
-## Phase 12 — Release
-
-Goal:
-
-Prepare production release.
-
-Tasks:
-
-- Packaging
-- Documentation
-- Distribution
-- Community guidelines
+- Better search and filtering
+- History organization
+- Optional settings/preferences UI
+- Additional desktop integrations
