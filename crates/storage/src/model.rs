@@ -1,4 +1,4 @@
-#[derive(Debug, sqlx::FromRow)]
+#[derive(Debug, Clone, sqlx::FromRow, PartialEq, Eq)]
 pub struct StoredClipboardItem {
     pub id: String,
 
@@ -11,4 +11,6 @@ pub struct StoredClipboardItem {
     pub content_hash: String,
 
     pub created_at: String,
+
+    pub pinned_at: Option<String>,
 }

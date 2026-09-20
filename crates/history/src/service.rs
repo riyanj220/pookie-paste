@@ -58,11 +58,15 @@ impl ClipboardHistoryService {
         hash: String,
         created_at: chrono::DateTime<chrono::Utc>,
     ) -> Result<(), HistoryError> {
+        let mut pinned_at = None;
+
         if let Some(existing) = self.repository.find_by_hash_and_type(&hash, "text").await? {
+            pinned_at = existing.pinned_at;
             self.repository.delete_by_id(&existing.id).await?;
         }
 
-        let stored_item = to_stored_text_item(id, text, hash, created_at);
+        let mut stored_item = to_stored_text_item(id, text, hash, created_at);
+        stored_item.pinned_at = pinned_at;
 
         self.repository.insert(&stored_item).await?;
 
@@ -76,6 +80,8 @@ impl ClipboardHistoryService {
         hash: String,
         created_at: chrono::DateTime<chrono::Utc>,
     ) -> Result<(), HistoryError> {
+        let mut pinned_at = None;
+
         /*
          * A duplicate image already has exactly the same
          * canonical PNG bytes.
@@ -99,6 +105,8 @@ impl ClipboardHistoryService {
                     return Ok(());
                 }
 
+                pinned_at = existing.pinned_at;
+
                 /*
                  * The database row is malformed or its image
                  * file disappeared.
@@ -112,6 +120,8 @@ impl ClipboardHistoryService {
                     let _ = image_store.delete_image(file_path).await?;
                 }
             } else {
+                pinned_at = existing.pinned_at;
+
                 /*
                  * Transitional compatibility for existing
                  * tests that construct a text-only service
@@ -130,7 +140,8 @@ impl ClipboardHistoryService {
              *
              * Production always configures ImageStore.
              */
-            let stored_item = to_stored_image_item(id, None, hash, created_at);
+            let mut stored_item = to_stored_image_item(id, None, hash, created_at);
+            stored_item.pinned_at = pinned_at;
 
             self.repository.insert(&stored_item).await?;
 
@@ -143,7 +154,8 @@ impl ClipboardHistoryService {
 
         let file_path = image_store.write_image(&item_id, &image).await?;
 
-        let stored_item = to_stored_image_item(id, Some(file_path.clone()), hash, created_at);
+        let mut stored_item = to_stored_image_item(id, Some(file_path.clone()), hash, created_at);
+        stored_item.pinned_at = pinned_at;
 
         if let Err(database_error) = self.repository.insert(&stored_item).await {
             match image_store.delete_image(&file_path).await {
@@ -253,6 +265,28 @@ impl ClipboardHistoryService {
         let created_at = chrono::Utc::now().to_rfc3339();
 
         Ok(self.repository.update_created_at(id, &created_at).await?)
+    }
+
+    pub async fn pin(&self, id: &str) -> Result<bool, HistoryError> {
+        Ok(self.repository.pin(id).await?)
+    }
+
+    pub async fn unpin(&self, id: &str) -> Result<bool, HistoryError> {
+        Ok(self.repository.unpin(id).await?)
+    }
+
+    pub async fn toggle_pin(&self, id: &str) -> Result<Option<bool>, HistoryError> {
+        let Some(item) = self.repository.get_by_id(id).await? else {
+            return Ok(None);
+        };
+
+        if item.pinned_at.is_some() {
+            self.repository.unpin(id).await?;
+            Ok(Some(false))
+        } else {
+            self.repository.pin(id).await?;
+            Ok(Some(true))
+        }
     }
 
     /// Reconcile image files with SQLite.

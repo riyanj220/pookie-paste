@@ -20,6 +20,8 @@ async fn inserts_and_reads_clipboard_item() {
         content_hash: "hash123".to_string(),
 
         created_at: "2026-08-29T00:00:00Z".to_string(),
+
+        pinned_at: None,
     };
 
     repository.insert(&item).await.expect("insert failed");
@@ -29,6 +31,7 @@ async fn inserts_and_reads_clipboard_item() {
     assert_eq!(items.len(), 1);
 
     assert_eq!(items[0].text_content.as_deref(), Some("Hello Pookie"));
+    assert_eq!(items[0].pinned_at, None);
 }
 
 async fn create_repository() -> StorageRepository {
@@ -68,6 +71,8 @@ async fn deletes_items() {
         content_hash: "hash".to_string(),
 
         created_at: "2026-08-29".to_string(),
+
+        pinned_at: None,
     };
 
     repository.insert(&item).await.unwrap();
@@ -93,6 +98,7 @@ async fn deletes_single_item_by_id() {
         file_path: None,
         content_hash: "hash-a".to_string(),
         created_at: "2026-08-29T00:00:01Z".to_string(),
+        pinned_at: None,
     };
 
     let item_b = StoredClipboardItem {
@@ -102,6 +108,7 @@ async fn deletes_single_item_by_id() {
         file_path: None,
         content_hash: "hash-b".to_string(),
         created_at: "2026-08-29T00:00:02Z".to_string(),
+        pinned_at: None,
     };
 
     repository.insert(&item_a).await.unwrap();
@@ -133,6 +140,7 @@ async fn clears_all_items() {
             file_path: None,
             content_hash: format!("hash-{index}"),
             created_at: format!("2026-08-29T00:00:0{index}Z"),
+            pinned_at: None,
         };
 
         repository.insert(&item).await.unwrap();
@@ -158,6 +166,7 @@ async fn finds_item_by_existing_hash() {
         file_path: None,
         content_hash: "hash-a".to_string(),
         created_at: "2026-08-29T00:00:01Z".to_string(),
+        pinned_at: None,
     };
 
     repository.insert(&item).await.unwrap();
@@ -212,6 +221,7 @@ async fn gets_item_by_existing_id() {
         file_path: None,
         content_hash: "hash-123".to_string(),
         created_at: "2026-08-31T10:00:00Z".to_string(),
+        pinned_at: None,
     };
 
     repository.insert(&item).await.expect("insert failed");
@@ -225,7 +235,8 @@ async fn gets_item_by_existing_id() {
 
     assert_eq!(found.id, "item-123");
 
-    assert_eq!(found.text_content.as_deref(), Some("hello"),);
+    assert_eq!(found.text_content.as_deref(), Some("hello"));
+    assert_eq!(found.pinned_at, None);
 }
 
 #[tokio::test]
@@ -255,6 +266,7 @@ async fn update_created_at_promotes_item_to_newest() {
         file_path: None,
         content_hash: "hash-a".to_string(),
         created_at: "2026-08-31T10:00:01Z".to_string(),
+        pinned_at: None,
     };
 
     let item_b = StoredClipboardItem {
@@ -264,6 +276,7 @@ async fn update_created_at_promotes_item_to_newest() {
         file_path: None,
         content_hash: "hash-b".to_string(),
         created_at: "2026-08-31T10:00:02Z".to_string(),
+        pinned_at: None,
     };
 
     let item_c = StoredClipboardItem {
@@ -273,6 +286,7 @@ async fn update_created_at_promotes_item_to_newest() {
         file_path: None,
         content_hash: "hash-c".to_string(),
         created_at: "2026-08-31T10:00:03Z".to_string(),
+        pinned_at: None,
     };
 
     repository.insert(&item_a).await.unwrap();
@@ -290,5 +304,139 @@ async fn update_created_at_promotes_item_to_newest() {
 
     let ids: Vec<&str> = items.iter().map(|item| item.id.as_str()).collect();
 
-    assert_eq!(ids, vec!["item-b", "item-c", "item-a"],);
+    assert_eq!(ids, vec!["item-b", "item-c", "item-a"]);
+}
+
+#[tokio::test]
+async fn pin_and_unpin_item() {
+    let repository = create_repository().await;
+
+    let item = StoredClipboardItem {
+        id: "item-pin".to_string(),
+        content_type: "text".to_string(),
+        text_content: Some("Pin test".to_string()),
+        file_path: None,
+        content_hash: "hash-pin".to_string(),
+        created_at: "2026-08-31T10:00:00Z".to_string(),
+        pinned_at: None,
+    };
+
+    repository.insert(&item).await.unwrap();
+
+    let pinned = repository.pin("item-pin").await.unwrap();
+    assert!(pinned);
+
+    let found = repository.get_by_id("item-pin").await.unwrap().unwrap();
+    assert!(found.pinned_at.is_some());
+
+    let unpinned = repository.unpin("item-pin").await.unwrap();
+    assert!(unpinned);
+
+    let found = repository.get_by_id("item-pin").await.unwrap().unwrap();
+    assert_eq!(found.pinned_at, None);
+}
+
+#[tokio::test]
+async fn orders_pinned_items_first_and_newest_pinned_first() {
+    let repository = create_repository().await;
+
+    let item_a = StoredClipboardItem {
+        id: "item-a".to_string(),
+        content_type: "text".to_string(),
+        text_content: Some("A".to_string()),
+        file_path: None,
+        content_hash: "hash-a".to_string(),
+        created_at: "2026-08-31T10:00:01Z".to_string(),
+        pinned_at: None,
+    };
+
+    let item_b = StoredClipboardItem {
+        id: "item-b".to_string(),
+        content_type: "text".to_string(),
+        text_content: Some("B".to_string()),
+        file_path: None,
+        content_hash: "hash-b".to_string(),
+        created_at: "2026-08-31T10:00:02Z".to_string(),
+        pinned_at: None,
+    };
+
+    let item_c = StoredClipboardItem {
+        id: "item-c".to_string(),
+        content_type: "text".to_string(),
+        text_content: Some("C".to_string()),
+        file_path: None,
+        content_hash: "hash-c".to_string(),
+        created_at: "2026-08-31T10:00:03Z".to_string(),
+        pinned_at: None,
+    };
+
+    repository.insert(&item_a).await.unwrap();
+    repository.insert(&item_b).await.unwrap();
+    repository.insert(&item_c).await.unwrap();
+
+    // Pin A first
+    repository.pin("item-a").await.unwrap();
+
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    // Pin B second (newer pinned_at)
+    repository.pin("item-b").await.unwrap();
+
+    let items = repository.get_all().await.unwrap();
+    let ids: Vec<&str> = items.iter().map(|item| item.id.as_str()).collect();
+
+    // Expect: B (newest pinned), A (older pinned), C (unpinned, newest created)
+    assert_eq!(ids, vec!["item-b", "item-a", "item-c"]);
+}
+
+#[tokio::test]
+async fn get_oldest_excludes_pinned_items_for_eviction_safety() {
+    let repository = create_repository().await;
+
+    let item_1 = StoredClipboardItem {
+        id: "item-1-old-pinned".to_string(),
+        content_type: "text".to_string(),
+        text_content: Some("1".to_string()),
+        file_path: None,
+        content_hash: "hash-1".to_string(),
+        created_at: "2026-08-31T10:00:01Z".to_string(),
+        pinned_at: None,
+    };
+
+    let item_2 = StoredClipboardItem {
+        id: "item-2-mid-unpinned".to_string(),
+        content_type: "text".to_string(),
+        text_content: Some("2".to_string()),
+        file_path: None,
+        content_hash: "hash-2".to_string(),
+        created_at: "2026-08-31T10:00:02Z".to_string(),
+        pinned_at: None,
+    };
+
+    let item_3 = StoredClipboardItem {
+        id: "item-3-new-unpinned".to_string(),
+        content_type: "text".to_string(),
+        text_content: Some("3".to_string()),
+        file_path: None,
+        content_hash: "hash-3".to_string(),
+        created_at: "2026-08-31T10:00:03Z".to_string(),
+        pinned_at: None,
+    };
+
+    repository.insert(&item_1).await.unwrap();
+    repository.insert(&item_2).await.unwrap();
+    repository.insert(&item_3).await.unwrap();
+
+    // Pin the oldest item
+    repository.pin("item-1-old-pinned").await.unwrap();
+
+    // Request 2 oldest items for eviction
+    let oldest = repository.get_oldest(2).await.unwrap();
+    let oldest_ids: Vec<&str> = oldest.iter().map(|item| item.id.as_str()).collect();
+
+    // Pinned item-1 must NOT be in oldest! Only unpinned items 2 and 3 can be returned
+    assert_eq!(
+        oldest_ids,
+        vec!["item-2-mid-unpinned", "item-3-new-unpinned"]
+    );
 }

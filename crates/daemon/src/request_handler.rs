@@ -94,6 +94,18 @@ where
             },
         },
 
+        IpcRequest::TogglePinItem { id } => match history_service.toggle_pin(&id).await {
+            Ok(Some(is_pinned)) => IpcResponse::PinToggled { id, is_pinned },
+
+            Ok(None) => IpcResponse::Error {
+                message: format!("history item not found: {id}"),
+            },
+
+            Err(error) => IpcResponse::Error {
+                message: format!("failed to toggle pin state for {id}: {error}"),
+            },
+        },
+
         IpcRequest::ClearHistory => match history_service.clear().await {
             Ok(count) => IpcResponse::Cleared { count },
 
@@ -575,5 +587,90 @@ mod tests {
         let items = service.get_all().await.expect("history retrieval failed");
 
         assert!(items.is_empty(),);
+    }
+
+    #[tokio::test]
+    async fn toggles_pin_state_for_existing_item() {
+        let service = create_history_service().await;
+
+        let item_id = uuid::Uuid::new_v4();
+        let item = ClipboardItem {
+            id: item_id,
+            content: ClipboardContent::Text("pin me".to_string()),
+            hash: "hash-pin".to_string(),
+            created_at: Utc::now(),
+        };
+
+        service.save(item).await.expect("save failed");
+
+        let (activation_service, _backend_handle) = create_activation_service(Arc::clone(&service));
+
+        // First toggle: unpinned -> pinned
+        let response = handle_request(
+            IpcRequest::TogglePinItem {
+                id: item_id.to_string(),
+            },
+            service.as_ref(),
+            &activation_service,
+        )
+        .await;
+
+        assert_eq!(
+            response,
+            IpcResponse::PinToggled {
+                id: item_id.to_string(),
+                is_pinned: true,
+            }
+        );
+
+        // Verify history service confirms item is pinned
+        let items = service.get_all().await.expect("history retrieval failed");
+        assert_eq!(items.len(), 1);
+        assert!(items[0].pinned_at.is_some());
+
+        // Second toggle: pinned -> unpinned
+        let response = handle_request(
+            IpcRequest::TogglePinItem {
+                id: item_id.to_string(),
+            },
+            service.as_ref(),
+            &activation_service,
+        )
+        .await;
+
+        assert_eq!(
+            response,
+            IpcResponse::PinToggled {
+                id: item_id.to_string(),
+                is_pinned: false,
+            }
+        );
+
+        // Verify history service confirms item is unpinned
+        let items = service.get_all().await.expect("history retrieval failed");
+        assert_eq!(items.len(), 1);
+        assert!(items[0].pinned_at.is_none());
+    }
+
+    #[tokio::test]
+    async fn toggling_pin_for_nonexistent_item_returns_error() {
+        let service = create_history_service().await;
+        let (activation_service, _backend_handle) = create_activation_service(Arc::clone(&service));
+
+        let response = handle_request(
+            IpcRequest::TogglePinItem {
+                id: "nonexistent-id".to_string(),
+            },
+            service.as_ref(),
+            &activation_service,
+        )
+        .await;
+
+        match response {
+            IpcResponse::Error { message } => {
+                assert!(message.contains("nonexistent-id"));
+            }
+            other => panic!("expected Error response, got {other:?}"),
+        }
     }
 }

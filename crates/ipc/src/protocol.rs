@@ -95,6 +95,9 @@ pub struct HistoryItem {
     pub file_path: Option<String>,
 
     pub created_at: String,
+
+    #[serde(default)]
+    pub pinned_at: Option<String>,
 }
 
 impl HistoryItem {
@@ -109,6 +112,8 @@ impl HistoryItem {
             file_path: None,
 
             created_at,
+
+            pinned_at: None,
         }
     }
 
@@ -129,7 +134,18 @@ impl HistoryItem {
             file_path: Some(file_path),
 
             created_at,
+
+            pinned_at: None,
         })
+    }
+
+    pub fn with_pinned_at(mut self, pinned_at: Option<String>) -> Self {
+        self.pinned_at = pinned_at;
+        self
+    }
+
+    pub fn is_pinned(&self) -> bool {
+        self.pinned_at.is_some()
     }
 
     pub fn is_text(&self) -> bool {
@@ -257,6 +273,10 @@ pub enum IpcRequest {
         id: String,
     },
 
+    TogglePinItem {
+        id: String,
+    },
+
     ClearHistory,
 }
 
@@ -272,6 +292,8 @@ pub enum IpcResponse {
     Activated { outcome: ActivationOutcome },
 
     Deleted { deleted: bool },
+
+    PinToggled { id: String, is_pinned: bool },
 
     Cleared { count: u64 },
 
@@ -361,6 +383,8 @@ mod tests {
             file_path: Some("images/550e8400-e29b-41d4-a716-446655440000.png".to_string()),
 
             created_at: "2026-09-17T10:00:00Z".to_string(),
+
+            pinned_at: None,
         };
 
         assert_eq!(
@@ -381,6 +405,8 @@ mod tests {
             file_path: Some("images/550e8400-e29b-41d4-a716-446655440000.png".to_string()),
 
             created_at: "2026-09-17T10:00:00Z".to_string(),
+
+            pinned_at: None,
         };
 
         assert_eq!(
@@ -520,5 +546,73 @@ mod tests {
         let decoded: IpcResponse = serde_json::from_str(&encoded).expect("deserialization failed");
 
         assert_eq!(decoded, response);
+    }
+
+    #[test]
+    fn toggle_pin_item_request_round_trips() {
+        let request = IpcRequest::TogglePinItem {
+            id: "item-123".to_string(),
+        };
+
+        let encoded = serde_json::to_string(&request).expect("serialization failed");
+
+        assert_eq!(encoded, r#"{"type":"toggle_pin_item","id":"item-123"}"#);
+
+        let decoded: IpcRequest = serde_json::from_str(&encoded).expect("deserialization failed");
+
+        assert_eq!(decoded, request);
+    }
+
+    #[test]
+    fn pin_toggled_response_round_trips() {
+        let response = IpcResponse::PinToggled {
+            id: "item-123".to_string(),
+            is_pinned: true,
+        };
+
+        let encoded = serde_json::to_string(&response).expect("serialization failed");
+
+        assert_eq!(
+            encoded,
+            r#"{"type":"pin_toggled","id":"item-123","is_pinned":true}"#
+        );
+
+        let decoded: IpcResponse = serde_json::from_str(&encoded).expect("deserialization failed");
+
+        assert_eq!(decoded, response);
+    }
+
+    #[test]
+    fn history_item_deserializes_without_pinned_at_field() {
+        let json = r#"{
+            "id": "legacy-item",
+            "content_type": "text",
+            "text_content": "legacy text",
+            "file_path": null,
+            "created_at": "2026-09-17T10:00:00Z"
+        }"#;
+
+        let decoded: HistoryItem = serde_json::from_str(json).expect("deserialization failed");
+
+        assert_eq!(decoded.pinned_at, None);
+        assert!(!decoded.is_pinned());
+    }
+
+    #[test]
+    fn history_item_with_pinned_at_round_trips() {
+        let item = HistoryItem::text(
+            "pinned-item".to_string(),
+            "hello pinned".to_string(),
+            "2026-09-17T10:00:00Z".to_string(),
+        )
+        .with_pinned_at(Some("2026-09-20T12:00:00Z".to_string()));
+
+        assert!(item.is_pinned());
+
+        let encoded = serde_json::to_string(&item).expect("serialization failed");
+        let decoded: HistoryItem = serde_json::from_str(&encoded).expect("deserialization failed");
+
+        assert_eq!(decoded, item);
+        assert_eq!(decoded.pinned_at.as_deref(), Some("2026-09-20T12:00:00Z"));
     }
 }

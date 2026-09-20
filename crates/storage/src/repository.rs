@@ -24,9 +24,10 @@ impl StorageRepository {
                 text_content,
                 file_path,
                 content_hash,
-                created_at
+                created_at,
+                pinned_at
             )
-            VALUES (?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             ",
         )
         .bind(&item.id)
@@ -35,6 +36,7 @@ impl StorageRepository {
         .bind(&item.file_path)
         .bind(&item.content_hash)
         .bind(&item.created_at)
+        .bind(&item.pinned_at)
         .execute(&self.pool)
         .await?;
 
@@ -50,9 +52,10 @@ impl StorageRepository {
                 text_content,
                 file_path,
                 content_hash,
-                created_at
+                created_at,
+                pinned_at
             FROM clipboard_items
-            ORDER BY created_at DESC
+            ORDER BY pinned_at IS NOT NULL DESC, pinned_at DESC, created_at DESC
             ",
         )
         .fetch_all(&self.pool)
@@ -74,6 +77,10 @@ impl StorageRepository {
         Ok(count)
     }
 
+    /// Retrieve oldest unpinned items for history limit enforcement.
+    ///
+    /// Pinned items are explicitly excluded so they are never evicted
+    /// when the history capacity limit is reached.
     pub async fn get_oldest(&self, limit: i64) -> Result<Vec<StoredClipboardItem>, sqlx::Error> {
         let items = sqlx::query_as::<_, StoredClipboardItem>(
             "
@@ -83,8 +90,10 @@ impl StorageRepository {
                 text_content,
                 file_path,
                 content_hash,
-                created_at
+                created_at,
+                pinned_at
             FROM clipboard_items
+            WHERE pinned_at IS NULL
             ORDER BY created_at ASC
             LIMIT ?
             ",
@@ -138,6 +147,39 @@ impl StorageRepository {
         Ok(result.rows_affected())
     }
 
+    pub async fn pin(&self, id: &str) -> Result<bool, sqlx::Error> {
+        let now = chrono::Utc::now().to_rfc3339();
+
+        let result = sqlx::query(
+            "
+            UPDATE clipboard_items
+            SET pinned_at = ?
+            WHERE id = ?
+            ",
+        )
+        .bind(now)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
+    pub async fn unpin(&self, id: &str) -> Result<bool, sqlx::Error> {
+        let result = sqlx::query(
+            "
+            UPDATE clipboard_items
+            SET pinned_at = NULL
+            WHERE id = ?
+            ",
+        )
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
     pub async fn find_by_hash(
         &self,
         hash: &str,
@@ -150,7 +192,8 @@ impl StorageRepository {
                 text_content,
                 file_path,
                 content_hash,
-                created_at
+                created_at,
+                pinned_at
             FROM clipboard_items
             WHERE content_hash = ?
             LIMIT 1
@@ -174,7 +217,8 @@ impl StorageRepository {
                 text_content,
                 file_path,
                 content_hash,
-                created_at
+                created_at,
+                pinned_at
             FROM clipboard_items
             WHERE content_hash = ?
               AND content_type = ?
@@ -196,7 +240,8 @@ impl StorageRepository {
                 text_content,
                 file_path,
                 content_hash,
-                created_at
+                created_at,
+                pinned_at
             FROM clipboard_items
             WHERE id = ?
             LIMIT 1
