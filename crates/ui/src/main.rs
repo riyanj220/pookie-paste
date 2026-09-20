@@ -1,5 +1,6 @@
 mod image_thumbnail;
 mod ipc_client;
+mod popup_anchor;
 mod popup_focus;
 mod popup_position;
 mod theme;
@@ -71,8 +72,16 @@ fn main() -> eframe::Result<()> {
         .with_resizable(false)
         .with_decorations(false);
 
-    if let Some([x, y]) = popup_position::popup_position(POPUP_WIDTH, POPUP_HEIGHT, CURSOR_OFFSET) {
-        viewport = viewport.with_position([x, y]);
+    if let Some(resolved) = popup_anchor::resolve_popup_anchor(target_id.as_ref()) {
+        let position = popup_position::popup_position(
+            resolved.anchor,
+            POPUP_WIDTH,
+            POPUP_HEIGHT,
+            CURSOR_OFFSET,
+            resolved.screen,
+        );
+
+        viewport = viewport.with_position(position);
     }
 
     let options = eframe::NativeOptions {
