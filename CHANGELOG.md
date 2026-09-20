@@ -6,11 +6,37 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-Development after the `0.2.0` release will be documented here.
+Development after the `0.2.1` release will be documented here.
 
 ---
 
-## [0.2.0] - TBD
+## [0.2.1] - 2026-09-20
+
+This release introduces clipboard history management features—pinning, per-item deletion, and full history clearing—along with popup UX refinements, custom vector UI rendering, smart window positioning, and modular UI architecture.
+
+### Added
+
+- Clipboard item pinning via card context menu to keep important clips pinned to the top of the history
+- Persistent `pinned_at` tracking in SQLite with database schema migration
+- Pinned items protected from automatic history capacity eviction
+- Preservation of pin state when re-copying existing items
+- Per-item deletion via card context menu, removing database records and deleting associated stored image files
+- Header "Clear" action button to clear all history records and stored image files
+- Dedicated history card context menu with `Pin`/`Unpin` and `Delete` actions
+- Custom vector-drawn 3-dot overflow icon and pinned pushpin indicator using `egui::Painter`, eliminating font glyph dependencies and missing-glyph (`□`) rendering issues across Linux distributions
+- Smart popup window positioning near the active application window on X11
+- IPC protocol extensions for item pin states, `TogglePin`, `DeleteItem`, and `ClearHistory` requests
+
+### Changed
+
+- Separated history card activation from action button clicks to completely eliminate accidental paste triggers
+- Context menu automatically closes on outside clicks, `Escape`, or item selection
+- Header "Clear" button is styled subtly to avoid intrusive destructive styling and only displays when history contains items
+- Refactored `crates/ui/src/main.rs` into modular subcomponents (`app`, `history`, `actions`, `controls`, `header`, `rows`) preserving all behavior and tests
+
+---
+
+## [0.2.0] - 2026-09-18
 
 This release adds image clipboard history and completes the first mixed text/image Pookie Paste experience on X11 and KDE Plasma Wayland.
 
