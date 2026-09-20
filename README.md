@@ -1,28 +1,21 @@
 # Pookie Paste
 
-Pookie Paste is a lightweight clipboard history manager for Linux, inspired by **Windows Clipboard History**.
+Tired of bloated, text-only clipboard managers on Linux with clunky workflows and no direct paste? There you go.
 
-Copy text or images, press `Super+V`, choose an item, and Pookie Paste restores it to the clipboard and pastes it back into the previously active application when direct paste is supported.
+**Pookie Paste** is a lightweight, snappy clipboard manager inspired by **Windows Clipboard History**. Copy text or images, press `Super+V`, choose an item, and Pookie Paste immediately restores it and pastes it directly back into your active application.
 
 ## Demo
-<img width="800" height="800" alt="ezgif-1812d21b3a903346" src="https://github.com/user-attachments/assets/8ec013de-61c6-41b7-9389-97fafcc39d94" />
+<img width="800" height="450" alt="ezgif-1812d21b3a903346" src="https://github.com/user-attachments/assets/edd33c24-8481-478e-b984-64552b240148" />
 
 ## Screenshot
-<img width="1919" height="1041" alt="ss 1" src="https://github.com/user-attachments/assets/70f570af-ecb7-4006-88e0-4b835816b5ac" />
+<img width="1034" height="604" alt="Pookie Paste Screenshot" src="https://github.com/user-attachments/assets/d0265d10-8741-483e-b818-e11edefa699b" />
 
 ## Features
 
-- Text and image clipboard history
-- `Super+V` global shortcut
-- Persistent history across restarts
-- Mixed text/image popup with image thumbnails
-- Keyboard and mouse navigation
-- Direct paste on X11
-- Direct paste on KDE Plasma Wayland
-- Safe clipboard-only fallback when direct paste is unavailable
-- Automatic startup after login
-- User-local installation
-- Update, uninstall, and optional full data purge
+- **Text & Image Support** — Full clipboard history for both rich text and images with instant thumbnail previews.
+- **Direct Paste** — Pastes directly into your target application on X11 and KDE Plasma Wayland with zero extra clicks.
+- **`Super+V` Shortcut** — Snappy, keyboard-friendly popup positioned right near your active window.
+- **Pin & Manage** — Pin favorite clips to the top, remove individual items, or clear history effortlessly.
 
 ## Platform Support
 
