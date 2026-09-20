@@ -156,6 +156,13 @@ enum MenuActionKind {
 enum UiActionOutcome {
     PinToggled { id: String, is_pinned: bool },
     Deleted { id: String },
+    Cleared { count: u64 },
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct HeaderResponse {
+    close_clicked: bool,
+    clear_clicked: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -623,6 +630,34 @@ impl PookieApp {
         self.action_receiver = Some(receiver);
     }
 
+    fn start_clear_history(&mut self, ctx: &egui::Context) {
+        if self.action_in_progress {
+            return;
+        }
+
+        self.action_in_progress = true;
+
+        self.active_menu = None;
+
+        let (sender, receiver) = oneshot::channel();
+
+        let repaint_context = ctx.clone();
+
+        std::thread::spawn(move || {
+            let runtime = tokio::runtime::Runtime::new().expect("failed to create action runtime");
+
+            let result = runtime
+                .block_on(ipc_client::clear_history())
+                .map(|count| UiActionOutcome::Cleared { count });
+
+            if sender.send(result).is_ok() {
+                repaint_context.request_repaint();
+            }
+        });
+
+        self.action_receiver = Some(receiver);
+    }
+
     fn poll_action(&mut self, ctx: &egui::Context) {
         let result = match self.action_receiver.as_mut() {
             Some(receiver) => match receiver.try_recv() {
@@ -661,6 +696,18 @@ impl PookieApp {
                         self.selected_index = self.selected_index.map(|s| s.min(items.len() - 1));
                     }
                 }
+            }
+
+            Ok(UiActionOutcome::Cleared { count }) => {
+                tracing::debug!(count, "cleared clipboard history");
+
+                if let HistoryState::Loaded(ref mut items) = self.history {
+                    items.clear();
+                }
+
+                self.selected_index = None;
+                self.image_thumbnails = ImageThumbnailCache::new();
+                self.reload_history(ctx);
             }
 
             Err(error) => {
@@ -714,8 +761,55 @@ fn preview_text(text: &str) -> String {
     preview
 }
 
-fn render_header(ui: &mut egui::Ui, palette: ui_style::UiPalette) -> bool {
-    let mut close_clicked = false;
+fn render_header_clear_button(ui: &mut egui::Ui, palette: ui_style::UiPalette) -> bool {
+    let text = "Clear";
+
+    let font_id = egui::FontId::proportional(ui_style::BODY_TEXT_SIZE - 2.0);
+
+    let galley =
+        ui.painter()
+            .layout_no_wrap(text.to_string(), font_id.clone(), palette.text_secondary);
+
+    let button_size = egui::vec2(galley.size().x + 12.0, 24.0);
+
+    let (rect, response) = ui.allocate_exact_size(button_size, egui::Sense::click());
+
+    let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
+
+    if response.hovered() {
+        let hover_bg = if ui.visuals().dark_mode {
+            egui::Color32::from_white_alpha(20)
+        } else {
+            egui::Color32::from_black_alpha(15)
+        };
+
+        ui.painter()
+            .rect_filled(rect, ui_style::ROW_CORNER_RADIUS, hover_bg);
+    }
+
+    let text_color = if response.hovered() {
+        palette.text_primary
+    } else {
+        palette.text_secondary
+    };
+
+    ui.painter().text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        text,
+        font_id,
+        text_color,
+    );
+
+    response.clicked()
+}
+
+fn render_header(
+    ui: &mut egui::Ui,
+    palette: ui_style::UiPalette,
+    can_clear: bool,
+) -> HeaderResponse {
+    let mut response = HeaderResponse::default();
 
     ui.add_space(5.0);
 
@@ -739,10 +833,20 @@ fn render_header(ui: &mut egui::Ui, palette: ui_style::UiPalette) -> bool {
             )
             .frame(false);
 
-            let response = ui.add_sized([28.0, 28.0], close_button);
+            let close_res = ui
+                .add_sized([28.0, 28.0], close_button)
+                .on_hover_cursor(egui::CursorIcon::PointingHand);
 
-            if response.clicked() {
-                close_clicked = true;
+            if close_res.clicked() {
+                response.close_clicked = true;
+            }
+
+            if can_clear {
+                ui.add_space(6.0);
+
+                if render_header_clear_button(ui, palette) {
+                    response.clear_clicked = true;
+                }
             }
         });
     });
@@ -760,7 +864,7 @@ fn render_header(ui: &mut egui::Ui, palette: ui_style::UiPalette) -> bool {
 
     ui.add_space(5.0);
 
-    close_clicked
+    response
 }
 
 fn paint_row_background(
@@ -1261,10 +1365,21 @@ impl eframe::App for PookieApp {
             AppTheme::Light
         });
 
-        if render_header(ui, palette) {
+        let has_items = match &self.history {
+            HistoryState::Loaded(items) => !items.is_empty(),
+            _ => false,
+        };
+
+        let header_response = render_header(ui, palette, has_items && !self.action_in_progress);
+
+        if header_response.close_clicked {
             ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
 
             return;
+        }
+
+        if header_response.clear_clicked {
+            self.start_clear_history(ui.ctx());
         }
 
         if let Some(message) = &self.status_message {
@@ -1671,5 +1786,21 @@ mod tests {
         assert_eq!(menu.item_id, "test-item");
 
         assert!(menu.is_pinned);
+    }
+
+    #[test]
+    fn header_response_default_has_no_clicks() {
+        let response = HeaderResponse::default();
+
+        assert!(!response.close_clicked);
+
+        assert!(!response.clear_clicked);
+    }
+
+    #[test]
+    fn ui_action_outcome_cleared_stores_count() {
+        let outcome = UiActionOutcome::Cleared { count: 42 };
+
+        assert_eq!(outcome, UiActionOutcome::Cleared { count: 42 });
     }
 }

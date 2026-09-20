@@ -104,7 +104,6 @@ pub async fn delete_item(id: String) -> Result<bool, String> {
     }
 }
 
-#[allow(dead_code)]
 pub async fn clear_history() -> Result<u64, String> {
     let mut client = connect()
         .await
