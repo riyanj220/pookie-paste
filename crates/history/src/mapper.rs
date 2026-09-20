@@ -20,6 +20,8 @@ pub fn to_stored_text_item(
         content_hash: hash,
 
         created_at: created_at.to_rfc3339(),
+
+        pinned_at: None,
     }
 }
 
@@ -41,5 +43,7 @@ pub fn to_stored_image_item(
         content_hash: hash,
 
         created_at: created_at.to_rfc3339(),
+
+        pinned_at: None,
     }
 }

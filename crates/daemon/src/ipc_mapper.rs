@@ -121,6 +121,8 @@ mod tests {
             content_hash: "hash".to_string(),
 
             created_at: "2026-09-17T10:00:00Z".to_string(),
+
+            pinned_at: None,
         };
 
         let mapped = to_history_item(item);
@@ -149,6 +151,8 @@ mod tests {
             content_hash: "image-hash".to_string(),
 
             created_at: "2026-09-17T10:00:00Z".to_string(),
+
+            pinned_at: None,
         };
 
         let mapped = to_history_item(item);
@@ -177,6 +181,8 @@ mod tests {
             content_hash: "image-hash".to_string(),
 
             created_at: "2026-09-17T10:00:00Z".to_string(),
+
+            pinned_at: None,
         };
 
         let mapped = to_history_item(item);
@@ -204,6 +210,8 @@ mod tests {
             content_hash: "image-hash".to_string(),
 
             created_at: "2026-09-17T10:00:00Z".to_string(),
+
+            pinned_at: None,
         };
 
         let mapped = to_history_item(item);

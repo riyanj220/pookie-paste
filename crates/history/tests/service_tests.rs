@@ -116,6 +116,7 @@ async fn removes_multiple_excess_items() {
             file_path: None,
             content_hash: format!("hash-{index}"),
             created_at: (base_time + chrono::Duration::seconds(index)).to_rfc3339(),
+            pinned_at: None,
         };
 
         repository.insert(&item).await.expect("insert failed");

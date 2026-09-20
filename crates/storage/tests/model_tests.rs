@@ -14,7 +14,10 @@ fn creates_storage_model() {
         content_hash: "abc".to_string(),
 
         created_at: "2026-01-01".to_string(),
+
+        pinned_at: None,
     };
 
     assert_eq!(item.text_content.unwrap(), "Hello");
+    assert_eq!(item.pinned_at, None);
 }

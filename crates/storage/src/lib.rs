@@ -11,3 +11,5 @@ pub use image_store::{ImageStore, ImageStoreError};
 pub use model::StoredClipboardItem;
 
 pub use repository::StorageRepository;
+
+pub use migrations::run_migrations;
