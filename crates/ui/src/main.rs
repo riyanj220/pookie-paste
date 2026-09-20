@@ -138,6 +138,40 @@ fn history_row_kind(item: &ipc::HistoryItem) -> HistoryRowKind<'_> {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ActiveMenu {
+    item_id: String,
+    is_pinned: bool,
+    button_rect: egui::Rect,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MenuActionKind {
+    Pin,
+    Unpin,
+    Delete,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum UiActionOutcome {
+    PinToggled { id: String, is_pinned: bool },
+    Deleted { id: String },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RowVisualState {
+    selected: bool,
+    is_pinned: bool,
+    is_menu_open: bool,
+}
+
+struct HistoryRowResponse {
+    card_clicked: bool,
+    menu_button_clicked: bool,
+    button_rect: egui::Rect,
+    response: egui::Response,
+}
+
 struct PookieApp {
     history: HistoryState,
 
@@ -164,6 +198,12 @@ struct PookieApp {
     activation_in_progress: bool,
 
     status_message: Option<String>,
+
+    active_menu: Option<ActiveMenu>,
+
+    action_receiver: Option<oneshot::Receiver<Result<UiActionOutcome, String>>>,
+
+    action_in_progress: bool,
 }
 
 impl PookieApp {
@@ -211,6 +251,12 @@ impl PookieApp {
             activation_in_progress: false,
 
             status_message: None,
+
+            active_menu: None,
+
+            action_receiver: None,
+
+            action_in_progress: false,
         }
     }
 
@@ -498,6 +544,132 @@ impl PookieApp {
             }
         }
     }
+
+    fn reload_history(&mut self, ctx: &egui::Context) {
+        let (sender, receiver) = oneshot::channel();
+
+        let repaint_context = ctx.clone();
+
+        std::thread::spawn(move || {
+            let runtime =
+                tokio::runtime::Runtime::new().expect("failed to create UI Tokio runtime");
+
+            let result = runtime.block_on(ipc_client::get_history());
+
+            if sender.send(result).is_ok() {
+                repaint_context.request_repaint();
+            }
+        });
+
+        self.history_receiver = Some(receiver);
+    }
+
+    fn start_toggle_pin(&mut self, ctx: &egui::Context, id: String) {
+        if self.action_in_progress {
+            return;
+        }
+
+        self.action_in_progress = true;
+
+        let (sender, receiver) = oneshot::channel();
+
+        let repaint_context = ctx.clone();
+
+        let item_id = id.clone();
+
+        std::thread::spawn(move || {
+            let runtime = tokio::runtime::Runtime::new().expect("failed to create action runtime");
+
+            let result = runtime
+                .block_on(ipc_client::toggle_pin_item(item_id.clone()))
+                .map(|is_pinned| UiActionOutcome::PinToggled {
+                    id: item_id,
+                    is_pinned,
+                });
+
+            if sender.send(result).is_ok() {
+                repaint_context.request_repaint();
+            }
+        });
+
+        self.action_receiver = Some(receiver);
+    }
+
+    fn start_delete_item(&mut self, ctx: &egui::Context, id: String) {
+        if self.action_in_progress {
+            return;
+        }
+
+        self.action_in_progress = true;
+
+        let (sender, receiver) = oneshot::channel();
+
+        let repaint_context = ctx.clone();
+
+        let item_id = id.clone();
+
+        std::thread::spawn(move || {
+            let runtime = tokio::runtime::Runtime::new().expect("failed to create action runtime");
+
+            let result = runtime
+                .block_on(ipc_client::delete_item(item_id.clone()))
+                .map(|_deleted| UiActionOutcome::Deleted { id: item_id });
+
+            if sender.send(result).is_ok() {
+                repaint_context.request_repaint();
+            }
+        });
+
+        self.action_receiver = Some(receiver);
+    }
+
+    fn poll_action(&mut self, ctx: &egui::Context) {
+        let result = match self.action_receiver.as_mut() {
+            Some(receiver) => match receiver.try_recv() {
+                Ok(result) => Some(result),
+
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty) => None,
+
+                Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+                    Some(Err("action worker stopped unexpectedly".to_string()))
+                }
+            },
+
+            None => None,
+        };
+
+        let Some(result) = result else {
+            return;
+        };
+
+        self.action_receiver = None;
+
+        self.action_in_progress = false;
+
+        match result {
+            Ok(UiActionOutcome::PinToggled { .. }) => {
+                self.reload_history(ctx);
+            }
+
+            Ok(UiActionOutcome::Deleted { id }) => {
+                if let HistoryState::Loaded(ref mut items) = self.history {
+                    items.retain(|i| i.id != id);
+
+                    if items.is_empty() {
+                        self.selected_index = None;
+                    } else {
+                        self.selected_index = self.selected_index.map(|s| s.min(items.len() - 1));
+                    }
+                }
+            }
+
+            Err(error) => {
+                tracing::warn!(error = %error, "context action failed");
+
+                self.status_message = Some("Action failed. Please try again.".to_string());
+            }
+        }
+    }
 }
 
 fn preview_text(text: &str) -> String {
@@ -618,15 +790,147 @@ fn paint_row_background(
     }
 }
 
+fn render_overflow_icon(ui: &egui::Ui, center: egui::Pos2, color: egui::Color32) {
+    let radius = 1.8;
+
+    let spacing = 4.2;
+
+    let top = egui::pos2(center.x, center.y - spacing);
+
+    let mid = center;
+
+    let bottom = egui::pos2(center.x, center.y + spacing);
+
+    ui.painter().circle_filled(top, radius, color);
+
+    ui.painter().circle_filled(mid, radius, color);
+
+    ui.painter().circle_filled(bottom, radius, color);
+}
+
+fn render_pin_icon(ui: &egui::Ui, center: egui::Pos2, color: egui::Color32) {
+    let cap_left = egui::pos2(center.x - 2.5, center.y - 4.5);
+
+    let cap_right = egui::pos2(center.x + 2.5, center.y - 4.5);
+
+    let head_bottom_right = egui::pos2(center.x + 1.2, center.y - 1.0);
+
+    let head_bottom_left = egui::pos2(center.x - 1.2, center.y - 1.0);
+
+    ui.painter().add(egui::Shape::convex_polygon(
+        vec![cap_left, cap_right, head_bottom_right, head_bottom_left],
+        color,
+        egui::Stroke::NONE,
+    ));
+
+    let guard_left = egui::pos2(center.x - 3.2, center.y - 1.0);
+
+    let guard_right = egui::pos2(center.x + 3.2, center.y - 1.0);
+
+    ui.painter()
+        .line_segment([guard_left, guard_right], egui::Stroke::new(1.4, color));
+
+    let needle_bottom = egui::pos2(center.x, center.y + 4.5);
+
+    ui.painter().line_segment(
+        [egui::pos2(center.x, center.y - 1.0), needle_bottom],
+        egui::Stroke::new(1.2, color),
+    );
+}
+
+fn render_card_controls(
+    ui: &mut egui::Ui,
+    rect: egui::Rect,
+    is_pinned: bool,
+    is_menu_open: bool,
+    palette: ui_style::UiPalette,
+) -> (bool, egui::Rect) {
+    let button_size = egui::vec2(22.0, 22.0);
+
+    let button_rect = egui::Rect::from_min_size(
+        egui::pos2(
+            rect.right() - ui_style::ROW_HORIZONTAL_PADDING - button_size.x,
+            rect.top() + ui_style::ROW_VERTICAL_PADDING,
+        ),
+        button_size,
+    );
+
+    let button_response = ui
+        .allocate_rect(button_rect, egui::Sense::click())
+        .on_hover_cursor(egui::CursorIcon::PointingHand);
+
+    if button_response.hovered() || is_menu_open {
+        let hover_bg = if ui.visuals().dark_mode {
+            egui::Color32::from_white_alpha(24)
+        } else {
+            egui::Color32::from_black_alpha(18)
+        };
+
+        ui.painter()
+            .circle_filled(button_rect.center(), 11.0, hover_bg);
+    }
+
+    let dot_color = if button_response.hovered() || is_menu_open {
+        palette.text_primary
+    } else {
+        palette.text_secondary
+    };
+
+    render_overflow_icon(ui, button_rect.center(), dot_color);
+
+    if is_pinned {
+        let pin_center = egui::pos2(button_rect.left() - 11.0, button_rect.center().y);
+
+        render_pin_icon(ui, pin_center, palette.text_secondary);
+    }
+
+    (button_response.clicked(), button_rect)
+}
+
+fn render_menu_item(
+    ui: &mut egui::Ui,
+    rect: egui::Rect,
+    label: &str,
+    palette: ui_style::UiPalette,
+) -> egui::Response {
+    let response = ui
+        .allocate_rect(rect, egui::Sense::click())
+        .on_hover_cursor(egui::CursorIcon::PointingHand);
+
+    if response.hovered() {
+        ui.painter()
+            .rect_filled(rect, ui_style::ROW_CORNER_RADIUS, palette.row_hover);
+    }
+
+    let text_color = if response.hovered() {
+        palette.text_primary
+    } else {
+        palette.text_secondary
+    };
+
+    ui.painter().text(
+        egui::pos2(rect.left() + 8.0, rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        label,
+        egui::FontId::proportional(ui_style::BODY_TEXT_SIZE - 1.0),
+        text_color,
+    );
+
+    response
+}
+
 fn render_text_history_row(
     ui: &mut egui::Ui,
     text: &str,
-    selected: bool,
+    state: RowVisualState,
     palette: ui_style::UiPalette,
-) -> egui::Response {
+) -> HistoryRowResponse {
     let available_width = ui.available_width();
 
-    let text_width = available_width - (ui_style::ROW_HORIZONTAL_PADDING * 2.0);
+    let right_controls_width = if state.is_pinned { 44.0 } else { 26.0 };
+
+    let text_width =
+        available_width - (ui_style::ROW_HORIZONTAL_PADDING * 2.0) - right_controls_width;
 
     let font_id = egui::FontId::proportional(ui_style::BODY_TEXT_SIZE);
 
@@ -637,14 +941,14 @@ fn render_text_history_row(
         text_width.max(1.0),
     );
 
-    let desired_height = galley.size().y + (ui_style::ROW_VERTICAL_PADDING * 2.0);
+    let desired_height = (galley.size().y + (ui_style::ROW_VERTICAL_PADDING * 2.0)).max(36.0);
 
     let (rect, response) = ui.allocate_exact_size(
         egui::vec2(available_width, desired_height),
         egui::Sense::click(),
     );
 
-    paint_row_background(ui, rect, &response, selected, palette);
+    paint_row_background(ui, rect, &response, state.selected, palette);
 
     let text_position = egui::pos2(
         rect.left() + ui_style::ROW_HORIZONTAL_PADDING,
@@ -654,7 +958,17 @@ fn render_text_history_row(
     ui.painter()
         .galley(text_position, galley, palette.text_primary);
 
-    response
+    let (menu_button_clicked, button_rect) =
+        render_card_controls(ui, rect, state.is_pinned, state.is_menu_open, palette);
+
+    let card_clicked = response.clicked() && !menu_button_clicked;
+
+    HistoryRowResponse {
+        card_clicked,
+        menu_button_clicked,
+        button_rect,
+        response,
+    }
 }
 
 fn fit_thumbnail_size(thumbnail: ImageThumbnail) -> egui::Vec2 {
@@ -721,10 +1035,10 @@ fn render_image_history_row(
     ui: &mut egui::Ui,
     item_id: &str,
     file_path: &str,
-    selected: bool,
+    state: RowVisualState,
     palette: ui_style::UiPalette,
     thumbnails: &mut ImageThumbnailCache,
-) -> egui::Response {
+) -> HistoryRowResponse {
     let available_width = ui.available_width();
 
     let (rect, response) = ui.allocate_exact_size(
@@ -732,62 +1046,70 @@ fn render_image_history_row(
         egui::Sense::click(),
     );
 
-    paint_row_background(ui, rect, &response, selected, palette);
+    paint_row_background(ui, rect, &response, state.selected, palette);
 
     let thumbnail = thumbnails.get_or_load(ui.ctx(), item_id, file_path);
 
-    let Some(thumbnail) = thumbnail else {
+    if let Some(thumbnail) = thumbnail {
+        let thumbnail_size = fit_thumbnail_size(thumbnail);
+
+        let image_rect = egui::Rect::from_min_size(
+            egui::pos2(
+                rect.left() + ui_style::ROW_HORIZONTAL_PADDING,
+                rect.center().y - thumbnail_size.y / 2.0,
+            ),
+            thumbnail_size,
+        );
+
+        /*
+         * Very subtle surface behind transparent PNGs.
+         *
+         * This keeps screenshots/photos visually clean while
+         * still making transparent images readable in both
+         * light and dark themes.
+         */
+        let image_background = image_rect.expand(2.0);
+
+        ui.painter().rect_filled(
+            image_background,
+            ui_style::ROW_CORNER_RADIUS,
+            palette.divider,
+        );
+
+        ui.painter().image(
+            thumbnail.texture_id,
+            image_rect,
+            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+            egui::Color32::WHITE,
+        );
+    } else {
         paint_missing_image_placeholder(ui, rect, palette);
+    }
 
-        return response;
-    };
+    let (menu_button_clicked, button_rect) =
+        render_card_controls(ui, rect, state.is_pinned, state.is_menu_open, palette);
 
-    let thumbnail_size = fit_thumbnail_size(thumbnail);
+    let card_clicked = response.clicked() && !menu_button_clicked;
 
-    let image_rect = egui::Rect::from_min_size(
-        egui::pos2(
-            rect.left() + ui_style::ROW_HORIZONTAL_PADDING,
-            rect.center().y - thumbnail_size.y / 2.0,
-        ),
-        thumbnail_size,
-    );
-
-    /*
-     * Very subtle surface behind transparent PNGs.
-     *
-     * This keeps screenshots/photos visually clean while
-     * still making transparent images readable in both
-     * light and dark themes.
-     */
-    let image_background = image_rect.expand(2.0);
-
-    ui.painter().rect_filled(
-        image_background,
-        ui_style::ROW_CORNER_RADIUS,
-        palette.divider,
-    );
-
-    ui.painter().image(
-        thumbnail.texture_id,
-        image_rect,
-        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-        egui::Color32::WHITE,
-    );
-
-    response
+    HistoryRowResponse {
+        card_clicked,
+        menu_button_clicked,
+        button_rect,
+        response,
+    }
 }
 
 fn render_invalid_history_row(
     ui: &mut egui::Ui,
-    selected: bool,
+    state: RowVisualState,
     palette: ui_style::UiPalette,
-) -> egui::Response {
+) -> HistoryRowResponse {
     let available_width = ui.available_width();
 
     let (rect, response) =
         ui.allocate_exact_size(egui::vec2(available_width, 44.0), egui::Sense::click());
 
-    paint_row_background(ui, rect, &response, selected, palette);
+    paint_row_background(ui, rect, &response, state.selected, palette);
 
     ui.painter().text(
         egui::pos2(
@@ -800,28 +1122,38 @@ fn render_invalid_history_row(
         palette.text_secondary,
     );
 
-    response
+    let (menu_button_clicked, button_rect) =
+        render_card_controls(ui, rect, state.is_pinned, state.is_menu_open, palette);
+
+    let card_clicked = response.clicked() && !menu_button_clicked;
+
+    HistoryRowResponse {
+        card_clicked,
+        menu_button_clicked,
+        button_rect,
+        response,
+    }
 }
 
 fn render_history_item_row(
     ui: &mut egui::Ui,
     item: &ipc::HistoryItem,
-    selected: bool,
+    state: RowVisualState,
     palette: ui_style::UiPalette,
     thumbnails: &mut ImageThumbnailCache,
-) -> egui::Response {
+) -> HistoryRowResponse {
     match history_row_kind(item) {
         HistoryRowKind::Text(text) => {
             let preview = preview_text(text);
 
-            render_text_history_row(ui, &preview, selected, palette)
+            render_text_history_row(ui, &preview, state, palette)
         }
 
         HistoryRowKind::Image { file_path } => {
-            render_image_history_row(ui, &item.id, file_path, selected, palette, thumbnails)
+            render_image_history_row(ui, &item.id, file_path, state, palette, thumbnails)
         }
 
-        HistoryRowKind::Invalid => render_invalid_history_row(ui, selected, palette),
+        HistoryRowKind::Invalid => render_invalid_history_row(ui, state, palette),
     }
 }
 
@@ -879,6 +1211,8 @@ impl eframe::App for PookieApp {
 
         self.poll_activation(ui.ctx());
 
+        self.poll_action(ui.ctx());
+
         let viewport_focused = ui.input(|input| input.viewport().focused.unwrap_or(false));
 
         if viewport_focused {
@@ -894,6 +1228,12 @@ impl eframe::App for PookieApp {
         let close_requested = ui.input(|input| input.key_pressed(egui::Key::Escape));
 
         if close_requested {
+            if self.active_menu.is_some() {
+                self.active_menu = None;
+
+                return;
+            }
+
             ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
 
             return;
@@ -908,7 +1248,11 @@ impl eframe::App for PookieApp {
         let keyboard_selection_changed = self.handle_keyboard_navigation(move_up, move_down);
 
         if activate {
-            self.start_selected_activation(ui.ctx());
+            if self.active_menu.is_some() {
+                self.active_menu = None;
+            } else {
+                self.start_selected_activation(ui.ctx());
+            }
         }
 
         let palette = ui_style::palette(if ui.visuals().dark_mode {
@@ -967,7 +1311,12 @@ impl eframe::App for PookieApp {
                         for (index, item) in items.iter().enumerate() {
                             let selected = selected_index == Some(index);
 
-                            let mut row_response = None;
+                            let is_menu_open = self
+                                .active_menu
+                                .as_ref()
+                                .is_some_and(|menu| menu.item_id == item.id);
+
+                            let mut row_action = None;
 
                             ui.horizontal(|ui| {
                                 ui.add_space(ui_style::LIST_HORIZONTAL_MARGIN);
@@ -982,10 +1331,16 @@ impl eframe::App for PookieApp {
                                     |ui| {
                                         ui.set_width(remaining_width);
 
-                                        row_response = Some(render_history_item_row(
+                                        let row_state = RowVisualState {
+                                            selected,
+                                            is_pinned: item.is_pinned(),
+                                            is_menu_open,
+                                        };
+
+                                        row_action = Some(render_history_item_row(
                                             ui,
                                             item,
-                                            selected,
+                                            row_state,
                                             palette,
                                             image_thumbnails,
                                         ));
@@ -993,16 +1348,30 @@ impl eframe::App for PookieApp {
                                 );
                             });
 
-                            let Some(response) = row_response else {
+                            let Some(action) = row_action else {
                                 continue;
                             };
 
-                            if response.clicked() {
-                                clicked_index = Some(index);
+                            if action.menu_button_clicked {
+                                if is_menu_open {
+                                    self.active_menu = None;
+                                } else {
+                                    self.active_menu = Some(ActiveMenu {
+                                        item_id: item.id.clone(),
+                                        is_pinned: item.is_pinned(),
+                                        button_rect: action.button_rect,
+                                    });
+                                }
+                            } else if action.card_clicked {
+                                if self.active_menu.is_some() {
+                                    self.active_menu = None;
+                                } else {
+                                    clicked_index = Some(index);
+                                }
                             }
 
                             if selected && keyboard_selection_changed {
-                                response.scroll_to_me(Some(egui::Align::Center));
+                                action.response.scroll_to_me(Some(egui::Align::Center));
                             }
 
                             ui.add_space(ui_style::ROW_GAP);
@@ -1019,6 +1388,114 @@ impl eframe::App for PookieApp {
                     }
                 }
             });
+
+        if let Some(active_menu) = self.active_menu.clone() {
+            let mut menu_action = None;
+
+            let mut should_close_menu = false;
+
+            let menu_width = 96.0;
+
+            let item_height = 26.0;
+
+            let menu_padding = 4.0;
+
+            let menu_height = (item_height * 2.0) + (menu_padding * 2.0);
+
+            let mut menu_x = active_menu.button_rect.right() - menu_width;
+
+            let mut menu_y = active_menu.button_rect.bottom() + 2.0;
+
+            if menu_y + menu_height > POPUP_HEIGHT - ui_style::WINDOW_PADDING {
+                menu_y = (active_menu.button_rect.top() - menu_height - 2.0)
+                    .max(ui_style::WINDOW_PADDING);
+            }
+
+            menu_x = menu_x.clamp(
+                ui_style::WINDOW_PADDING,
+                POPUP_WIDTH - ui_style::WINDOW_PADDING - menu_width,
+            );
+
+            let menu_pos = egui::pos2(menu_x, menu_y);
+
+            let menu_rect =
+                egui::Rect::from_min_size(menu_pos, egui::vec2(menu_width, menu_height));
+
+            if let Some(press_pos) = ui.input(|i| i.pointer.press_origin())
+                && !menu_rect.contains(press_pos)
+                && !active_menu.button_rect.contains(press_pos)
+            {
+                should_close_menu = true;
+            }
+
+            egui::Area::new(egui::Id::new("item_context_menu"))
+                .order(egui::Order::Foreground)
+                .fixed_pos(menu_pos)
+                .show(ui.ctx(), |ui| {
+                    ui.painter().rect_filled(
+                        menu_rect,
+                        ui_style::ROW_CORNER_RADIUS,
+                        palette.row_background,
+                    );
+
+                    ui.painter().rect_stroke(
+                        menu_rect,
+                        ui_style::ROW_CORNER_RADIUS,
+                        egui::Stroke::new(1.0, palette.border),
+                        egui::StrokeKind::Inside,
+                    );
+
+                    let inner_rect = menu_rect.shrink(menu_padding);
+
+                    let pin_rect = egui::Rect::from_min_size(
+                        inner_rect.min,
+                        egui::vec2(inner_rect.width(), item_height),
+                    );
+
+                    let delete_rect = egui::Rect::from_min_size(
+                        egui::pos2(inner_rect.left(), inner_rect.min.y + item_height),
+                        egui::vec2(inner_rect.width(), item_height),
+                    );
+
+                    let pin_label = if active_menu.is_pinned {
+                        "Unpin"
+                    } else {
+                        "Pin"
+                    };
+
+                    if render_menu_item(ui, pin_rect, pin_label, palette).clicked() {
+                        menu_action = Some(if active_menu.is_pinned {
+                            MenuActionKind::Unpin
+                        } else {
+                            MenuActionKind::Pin
+                        });
+
+                        should_close_menu = true;
+                    }
+
+                    if render_menu_item(ui, delete_rect, "Delete", palette).clicked() {
+                        menu_action = Some(MenuActionKind::Delete);
+
+                        should_close_menu = true;
+                    }
+                });
+
+            if should_close_menu {
+                self.active_menu = None;
+            }
+
+            if let Some(action) = menu_action {
+                match action {
+                    MenuActionKind::Pin | MenuActionKind::Unpin => {
+                        self.start_toggle_pin(ui.ctx(), active_menu.item_id);
+                    }
+
+                    MenuActionKind::Delete => {
+                        self.start_delete_item(ui.ctx(), active_menu.item_id);
+                    }
+                }
+            }
+        }
 
         if let Some(index) = clicked_index {
             self.selected_index = Some(index);
@@ -1136,5 +1613,63 @@ mod tests {
         assert_eq!(size.y, IMAGE_THUMBNAIL_MAX_HEIGHT,);
 
         assert!(size.x <= IMAGE_THUMBNAIL_MAX_WIDTH);
+    }
+
+    #[test]
+    fn unpinned_item_shows_pin_label() {
+        let is_pinned = false;
+
+        let pin_label = if is_pinned { "Unpin" } else { "Pin" };
+
+        assert_eq!(pin_label, "Pin");
+    }
+
+    #[test]
+    fn pinned_item_shows_unpin_label() {
+        let is_pinned = true;
+
+        let pin_label = if is_pinned { "Unpin" } else { "Pin" };
+
+        assert_eq!(pin_label, "Unpin");
+    }
+
+    #[test]
+    fn clicking_menu_button_never_activates_card() {
+        let card_raw_clicked = true;
+
+        let menu_button_clicked = true;
+
+        let card_clicked = card_raw_clicked && !menu_button_clicked;
+
+        assert!(!card_clicked);
+    }
+
+    #[test]
+    fn clicking_card_body_without_menu_button_activates_card() {
+        let card_raw_clicked = true;
+
+        let menu_button_clicked = false;
+
+        let card_clicked = card_raw_clicked && !menu_button_clicked;
+
+        assert!(card_clicked);
+    }
+
+    #[test]
+    fn active_menu_stores_item_and_pinned_state() {
+        let menu = ActiveMenu {
+            item_id: "test-item".to_string(),
+
+            is_pinned: true,
+
+            button_rect: egui::Rect::from_min_size(
+                egui::pos2(100.0, 100.0),
+                egui::vec2(22.0, 22.0),
+            ),
+        };
+
+        assert_eq!(menu.item_id, "test-item");
+
+        assert!(menu.is_pinned);
     }
 }

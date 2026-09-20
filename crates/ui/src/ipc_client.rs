@@ -66,7 +66,6 @@ pub async fn activate_item(
     }
 }
 
-#[allow(dead_code)]
 pub async fn toggle_pin_item(id: String) -> Result<bool, String> {
     let mut client = connect()
         .await
@@ -86,7 +85,6 @@ pub async fn toggle_pin_item(id: String) -> Result<bool, String> {
     }
 }
 
-#[allow(dead_code)]
 pub async fn delete_item(id: String) -> Result<bool, String> {
     let mut client = connect()
         .await
