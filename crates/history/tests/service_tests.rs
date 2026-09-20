@@ -734,3 +734,286 @@ async fn promote_returns_false_for_missing_history_item() {
 
     assert!(items.is_empty());
 }
+
+#[tokio::test]
+async fn pins_and_unpins_history_item() {
+    let database = Database::new("sqlite::memory:")
+        .await
+        .expect("database initialization failed");
+
+    let repository = StorageRepository::new(&database);
+    let service = ClipboardHistoryService::new(repository, HistoryConfig { max_items: 30 });
+
+    let id = uuid::Uuid::new_v4();
+    let item = ClipboardItem {
+        id,
+        content: ClipboardContent::Text("Important note".to_string()),
+        hash: "hash-pin".to_string(),
+        created_at: Utc::now(),
+    };
+
+    service.save(item).await.expect("save failed");
+    let item_id = id.to_string();
+
+    let pinned = service.pin(&item_id).await.expect("pin failed");
+    assert!(pinned);
+
+    let fetched = service
+        .get_by_id(&item_id)
+        .await
+        .expect("get failed")
+        .unwrap();
+    assert!(fetched.pinned_at.is_some());
+
+    let unpinned = service.unpin(&item_id).await.expect("unpin failed");
+    assert!(unpinned);
+
+    let fetched = service
+        .get_by_id(&item_id)
+        .await
+        .expect("get failed")
+        .unwrap();
+    assert_eq!(fetched.pinned_at, None);
+
+    // Test toggle_pin
+    let toggled_on = service
+        .toggle_pin(&item_id)
+        .await
+        .expect("toggle pin failed");
+    assert_eq!(toggled_on, Some(true));
+
+    let fetched = service
+        .get_by_id(&item_id)
+        .await
+        .expect("get failed")
+        .unwrap();
+    assert!(fetched.pinned_at.is_some());
+
+    let toggled_off = service
+        .toggle_pin(&item_id)
+        .await
+        .expect("toggle unpin failed");
+    assert_eq!(toggled_off, Some(false));
+
+    let fetched = service
+        .get_by_id(&item_id)
+        .await
+        .expect("get failed")
+        .unwrap();
+    assert_eq!(fetched.pinned_at, None);
+
+    let missing = service
+        .toggle_pin("non-existent")
+        .await
+        .expect("toggle missing failed");
+    assert_eq!(missing, None);
+}
+
+#[tokio::test]
+async fn preserves_pinned_state_on_duplicate_text_save() {
+    let database = Database::new("sqlite::memory:")
+        .await
+        .expect("database initialization failed");
+
+    let repository = StorageRepository::new(&database);
+    let service = ClipboardHistoryService::new(repository, HistoryConfig { max_items: 30 });
+
+    let id_a = uuid::Uuid::new_v4();
+    let item_a = ClipboardItem {
+        id: id_a,
+        content: ClipboardContent::Text("My Password".to_string()),
+        hash: "same-hash".to_string(),
+        created_at: Utc::now(),
+    };
+
+    service.save(item_a).await.expect("save A failed");
+    service.pin(&id_a.to_string()).await.expect("pin failed");
+
+    let item_a_before = service.get_by_id(&id_a.to_string()).await.unwrap().unwrap();
+    let original_pinned_at = item_a_before.pinned_at.clone();
+    assert!(original_pinned_at.is_some());
+
+    // User copies the exact same text again later
+    let id_b = uuid::Uuid::new_v4();
+    let item_b = ClipboardItem {
+        id: id_b,
+        content: ClipboardContent::Text("My Password".to_string()),
+        hash: "same-hash".to_string(),
+        created_at: Utc::now() + chrono::Duration::seconds(5),
+    };
+
+    service.save(item_b).await.expect("save B failed");
+
+    let items = service.get_all().await.expect("get_all failed");
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].id, id_b.to_string());
+    assert_eq!(items[0].pinned_at, original_pinned_at);
+}
+
+#[tokio::test]
+async fn preserves_pinned_state_on_duplicate_image_save() {
+    let database = Database::new("sqlite::memory:")
+        .await
+        .expect("database initialization failed");
+
+    let test_dir = std::env::temp_dir().join(format!("pookie-test-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&test_dir).expect("failed creating test dir");
+
+    struct Cleanup(std::path::PathBuf);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let _cleanup = Cleanup(test_dir.clone());
+
+    let image_store = storage::ImageStore::new(test_dir);
+
+    let repository = StorageRepository::new(&database);
+    let service = ClipboardHistoryService::new(repository, HistoryConfig { max_items: 30 })
+        .with_image_store(image_store);
+
+    let png_bytes = vec![137, 80, 78, 71, 13, 10, 26, 10]; // PNG header bytes
+    let id_a = uuid::Uuid::new_v4();
+    let item_a = ClipboardItem {
+        id: id_a,
+        content: ClipboardContent::Image(png_bytes.clone()),
+        hash: "same-image-hash".to_string(),
+        created_at: Utc::now(),
+    };
+
+    service.save(item_a).await.expect("save image A failed");
+    service.pin(&id_a.to_string()).await.expect("pin failed");
+
+    let item_a_before = service.get_by_id(&id_a.to_string()).await.unwrap().unwrap();
+    let original_pinned_at = item_a_before.pinned_at.clone();
+    assert!(original_pinned_at.is_some());
+
+    // Recopy same image
+    let id_b = uuid::Uuid::new_v4();
+    let item_b = ClipboardItem {
+        id: id_b,
+        content: ClipboardContent::Image(png_bytes),
+        hash: "same-image-hash".to_string(),
+        created_at: Utc::now() + chrono::Duration::seconds(5),
+    };
+
+    service.save(item_b).await.expect("save image B failed");
+
+    let items = service.get_all().await.expect("get_all failed");
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].pinned_at, original_pinned_at);
+}
+
+#[tokio::test]
+async fn pinned_items_are_never_evicted_when_max_limit_is_reached() {
+    let database = Database::new("sqlite::memory:")
+        .await
+        .expect("database initialization failed");
+
+    let repository = StorageRepository::new(&database);
+    let service = ClipboardHistoryService::new(repository, HistoryConfig { max_items: 3 });
+
+    let base_time = Utc::now();
+
+    // 1. Create and pin item A (oldest)
+    let id_a = uuid::Uuid::new_v4();
+    let item_a = ClipboardItem {
+        id: id_a,
+        content: ClipboardContent::Text("Item A (Pinned)".to_string()),
+        hash: "hash-a".to_string(),
+        created_at: base_time,
+    };
+    service.save(item_a).await.expect("save A failed");
+    service.pin(&id_a.to_string()).await.expect("pin A failed");
+
+    // 2. Create item B and C (unpinned)
+    let id_b = uuid::Uuid::new_v4();
+    let item_b = ClipboardItem {
+        id: id_b,
+        content: ClipboardContent::Text("Item B (Unpinned)".to_string()),
+        hash: "hash-b".to_string(),
+        created_at: base_time + chrono::Duration::seconds(1),
+    };
+    service.save(item_b).await.expect("save B failed");
+
+    let id_c = uuid::Uuid::new_v4();
+    let item_c = ClipboardItem {
+        id: id_c,
+        content: ClipboardContent::Text("Item C (Unpinned)".to_string()),
+        hash: "hash-c".to_string(),
+        created_at: base_time + chrono::Duration::seconds(2),
+    };
+    service.save(item_c).await.expect("save C failed");
+
+    // At capacity (3 items: A pinned, B, C)
+    let items = service.get_all().await.expect("get_all failed");
+    assert_eq!(items.len(), 3);
+
+    // 3. Add item D (exceeds limit 3)
+    let id_d = uuid::Uuid::new_v4();
+    let item_d = ClipboardItem {
+        id: id_d,
+        content: ClipboardContent::Text("Item D (Newest)".to_string()),
+        hash: "hash-d".to_string(),
+        created_at: base_time + chrono::Duration::seconds(3),
+    };
+    service.save(item_d).await.expect("save D failed");
+
+    let items = service.get_all().await.expect("get_all failed");
+    assert_eq!(items.len(), 3);
+
+    let ids: Vec<&str> = items.iter().map(|item| item.id.as_str()).collect();
+
+    // Expected: A is pinned (stays!), D is newest unpinned, C is next unpinned.
+    // B was the oldest unpinned item and was evicted!
+    assert!(ids.contains(&id_a.to_string().as_str()));
+    assert!(ids.contains(&id_d.to_string().as_str()));
+    assert!(ids.contains(&id_c.to_string().as_str()));
+    assert!(!ids.contains(&id_b.to_string().as_str()));
+
+    // Verify A remains pinned
+    let item_a_fetched = service.get_by_id(&id_a.to_string()).await.unwrap().unwrap();
+    assert!(item_a_fetched.pinned_at.is_some());
+}
+
+#[tokio::test]
+async fn pin_persists_after_service_restart_simulation() {
+    let database = Database::new("sqlite::memory:")
+        .await
+        .expect("database initialization failed");
+
+    let id = uuid::Uuid::new_v4();
+    let item_id = id.to_string();
+
+    // First service instance
+    {
+        let repository = StorageRepository::new(&database);
+        let service = ClipboardHistoryService::new(repository, HistoryConfig { max_items: 30 });
+
+        let item = ClipboardItem {
+            id,
+            content: ClipboardContent::Text("Persistent pinned item".to_string()),
+            hash: "hash-persist".to_string(),
+            created_at: Utc::now(),
+        };
+
+        service.save(item).await.expect("save failed");
+        service.pin(&item_id).await.expect("pin failed");
+    }
+
+    // Simulate daemon/app restart: instantiate a brand new ClipboardHistoryService connected to same DB
+    {
+        let repository = StorageRepository::new(&database);
+        let restarted_service =
+            ClipboardHistoryService::new(repository, HistoryConfig { max_items: 30 });
+
+        let items = restarted_service
+            .get_all()
+            .await
+            .expect("fetch after restart failed");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].id, item_id);
+        assert!(items[0].pinned_at.is_some());
+    }
+}

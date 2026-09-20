@@ -435,5 +435,8 @@ async fn get_oldest_excludes_pinned_items_for_eviction_safety() {
     let oldest_ids: Vec<&str> = oldest.iter().map(|item| item.id.as_str()).collect();
 
     // Pinned item-1 must NOT be in oldest! Only unpinned items 2 and 3 can be returned
-    assert_eq!(oldest_ids, vec!["item-2-mid-unpinned", "item-3-new-unpinned"]);
+    assert_eq!(
+        oldest_ids,
+        vec!["item-2-mid-unpinned", "item-3-new-unpinned"]
+    );
 }
