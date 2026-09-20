@@ -596,6 +596,111 @@ async fn supports_multiple_requests_on_same_connection() {
 }
 
 #[tokio::test]
+async fn toggles_pin_state_through_ipc() {
+    let app = TestIpcApp::start().await;
+    let service = app.history_service();
+
+    service
+        .save(test_item("Pin test item", "hash-pin-test", 1))
+        .await
+        .expect("save failed");
+
+    let mut client = IpcClient::connect(app.socket_path())
+        .await
+        .expect("connection failed");
+
+    let history = client
+        .send(&IpcRequest::GetHistory)
+        .await
+        .expect("GetHistory failed");
+
+    let item_id = match history {
+        IpcResponse::History { items } => {
+            assert_eq!(items.len(), 1);
+            assert_eq!(items[0].pinned_at, None);
+            assert!(!items[0].is_pinned());
+            items[0].id.clone()
+        }
+        other => panic!("unexpected response: {other:?}"),
+    };
+
+    // Toggle: unpinned -> pinned
+    let response = client
+        .send(&IpcRequest::TogglePinItem {
+            id: item_id.clone(),
+        })
+        .await
+        .expect("TogglePinItem failed");
+
+    assert_eq!(
+        response,
+        IpcResponse::PinToggled {
+            id: item_id.clone(),
+            is_pinned: true,
+        }
+    );
+
+    let history = client
+        .send(&IpcRequest::GetHistory)
+        .await
+        .expect("second GetHistory failed");
+
+    match history {
+        IpcResponse::History { items } => {
+            assert_eq!(items.len(), 1);
+            assert!(items[0].pinned_at.is_some());
+            assert!(items[0].is_pinned());
+        }
+        other => panic!("unexpected response: {other:?}"),
+    }
+
+    // Toggle: pinned -> unpinned
+    let response = client
+        .send(&IpcRequest::TogglePinItem {
+            id: item_id.clone(),
+        })
+        .await
+        .expect("TogglePinItem second toggle failed");
+
+    assert_eq!(
+        response,
+        IpcResponse::PinToggled {
+            id: item_id.clone(),
+            is_pinned: false,
+        }
+    );
+
+    let history = client
+        .send(&IpcRequest::GetHistory)
+        .await
+        .expect("third GetHistory failed");
+
+    match history {
+        IpcResponse::History { items } => {
+            assert_eq!(items.len(), 1);
+            assert_eq!(items[0].pinned_at, None);
+            assert!(!items[0].is_pinned());
+        }
+        other => panic!("unexpected response: {other:?}"),
+    }
+
+    // Toggle nonexistent item
+    let response = client
+        .send(&IpcRequest::TogglePinItem {
+            id: "missing-id".to_string(),
+        })
+        .await
+        .expect("TogglePinItem missing failed");
+
+    match response {
+        IpcResponse::Error { message } => {
+            assert!(message.contains("missing-id"));
+        }
+        other => panic!("unexpected response: {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn handles_multiple_clients_concurrently() {
     let app = TestIpcApp::start().await;
 

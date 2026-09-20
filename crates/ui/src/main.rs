@@ -1101,6 +1101,8 @@ mod tests {
             file_path: None,
 
             created_at: "2026-09-17T10:00:00Z".to_string(),
+
+            pinned_at: None,
         };
 
         assert_eq!(history_row_kind(&item,), HistoryRowKind::Invalid,);

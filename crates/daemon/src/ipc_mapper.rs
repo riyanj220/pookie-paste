@@ -24,6 +24,8 @@ pub fn to_history_item(item: StoredClipboardItem) -> HistoryItem {
                 file_path: None,
 
                 created_at: item.created_at,
+
+                pinned_at: item.pinned_at,
             }
         }
 
@@ -48,6 +50,8 @@ pub fn to_history_item(item: StoredClipboardItem) -> HistoryItem {
                 file_path: item.file_path,
 
                 created_at: item.created_at,
+
+                pinned_at: item.pinned_at,
             }
         }
 
@@ -70,6 +74,8 @@ pub fn to_history_item(item: StoredClipboardItem) -> HistoryItem {
             file_path: item.file_path,
 
             created_at: item.created_at,
+
+            pinned_at: item.pinned_at,
         },
     }
 }
@@ -263,5 +269,23 @@ mod tests {
         let result = from_ipc_focus_target(IpcFocusTarget::Kde("not-a-uuid".to_string()));
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn maps_pinned_at_timestamp_to_ipc_history_item() {
+        let item = StoredClipboardItem {
+            id: "text-pinned".to_string(),
+            content_type: "text".to_string(),
+            text_content: Some("pinned content".to_string()),
+            file_path: None,
+            content_hash: "hash-pinned".to_string(),
+            created_at: "2026-09-17T10:00:00Z".to_string(),
+            pinned_at: Some("2026-09-20T12:00:00Z".to_string()),
+        };
+
+        let mapped = to_history_item(item);
+
+        assert_eq!(mapped.pinned_at.as_deref(), Some("2026-09-20T12:00:00Z"));
+        assert!(mapped.is_pinned());
     }
 }

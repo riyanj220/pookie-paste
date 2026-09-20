@@ -66,6 +66,66 @@ pub async fn activate_item(
     }
 }
 
+#[allow(dead_code)]
+pub async fn toggle_pin_item(id: String) -> Result<bool, String> {
+    let mut client = connect()
+        .await
+        .map_err(|error| format!("failed to connect to daemon: {error}"))?;
+
+    let response = client
+        .send(&IpcRequest::TogglePinItem { id })
+        .await
+        .map_err(|error| format!("failed to toggle pin state: {error:?}"))?;
+
+    match response {
+        IpcResponse::PinToggled { is_pinned, .. } => Ok(is_pinned),
+
+        IpcResponse::Error { message } => Err(message),
+
+        other => Err(format!("unexpected IPC response: {other:?}")),
+    }
+}
+
+#[allow(dead_code)]
+pub async fn delete_item(id: String) -> Result<bool, String> {
+    let mut client = connect()
+        .await
+        .map_err(|error| format!("failed to connect to daemon: {error}"))?;
+
+    let response = client
+        .send(&IpcRequest::DeleteItem { id })
+        .await
+        .map_err(|error| format!("failed to delete item: {error:?}"))?;
+
+    match response {
+        IpcResponse::Deleted { deleted } => Ok(deleted),
+
+        IpcResponse::Error { message } => Err(message),
+
+        other => Err(format!("unexpected IPC response: {other:?}")),
+    }
+}
+
+#[allow(dead_code)]
+pub async fn clear_history() -> Result<u64, String> {
+    let mut client = connect()
+        .await
+        .map_err(|error| format!("failed to connect to daemon: {error}"))?;
+
+    let response = client
+        .send(&IpcRequest::ClearHistory)
+        .await
+        .map_err(|error| format!("failed to clear history: {error:?}"))?;
+
+    match response {
+        IpcResponse::Cleared { count } => Ok(count),
+
+        IpcResponse::Error { message } => Err(message),
+
+        other => Err(format!("unexpected IPC response: {other:?}")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #[test]

@@ -105,3 +105,68 @@ fn image_history_metadata_frame_is_small() {
         frame.len(),
     );
 }
+
+#[test]
+fn serializes_toggle_pin_request() {
+    let request = IpcRequest::TogglePinItem {
+        id: "item-456".to_string(),
+    };
+
+    let json = serde_json::to_string(&request).expect("serialization failed");
+
+    assert_eq!(json, r#"{"type":"toggle_pin_item","id":"item-456"}"#);
+
+    let decoded: IpcRequest = serde_json::from_str(&json).expect("deserialization failed");
+    assert_eq!(decoded, request);
+}
+
+#[test]
+fn round_trips_pin_toggled_response() {
+    let response = IpcResponse::PinToggled {
+        id: "item-456".to_string(),
+        is_pinned: true,
+    };
+
+    let json = serde_json::to_string(&response).expect("serialization failed");
+
+    assert_eq!(
+        json,
+        r#"{"type":"pin_toggled","id":"item-456","is_pinned":true}"#
+    );
+
+    let decoded: IpcResponse = serde_json::from_str(&json).expect("deserialization failed");
+    assert_eq!(decoded, response);
+}
+
+#[test]
+fn history_item_deserializes_without_pinned_at_backward_compatible() {
+    let legacy_json = r#"{
+        "id": "item-legacy",
+        "content_type": "text",
+        "text_content": "legacy text",
+        "file_path": null,
+        "created_at": "2026-09-17T10:00:00Z"
+    }"#;
+
+    let item: HistoryItem = serde_json::from_str(legacy_json).expect("deserialization failed");
+    assert_eq!(item.pinned_at, None);
+    assert!(!item.is_pinned());
+}
+
+#[test]
+fn history_item_round_trips_with_pinned_at() {
+    let item = HistoryItem::text(
+        "item-pinned".to_string(),
+        "pinned content".to_string(),
+        "2026-09-17T10:00:00Z".to_string(),
+    )
+    .with_pinned_at(Some("2026-09-20T12:00:00Z".to_string()));
+
+    assert!(item.is_pinned());
+
+    let json = serde_json::to_string(&item).expect("serialization failed");
+    let decoded: HistoryItem = serde_json::from_str(&json).expect("deserialization failed");
+
+    assert_eq!(decoded, item);
+    assert_eq!(decoded.pinned_at.as_deref(), Some("2026-09-20T12:00:00Z"));
+}
