@@ -225,6 +225,8 @@ impl TestIpcApp {
     }
 }
 
+use daemon::ui_launcher::UiLauncher;
+
 async fn handle_test_connection<P>(
     mut connection: ipc::IpcConnection,
     history_service: Arc<ClipboardHistoryService>,
@@ -232,6 +234,8 @@ async fn handle_test_connection<P>(
 ) where
     P: PasteBackend + Send + Sync + 'static,
 {
+    let ui_launcher = UiLauncher::new();
+
     loop {
         let request = match connection.read_request().await {
             Ok(request) => request,
@@ -249,6 +253,7 @@ async fn handle_test_connection<P>(
             request,
             history_service.as_ref(),
             activation_service.as_ref(),
+            &ui_launcher,
         )
         .await;
 
@@ -913,4 +918,28 @@ async fn x11_style_direct_activation_round_trips_through_ipc() {
     server_task.abort();
 
     let _ = std::fs::remove_file(&socket_path);
+}
+
+#[tokio::test]
+async fn handles_toggle_ui_ipc_request() {
+    let app = TestIpcApp::start().await;
+    let mut client = app.client().await;
+
+    let response = client
+        .send(&IpcRequest::ToggleUi)
+        .await
+        .expect("ToggleUi request failed");
+
+    // In unit test environment where pookie-paste-ui binary is not built in the test runner directory,
+    // the launcher returns an Error response with MissingUiBinary, or UiToggled if binary is found.
+    match response {
+        IpcResponse::UiToggled { .. } => {}
+        IpcResponse::Error { message } => {
+            assert!(
+                message.contains("MissingUiBinary") || message.contains("failed to launch UI"),
+                "expected UI launch error, got: {message}"
+            );
+        }
+        other => panic!("unexpected response for ToggleUi: {other:?}"),
+    }
 }

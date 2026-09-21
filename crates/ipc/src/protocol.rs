@@ -278,6 +278,8 @@ pub enum IpcRequest {
     },
 
     ClearHistory,
+
+    ToggleUi,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -296,6 +298,8 @@ pub enum IpcResponse {
     PinToggled { id: String, is_pinned: bool },
 
     Cleared { count: u64 },
+
+    UiToggled { launched: bool },
 
     Error { message: String },
 }
@@ -614,5 +618,23 @@ mod tests {
 
         assert_eq!(decoded, item);
         assert_eq!(decoded.pinned_at.as_deref(), Some("2026-09-20T12:00:00Z"));
+    }
+
+    #[test]
+    fn toggle_ui_request_round_trips() {
+        let request = IpcRequest::ToggleUi;
+        let encoded = serde_json::to_string(&request).expect("serialization failed");
+        assert_eq!(encoded, r#"{"type":"toggle_ui"}"#);
+        let decoded: IpcRequest = serde_json::from_str(&encoded).expect("deserialization failed");
+        assert_eq!(decoded, request);
+    }
+
+    #[test]
+    fn ui_toggled_response_round_trips() {
+        let response = IpcResponse::UiToggled { launched: true };
+        let encoded = serde_json::to_string(&response).expect("serialization failed");
+        assert_eq!(encoded, r#"{"type":"ui_toggled","launched":true}"#);
+        let decoded: IpcResponse = serde_json::from_str(&encoded).expect("deserialization failed");
+        assert_eq!(decoded, response);
     }
 }

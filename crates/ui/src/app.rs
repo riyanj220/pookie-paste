@@ -9,7 +9,7 @@ use crate::header::render_header;
 use crate::history::HistoryState;
 use crate::image_thumbnail::ImageThumbnailCache;
 use crate::ipc_client;
-use crate::popup_focus::{self, FocusRequestState};
+use crate::platform::{self, FocusRequestState};
 use crate::rows::{
     RowVisualState, render_history_item_row, render_state_message, render_status_message,
 };
@@ -147,7 +147,7 @@ impl PookieApp {
          */
         ui.ctx().send_viewport_cmd(egui::ViewportCommand::Focus);
 
-        match popup_focus::request_focus() {
+        match platform::request_focus() {
             FocusRequestState::WaitingForWindow
             | FocusRequestState::Activating
             | FocusRequestState::Acquired => {

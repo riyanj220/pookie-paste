@@ -6,11 +6,13 @@ use crate::activation_service::{ActivationResult, ClipboardActivationService};
 use crate::focus_backend::{FocusBackend, FocusError};
 use crate::ipc_mapper::{from_ipc_focus_target, to_history_item, to_ipc_focus_target};
 use crate::paste_backend::PasteBackend;
+use crate::ui_launcher::{UiLaunchOutcome, UiLauncher};
 
 pub async fn handle_request<B, P, F>(
     request: IpcRequest,
     history_service: &ClipboardHistoryService,
     activation_service: &ClipboardActivationService<B, P, F>,
+    ui_launcher: &UiLauncher,
 ) -> IpcResponse
 where
     B: ClipboardBackend,
@@ -135,6 +137,14 @@ where
                     message: "failed to capture focus target".to_string(),
                 }
             }
+        },
+
+        IpcRequest::ToggleUi => match ui_launcher.launch() {
+            Ok(UiLaunchOutcome::Launched) => IpcResponse::UiToggled { launched: true },
+            Ok(UiLaunchOutcome::AlreadyRunning) => IpcResponse::UiToggled { launched: false },
+            Err(error) => IpcResponse::Error {
+                message: format!("failed to launch UI: {error:?}"),
+            },
         },
     }
 }
@@ -265,6 +275,20 @@ mod tests {
         (activation_service, backend_handle)
     }
 
+    async fn handle_test_request<B, P, F>(
+        request: IpcRequest,
+        history_service: &ClipboardHistoryService,
+        activation_service: &ClipboardActivationService<B, P, F>,
+    ) -> IpcResponse
+    where
+        B: ClipboardBackend,
+        P: PasteBackend,
+        F: FocusBackend,
+    {
+        let ui_launcher = UiLauncher::new();
+        handle_request(request, history_service, activation_service, &ui_launcher).await
+    }
+
     #[tokio::test]
     async fn handles_ping_request() {
         let service = create_history_service().await;
@@ -272,7 +296,7 @@ mod tests {
         let (activation_service, _backend_handle) = create_activation_service(Arc::clone(&service));
 
         let response =
-            handle_request(IpcRequest::Ping, service.as_ref(), &activation_service).await;
+            handle_test_request(IpcRequest::Ping, service.as_ref(), &activation_service).await;
 
         assert_eq!(response, IpcResponse::Pong,);
     }
@@ -283,7 +307,7 @@ mod tests {
 
         let (activation_service, _backend_handle) = create_activation_service(Arc::clone(&service));
 
-        let response = handle_request(
+        let response = handle_test_request(
             IpcRequest::CaptureFocusTarget,
             service.as_ref(),
             &activation_service,
@@ -328,7 +352,7 @@ mod tests {
 
         let (activation_service, _backend_handle) = create_activation_service(Arc::clone(&service));
 
-        let response = handle_request(
+        let response = handle_test_request(
             IpcRequest::GetHistory,
             service.as_ref(),
             &activation_service,
@@ -370,7 +394,7 @@ mod tests {
 
         let (activation_service, backend_handle) = create_activation_service(Arc::clone(&service));
 
-        let response = handle_request(
+        let response = handle_test_request(
             IpcRequest::ActivateItem {
                 id: item_id.to_string(),
 
@@ -411,7 +435,7 @@ mod tests {
 
         let (activation_service, backend_handle) = create_activation_service(Arc::clone(&service));
 
-        let response = handle_request(
+        let response = handle_test_request(
             IpcRequest::ActivateItem {
                 id: item_id.to_string(),
 
@@ -438,7 +462,7 @@ mod tests {
 
         let (activation_service, backend_handle) = create_activation_service(Arc::clone(&service));
 
-        let response = handle_request(
+        let response = handle_test_request(
             IpcRequest::ActivateItem {
                 id: "does-not-exist".to_string(),
 
@@ -479,7 +503,7 @@ mod tests {
 
         let (activation_service, _backend_handle) = create_activation_service(Arc::clone(&service));
 
-        let response = handle_request(
+        let response = handle_test_request(
             IpcRequest::DeleteItem {
                 id: item_id.to_string(),
             },
@@ -501,7 +525,7 @@ mod tests {
 
         let (activation_service, _backend_handle) = create_activation_service(Arc::clone(&service));
 
-        let response = handle_request(
+        let response = handle_test_request(
             IpcRequest::DeleteItem {
                 id: "does-not-exist".to_string(),
             },
@@ -555,7 +579,7 @@ mod tests {
 
         let (activation_service, _backend_handle) = create_activation_service(Arc::clone(&service));
 
-        let response = handle_request(
+        let response = handle_test_request(
             IpcRequest::ClearHistory,
             service.as_ref(),
             &activation_service,
@@ -575,7 +599,7 @@ mod tests {
 
         let (activation_service, _backend_handle) = create_activation_service(Arc::clone(&service));
 
-        let response = handle_request(
+        let response = handle_test_request(
             IpcRequest::ClearHistory,
             service.as_ref(),
             &activation_service,
@@ -606,7 +630,7 @@ mod tests {
         let (activation_service, _backend_handle) = create_activation_service(Arc::clone(&service));
 
         // First toggle: unpinned -> pinned
-        let response = handle_request(
+        let response = handle_test_request(
             IpcRequest::TogglePinItem {
                 id: item_id.to_string(),
             },
@@ -629,7 +653,7 @@ mod tests {
         assert!(items[0].pinned_at.is_some());
 
         // Second toggle: pinned -> unpinned
-        let response = handle_request(
+        let response = handle_test_request(
             IpcRequest::TogglePinItem {
                 id: item_id.to_string(),
             },
@@ -657,7 +681,7 @@ mod tests {
         let service = create_history_service().await;
         let (activation_service, _backend_handle) = create_activation_service(Arc::clone(&service));
 
-        let response = handle_request(
+        let response = handle_test_request(
             IpcRequest::TogglePinItem {
                 id: "nonexistent-id".to_string(),
             },
@@ -672,5 +696,24 @@ mod tests {
             }
             other => panic!("expected Error response, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn toggling_ui_when_already_running_reports_not_launched() {
+        let service = create_history_service().await;
+        let (activation_service, _backend_handle) = create_activation_service(Arc::clone(&service));
+
+        let ui_launcher = UiLauncher::new();
+        ui_launcher.set_running_for_test(true);
+
+        let response = handle_request(
+            IpcRequest::ToggleUi,
+            service.as_ref(),
+            &activation_service,
+            &ui_launcher,
+        )
+        .await;
+
+        assert_eq!(response, IpcResponse::UiToggled { launched: false });
     }
 }

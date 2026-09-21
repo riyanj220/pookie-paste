@@ -20,6 +20,7 @@ pub enum UiLaunchOutcome {
     AlreadyRunning,
 }
 
+#[derive(Clone)]
 pub struct UiLauncher {
     popup_running: Arc<AtomicBool>,
 }
@@ -29,6 +30,15 @@ impl UiLauncher {
         Self {
             popup_running: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    pub fn is_running(&self) -> bool {
+        self.popup_running.load(Ordering::Acquire)
+    }
+
+    #[cfg(test)]
+    pub fn set_running_for_test(&self, running: bool) {
+        self.popup_running.store(running, Ordering::Release);
     }
 
     pub fn launch(&self) -> Result<UiLaunchOutcome, UiLaunchError> {
