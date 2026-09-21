@@ -46,4 +46,6 @@ pub mod app_paths;
 
 pub mod sway_focus_backend;
 
+pub mod hyprland_focus_backend;
+
 pub mod platform;

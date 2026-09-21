@@ -8,6 +8,7 @@ use pookie_clipboard::{wayland::WaylandClipboard, x11::X11Clipboard};
 use super::environment::{DesktopKind, EnvironmentAudit, SessionKind};
 use crate::clipboard_backend::PlatformClipboard;
 use crate::focus_backend::{FocusError, UnavailableFocusBackend};
+use crate::hyprland_focus_backend::HyprlandFocusBackend;
 use crate::kde_focus_backend::KdeFocusBackend;
 use crate::paste_backend::{PasteError, PlatformPasteBackend, WaylandPasteBackend};
 use crate::platform_focus_backend::PlatformFocusBackend;
@@ -54,6 +55,17 @@ pub fn resolve_focus_backend(audit: &EnvironmentAudit) -> Result<PlatformFocusBa
                             tracing::warn!(
                                 error = ?error,
                                 "Sway focus backend unavailable; using focus fallback"
+                            );
+                            Ok(PlatformFocusBackend::Unavailable(UnavailableFocusBackend))
+                        }
+                    }
+                } else if std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_some() {
+                    match HyprlandFocusBackend::new() {
+                        Ok(backend) => Ok(PlatformFocusBackend::Hyprland(backend)),
+                        Err(error) => {
+                            tracing::warn!(
+                                error = ?error,
+                                "Hyprland focus backend unavailable; using focus fallback"
                             );
                             Ok(PlatformFocusBackend::Unavailable(UnavailableFocusBackend))
                         }
