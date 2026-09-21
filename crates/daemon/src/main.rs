@@ -23,15 +23,13 @@ use daemon::{
 
 use daemon::focus_service::FocusService;
 
-use daemon::paste_backend::PlatformPasteBackend;
-
-use daemon::platform_focus_backend::PlatformFocusBackend;
+use daemon::platform::{
+    EnvironmentAudit, resolve_clipboard_backend, resolve_focus_backend, resolve_paste_backend,
+};
 
 use daemon::shortcut_listener::ShortcutListener;
 
 use daemon::ui_launcher::{UiLaunchOutcome, UiLauncher};
-
-use daemon::clipboard_backend::PlatformClipboard;
 
 use daemon::clipboard_watcher;
 
@@ -88,7 +86,15 @@ async fn main() -> anyhow::Result<()> {
 
     let clipboard_state = Arc::new(ClipboardState::default());
 
-    let backend = PlatformClipboard::new()?;
+    let env_audit = EnvironmentAudit::detect();
+
+    info!(
+        session = ?env_audit.session,
+        desktop = ?env_audit.desktop,
+        "platform capability audit completed"
+    );
+
+    let backend = resolve_clipboard_backend(&env_audit)?;
 
     info!("clipboard backend: {}", backend.name());
 
@@ -106,14 +112,14 @@ async fn main() -> anyhow::Result<()> {
      * Pookie can restore and confirm the
      * original target window before Ctrl+V.
      */
-    let focus_backend = PlatformFocusBackend::new()
+    let focus_backend = resolve_focus_backend(&env_audit)
         .map_err(|error| anyhow::anyhow!("failed to initialize focus backend: {error:?}"))?;
 
     info!("focus backend: {}", focus_backend.name());
 
     let allow_wayland_direct = focus_backend.can_restore_focus();
 
-    let paste_backend = PlatformPasteBackend::new(allow_wayland_direct)
+    let paste_backend = resolve_paste_backend(&env_audit, allow_wayland_direct)
         .map_err(|error| anyhow::anyhow!("failed to initialize paste backend: {error:?}"))?;
 
     info!("paste backend: {}", paste_backend.name());
