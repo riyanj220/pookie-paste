@@ -5,6 +5,7 @@ mod header;
 mod history;
 mod image_thumbnail;
 mod ipc_client;
+mod platform;
 mod popup_anchor;
 mod popup_focus;
 mod popup_position;
@@ -45,15 +46,12 @@ fn main() -> eframe::Result<()> {
         .with_resizable(false)
         .with_decorations(false);
 
-    if let Some(resolved) = popup_anchor::resolve_popup_anchor(target_id.as_ref()) {
-        let position = popup_position::popup_position(
-            resolved.anchor,
-            POPUP_WIDTH,
-            POPUP_HEIGHT,
-            CURSOR_OFFSET,
-            resolved.screen,
-        );
-
+    if let Some(position) = platform::resolve_popup_position(
+        target_id.as_ref(),
+        POPUP_WIDTH,
+        POPUP_HEIGHT,
+        CURSOR_OFFSET,
+    ) {
         viewport = viewport.with_position(position);
     }
 
