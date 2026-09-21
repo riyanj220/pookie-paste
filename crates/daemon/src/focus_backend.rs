@@ -2,10 +2,12 @@ use std::fmt;
 
 use uuid::Uuid;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum FocusTarget {
     X11(u64),
     Kde(Uuid),
+    Sway(i64),
+    Hyprland(String),
 }
 
 impl FocusTarget {
@@ -29,17 +31,39 @@ impl FocusTarget {
         Self::Kde(id)
     }
 
+    pub fn sway(id: i64) -> Self {
+        Self::Sway(id)
+    }
+
+    pub fn hyprland(address: impl Into<String>) -> Self {
+        Self::Hyprland(address.into())
+    }
+
     pub fn x11_id(&self) -> Option<u64> {
         match self {
             Self::X11(id) => Some(*id),
-            Self::Kde(_) => None,
+            _ => None,
         }
     }
 
     pub fn kde_id(&self) -> Option<Uuid> {
         match self {
             Self::Kde(id) => Some(*id),
-            Self::X11(_) => None,
+            _ => None,
+        }
+    }
+
+    pub fn sway_id(&self) -> Option<i64> {
+        match self {
+            Self::Sway(id) => Some(*id),
+            _ => None,
+        }
+    }
+
+    pub fn hyprland_address(&self) -> Option<&str> {
+        match self {
+            Self::Hyprland(address) => Some(address.as_str()),
+            _ => None,
         }
     }
 }
@@ -53,6 +77,14 @@ impl fmt::Display for FocusTarget {
 
             Self::Kde(id) => {
                 write!(formatter, "kde:{id}")
+            }
+
+            Self::Sway(id) => {
+                write!(formatter, "sway:{id}")
+            }
+
+            Self::Hyprland(address) => {
+                write!(formatter, "hyprland:{address}")
             }
         }
     }
@@ -130,5 +162,19 @@ mod tests {
         let kde = FocusTarget::kde(kde_id);
 
         assert_eq!(kde.to_string(), "kde:12345678-1234-5678-1234-567812345678",);
+
+        let sway = FocusTarget::sway(42);
+        assert_eq!(sway.to_string(), "sway:42");
+        assert_eq!(sway.sway_id(), Some(42));
+        assert_eq!(sway.x11_id(), None);
+        assert_eq!(sway.kde_id(), None);
+        assert_eq!(sway.hyprland_address(), None);
+
+        let hyprland = FocusTarget::hyprland("0x55a72f1b8a90");
+        assert_eq!(hyprland.to_string(), "hyprland:0x55a72f1b8a90");
+        assert_eq!(hyprland.hyprland_address(), Some("0x55a72f1b8a90"));
+        assert_eq!(hyprland.sway_id(), None);
+        assert_eq!(hyprland.x11_id(), None);
+        assert_eq!(hyprland.kde_id(), None);
     }
 }

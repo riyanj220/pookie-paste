@@ -29,7 +29,7 @@ fn main() -> anyhow::Result<()> {
     std::thread::sleep(Duration::from_secs(5));
 
     backend
-        .restore(target)
+        .restore(target.clone())
         .map_err(|error| anyhow::anyhow!("failed to request restore: {error:?}"))?;
 
     println!("OK: restore requested");
@@ -39,7 +39,7 @@ fn main() -> anyhow::Result<()> {
 
     for attempt in 1..=50 {
         if backend
-            .is_active(target)
+            .is_active(target.clone())
             .map_err(|error| anyhow::anyhow!("failed to query active target: {error:?}"))?
         {
             println!("OK: captured target is active again");
