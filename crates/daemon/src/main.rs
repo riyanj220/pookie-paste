@@ -1,3 +1,4 @@
+mod cli;
 mod ipc_server;
 mod logging;
 mod shutdown;
@@ -37,6 +38,11 @@ use daemon::app_paths;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let action = cli::parse_args();
+    if action != cli::CliAction::RunDaemon {
+        return cli::run_client(action).await;
+    }
+
     logging::init_logging();
 
     let ipc_listener = match ipc_server::bind()? {
@@ -130,7 +136,7 @@ async fn main() -> anyhow::Result<()> {
 
     let mut shortcut_available = true;
 
-    let ui_launcher = UiLauncher::new();
+    let ui_launcher = Arc::new(UiLauncher::new());
 
     let activation_service = Arc::new(ClipboardActivationService::new(
         Arc::clone(&history_service),
@@ -145,6 +151,7 @@ async fn main() -> anyhow::Result<()> {
         ipc_listener,
         Arc::clone(&history_service),
         Arc::clone(&activation_service),
+        Arc::clone(&ui_launcher),
     );
 
     tokio::pin!(ipc_future);

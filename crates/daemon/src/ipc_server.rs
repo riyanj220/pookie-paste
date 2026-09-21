@@ -5,6 +5,7 @@ use daemon::activation_service::ClipboardActivationService;
 use daemon::focus_backend::FocusBackend;
 use daemon::paste_backend::PasteBackend;
 use daemon::request_handler::handle_request;
+use daemon::ui_launcher::UiLauncher;
 
 use history::ClipboardHistoryService;
 
@@ -50,6 +51,7 @@ pub async fn run<B, P, F>(
     server: IpcServer,
     history_service: Arc<ClipboardHistoryService>,
     activation_service: Arc<ClipboardActivationService<B, P, F>>,
+    ui_launcher: Arc<UiLauncher>,
 ) -> anyhow::Result<()>
 where
     B: ClipboardBackend + Send + Sync + 'static,
@@ -71,8 +73,10 @@ where
 
         let activation_service = Arc::clone(&activation_service);
 
+        let ui_launcher = Arc::clone(&ui_launcher);
+
         tokio::spawn(async move {
-            handle_connection(connection, history_service, activation_service).await;
+            handle_connection(connection, history_service, activation_service, ui_launcher).await;
         });
     }
 }
@@ -81,6 +85,7 @@ async fn handle_connection<B, P, F>(
     connection: IpcConnection,
     history_service: Arc<ClipboardHistoryService>,
     activation_service: Arc<ClipboardActivationService<B, P, F>>,
+    ui_launcher: Arc<UiLauncher>,
 ) where
     B: ClipboardBackend + Send + Sync + 'static,
     P: PasteBackend + Send + Sync + 'static,
@@ -90,6 +95,7 @@ async fn handle_connection<B, P, F>(
         connection,
         history_service,
         activation_service,
+        ui_launcher,
         IPC_READ_TIMEOUT,
     )
     .await;
@@ -99,6 +105,7 @@ async fn handle_connection_with_timeout<B, P, F>(
     mut connection: IpcConnection,
     history_service: Arc<ClipboardHistoryService>,
     activation_service: Arc<ClipboardActivationService<B, P, F>>,
+    ui_launcher: Arc<UiLauncher>,
     read_timeout: Duration,
 ) where
     B: ClipboardBackend + Send + Sync + 'static,
@@ -130,6 +137,7 @@ async fn handle_connection_with_timeout<B, P, F>(
             request,
             history_service.as_ref(),
             activation_service.as_ref(),
+            ui_launcher.as_ref(),
         )
         .await;
 
@@ -265,11 +273,13 @@ mod tests {
 
         let connection_task = tokio::spawn(async move {
             let connection = server.accept().await.expect("accept failed");
+            let ui_launcher = Arc::new(UiLauncher::new());
 
             handle_connection_with_timeout(
                 connection,
                 service,
                 activation,
+                ui_launcher,
                 Duration::from_millis(50),
             )
             .await;
