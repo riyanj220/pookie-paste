@@ -14,6 +14,7 @@ use crate::platform_focus_backend::PlatformFocusBackend;
 use crate::platform_shortcut_backend::PlatformShortcutBackend;
 use crate::portal_eis_paste_backend::PortalEisPasteBackend;
 use crate::shortcut_backend::ShortcutError;
+use crate::sway_focus_backend::SwayFocusBackend;
 use crate::wayland_shortcut_backend::WaylandShortcutBackend;
 use crate::x11_focus_backend::X11FocusBackend;
 use crate::x11_paste_backend::X11PasteBackend;
@@ -45,7 +46,22 @@ pub fn resolve_focus_backend(audit: &EnvironmentAudit) -> Result<PlatformFocusBa
                     Ok(PlatformFocusBackend::Unavailable(UnavailableFocusBackend))
                 }
             },
-            _ => Ok(PlatformFocusBackend::Unavailable(UnavailableFocusBackend)),
+            _ => {
+                if std::env::var_os("SWAYSOCK").is_some() {
+                    match SwayFocusBackend::new() {
+                        Ok(backend) => Ok(PlatformFocusBackend::Sway(backend)),
+                        Err(error) => {
+                            tracing::warn!(
+                                error = ?error,
+                                "Sway focus backend unavailable; using focus fallback"
+                            );
+                            Ok(PlatformFocusBackend::Unavailable(UnavailableFocusBackend))
+                        }
+                    }
+                } else {
+                    Ok(PlatformFocusBackend::Unavailable(UnavailableFocusBackend))
+                }
+            }
         },
 
         SessionKind::Unknown => Ok(PlatformFocusBackend::Unavailable(UnavailableFocusBackend)),

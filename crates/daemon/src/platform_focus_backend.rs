@@ -1,6 +1,7 @@
 use crate::focus_backend::{FocusBackend, FocusError, FocusTarget, UnavailableFocusBackend};
 
 use crate::kde_focus_backend::KdeFocusBackend;
+use crate::sway_focus_backend::SwayFocusBackend;
 use crate::x11_focus_backend::X11FocusBackend;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,6 +37,8 @@ pub enum PlatformFocusBackend {
     X11(Box<X11FocusBackend>),
 
     Kde(KdeFocusBackend),
+
+    Sway(SwayFocusBackend),
 
     Unavailable(UnavailableFocusBackend),
 }
@@ -76,6 +79,8 @@ impl PlatformFocusBackend {
 
             Self::Kde(_) => "KDE KWin focus",
 
+            Self::Sway(_) => "Sway focus",
+
             Self::Unavailable(_) => "unavailable",
         }
     }
@@ -92,6 +97,8 @@ impl FocusBackend for PlatformFocusBackend {
 
             Self::Kde(backend) => backend.active_target(),
 
+            Self::Sway(backend) => backend.active_target(),
+
             Self::Unavailable(backend) => backend.active_target(),
         }
     }
@@ -102,6 +109,8 @@ impl FocusBackend for PlatformFocusBackend {
 
             Self::Kde(backend) => backend.restore(target),
 
+            Self::Sway(backend) => backend.restore(target),
+
             Self::Unavailable(backend) => backend.restore(target),
         }
     }
@@ -111,6 +120,8 @@ impl FocusBackend for PlatformFocusBackend {
             Self::X11(backend) => backend.is_active(target),
 
             Self::Kde(backend) => backend.is_active(target),
+
+            Self::Sway(backend) => backend.is_active(target),
 
             Self::Unavailable(backend) => backend.is_active(target),
         }
