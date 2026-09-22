@@ -55,7 +55,9 @@ impl FocusBackend for HyprlandFocusBackend {
             )));
         };
 
-        let command = format!("dispatch focuswindow address:{address}");
+        // Hyprland current dispatcher API uses Lua-style dispatcher syntax.
+        // Keep this command isolated here because compositor APIs are version-specific.
+        let command = format!("dispatch hl.dsp.focus({{ window = \"address:{address}\" }})");
         let response = self.send_command(&command)?;
 
         if response.trim().eq_ignore_ascii_case("ok") {

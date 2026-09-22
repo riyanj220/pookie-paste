@@ -98,7 +98,7 @@ fn restores_focus_to_window_and_verifies_sent_command() {
     let commands = server.received_commands.lock().unwrap();
     assert_eq!(
         commands.as_slice(),
-        &["dispatch focuswindow address:0x55a72ab3c4d0"]
+        &[r#"dispatch hl.dsp.focus({ window = "address:0x55a72ab3c4d0" })"#]
     );
 }
 
