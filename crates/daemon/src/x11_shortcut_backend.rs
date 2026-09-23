@@ -1,4 +1,6 @@
 use x11rb::connection::Connection;
+use x11rb::errors::ReplyError;
+use x11rb::protocol::ErrorKind;
 use x11rb::protocol::xproto::{ConnectionExt as _, GrabMode, ModMask};
 
 use crate::shortcut_backend::{
@@ -8,6 +10,13 @@ use crate::shortcut_backend::{
 
 const XK_NUM_LOCK: u32 = 0xff7f;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RegisteredGrab {
+    shortcut: Shortcut,
+    keycode: u8,
+    masks: Vec<ModMask>,
+}
+
 pub struct X11ShortcutBackend {
     connection: x11rb::rust_connection::RustConnection,
 
@@ -15,7 +24,7 @@ pub struct X11ShortcutBackend {
 
     num_lock_mask: Option<ModMask>,
 
-    registered_keycode: Option<u8>,
+    registered_grab: Option<RegisteredGrab>,
 
     key_down: bool,
 
@@ -44,10 +53,119 @@ impl X11ShortcutBackend {
             connection,
             root_window,
             num_lock_mask,
-            registered_keycode: None,
+            registered_grab: None,
             key_down: false,
             pending_event: None,
         })
+    }
+
+    /// Returns the currently active registered shortcut, if any.
+    pub fn registered_shortcut(&self) -> Option<Shortcut> {
+        self.registered_grab.as_ref().map(|grab| grab.shortcut)
+    }
+
+    /// Computes all modifier mask permutations (accounting for CapsLock and NumLock)
+    /// required for robust passive grabs in X11.
+    pub fn compute_modifier_masks(&self, modifiers: ShortcutModifiers) -> Vec<ModMask> {
+        let base_mask = x11_modifier_mask(modifiers);
+
+        let mut masks = vec![base_mask, base_mask | ModMask::LOCK];
+
+        if let Some(num_lock) = self.num_lock_mask {
+            masks.push(base_mask | num_lock);
+
+            masks.push(base_mask | ModMask::LOCK | num_lock);
+        }
+
+        masks
+    }
+
+    /// Executes passive key grabs for a given keycode and slice of modifier masks.
+    ///
+    /// If grabbing any mask fails or encounters a conflict, all masks acquired
+    /// during this batch are immediately ungrabbed and rolled back, ensuring
+    /// zero dangling grabs are left on the root window.
+    fn execute_grab(
+        &self,
+        keycode: u8,
+        masks: &[ModMask],
+        shortcut: Shortcut,
+    ) -> Result<Vec<ModMask>, ShortcutError> {
+        let mut acquired = Vec::with_capacity(masks.len());
+
+        for &mask in masks {
+            let cookie = self
+                .connection
+                .grab_key(
+                    false,
+                    self.root_window,
+                    mask,
+                    keycode,
+                    GrabMode::ASYNC,
+                    GrabMode::ASYNC,
+                )
+                .map_err(|error| {
+                    ShortcutError::Failed(format!(
+                        "failed to send X11 grab request for '{shortcut}': {error}"
+                    ))
+                })?;
+
+            match cookie.check() {
+                Ok(()) => {
+                    acquired.push(mask);
+                }
+                Err(error) => {
+                    // Rollback only the masks acquired during this failed attempt
+                    for &rollback_mask in &acquired {
+                        if let Ok(cookie) =
+                            self.connection
+                                .ungrab_key(keycode, self.root_window, rollback_mask)
+                        {
+                            let _ = cookie.check();
+                        }
+                    }
+                    let _ = self.connection.flush();
+
+                    return Err(classify_x11_error(error, shortcut));
+                }
+            }
+        }
+
+        self.connection.flush().map_err(|error| {
+            for &rollback_mask in &acquired {
+                if let Ok(cookie) =
+                    self.connection
+                        .ungrab_key(keycode, self.root_window, rollback_mask)
+                {
+                    let _ = cookie.check();
+                }
+            }
+            let _ = self.connection.flush();
+
+            ShortcutError::Failed(format!("failed to flush X11 grab registration: {error}"))
+        })?;
+
+        Ok(acquired)
+    }
+
+    /// Releases any currently active root window grab and resets key state.
+    fn release_grab(&mut self) -> Result<(), ShortcutError> {
+        if let Some(grab) = self.registered_grab.take() {
+            for mask in grab.masks {
+                if let Ok(cookie) = self
+                    .connection
+                    .ungrab_key(grab.keycode, self.root_window, mask)
+                {
+                    let _ = cookie.check();
+                }
+            }
+            let _ = self.connection.flush();
+        }
+
+        self.key_down = false;
+        self.pending_event = None;
+
+        Ok(())
     }
 
     fn next_event(&mut self) -> Result<x11rb::protocol::Event, ShortcutError> {
@@ -74,48 +192,32 @@ impl ShortcutBackend for X11ShortcutBackend {
         &mut self,
         shortcut: Shortcut,
     ) -> Result<ShortcutRegistrationOutcome, ShortcutError> {
+        // Idempotent: re-registering the exact same shortcut is a no-op
+        if self.registered_shortcut() == Some(shortcut) {
+            return Ok(ShortcutRegistrationOutcome::Active {
+                description: format!("X11 root window grab for {shortcut}"),
+            });
+        }
+
         let keysym = shortcut_keysym(shortcut.key)?;
 
         let keycode = find_keycode(&self.connection, keysym)?;
 
-        let base_mask = x11_modifier_mask(shortcut.modifiers);
+        let masks = self.compute_modifier_masks(shortcut.modifiers);
 
-        let mut masks = vec![base_mask, base_mask | ModMask::LOCK];
+        // Transactional Re-Registration:
+        // Attempt new grab FIRST. If this fails or conflicts, execute_grab rolls back
+        // its own newly attempted masks, leaving self.registered_grab completely intact.
+        let acquired_masks = self.execute_grab(keycode, &masks, shortcut)?;
 
-        if let Some(num_lock) = self.num_lock_mask {
-            masks.push(base_mask | num_lock);
+        // Only after the replacement grab succeeds do we release the previous grab
+        let _ = self.release_grab();
 
-            masks.push(base_mask | ModMask::LOCK | num_lock);
-        }
-
-        for mask in masks {
-            self.connection
-                .grab_key(
-                    false,
-                    self.root_window,
-                    mask,
-                    keycode,
-                    GrabMode::ASYNC,
-                    GrabMode::ASYNC,
-                )
-                .map_err(|error| {
-                    ShortcutError::Failed(format!(
-                        "failed to request shortcut registration: {error}"
-                    ))
-                })?
-                .check()
-                .map_err(|error| {
-                    ShortcutError::Conflict(format!(
-                        "shortcut is already in use or could not be registered: {error}"
-                    ))
-                })?;
-        }
-
-        self.connection.flush().map_err(|error| {
-            ShortcutError::Failed(format!("failed to flush shortcut registration: {error}"))
-        })?;
-
-        self.registered_keycode = Some(keycode);
+        self.registered_grab = Some(RegisteredGrab {
+            shortcut,
+            keycode,
+            masks: acquired_masks,
+        });
 
         self.key_down = false;
 
@@ -127,11 +229,13 @@ impl ShortcutBackend for X11ShortcutBackend {
     }
 
     fn wait_for_activation(&mut self) -> Result<ShortcutActivation, ShortcutError> {
-        let Some(keycode) = self.registered_keycode else {
+        let Some(ref grab) = self.registered_grab else {
             return Err(ShortcutError::Failed(
                 "shortcut backend has not been registered".to_string(),
             ));
         };
+
+        let keycode = grab.keycode;
 
         loop {
             let event = self.next_event()?;
@@ -178,11 +282,41 @@ impl ShortcutBackend for X11ShortcutBackend {
             }
         }
     }
+
+    fn unregister(&mut self) -> Result<(), ShortcutError> {
+        self.release_grab()
+    }
 }
 
-fn shortcut_keysym(key: ShortcutKey) -> Result<u32, ShortcutError> {
+impl Drop for X11ShortcutBackend {
+    fn drop(&mut self) {
+        let _ = self.release_grab();
+    }
+}
+
+/// Classifies X11 grab reply errors into semantic `ShortcutError` variants.
+fn classify_x11_error(error: ReplyError, shortcut: Shortcut) -> ShortcutError {
+    match error {
+        ReplyError::X11Error(ref x11_err) => {
+            if x11_err.error_kind == ErrorKind::Access || x11_err.error_code == 10 {
+                ShortcutError::Conflict(format!(
+                    "shortcut '{shortcut}' conflicts with an existing X11 grab (BadAccess)"
+                ))
+            } else {
+                ShortcutError::Failed(format!(
+                    "X11 error registering shortcut '{shortcut}': {x11_err:?}"
+                ))
+            }
+        }
+        ReplyError::ConnectionError(ref err) => ShortcutError::Failed(format!(
+            "X11 connection error registering shortcut '{shortcut}': {err}"
+        )),
+    }
+}
+
+pub fn shortcut_keysym(key: ShortcutKey) -> Result<u32, ShortcutError> {
     match key {
-        ShortcutKey::Character(character) if character.is_ascii() => {
+        ShortcutKey::Character(character) if character.is_ascii_alphanumeric() => {
             Ok(character.to_ascii_lowercase() as u32)
         }
 
@@ -192,7 +326,7 @@ fn shortcut_keysym(key: ShortcutKey) -> Result<u32, ShortcutError> {
     }
 }
 
-fn x11_modifier_mask(modifiers: ShortcutModifiers) -> ModMask {
+pub fn x11_modifier_mask(modifiers: ShortcutModifiers) -> ModMask {
     let mut mask = ModMask::default();
 
     if modifiers.super_key {
@@ -245,7 +379,7 @@ fn find_keycode(
     }
 
     Err(ShortcutError::Failed(format!(
-        "could not resolve keysym {keysym:#x}"
+        "could not resolve keysym {keysym:#x} on active keyboard layout"
     )))
 }
 

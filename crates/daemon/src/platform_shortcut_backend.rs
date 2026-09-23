@@ -85,6 +85,16 @@ impl ShortcutBackend for PlatformShortcutBackend {
             Self::Unavailable => Err(ShortcutError::Unavailable),
         }
     }
+
+    fn unregister(&mut self) -> Result<(), ShortcutError> {
+        match self {
+            Self::X11(backend) => backend.unregister(),
+
+            Self::Wayland(backend) => backend.unregister(),
+
+            Self::Unavailable => Ok(()),
+        }
+    }
 }
 
 fn classify_session_type(value: &str) -> SessionType {

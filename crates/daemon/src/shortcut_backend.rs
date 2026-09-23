@@ -190,6 +190,20 @@ pub enum ShortcutError {
     Failed(String),
 }
 
+impl fmt::Display for ShortcutError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Unavailable => write!(f, "shortcut backend is unavailable"),
+            Self::Cancelled => write!(f, "shortcut registration was cancelled"),
+            Self::TimedOut(msg) => write!(f, "shortcut operation timed out: {msg}"),
+            Self::Conflict(msg) => write!(f, "shortcut conflict: {msg}"),
+            Self::Failed(msg) => write!(f, "shortcut operation failed: {msg}"),
+        }
+    }
+}
+
+impl std::error::Error for ShortcutError {}
+
 /// Identifies the underlying mechanism used by a shortcut backend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShortcutBackendCapability {
