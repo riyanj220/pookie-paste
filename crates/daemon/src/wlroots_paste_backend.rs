@@ -23,7 +23,19 @@ pub const KEY_V: u32 = 47;
 pub const KEY_PRESS: u32 = 1;
 pub const KEY_RELEASE: u32 = 0;
 
+/// XKB modifier mask for Control (bit 2 in standard XKB modifier masks: Shift=0, Lock=1, Control=2).
+pub const MOD_CONTROL: u32 = 1 << 2;
+
 pub const KEY_INTERVAL: Duration = Duration::from_millis(25);
+
+/// Returns the current monotonic timestamp in milliseconds for Wayland input events.
+pub fn monotonic_time_ms() -> u32 {
+    let timespec = rustix::time::clock_gettime(rustix::time::ClockId::Monotonic);
+    let ms = (timespec.tv_sec as u64)
+        .wrapping_mul(1000)
+        .wrapping_add((timespec.tv_nsec as u64) / 1_000_000);
+    ms as u32
+}
 
 /// Canonical complete XKB keymap string for virtual keyboard key injection.
 ///
@@ -157,28 +169,48 @@ impl PasteBackend for WlrootsPasteBackend {
     }
 
     fn paste(&self) -> Result<(), PasteError> {
-        // 1. Press Left Ctrl
-        self.virtual_keyboard.key(0, KEY_LEFTCTRL, KEY_PRESS);
-        // 2. Press V
-        self.virtual_keyboard.key(0, KEY_V, KEY_PRESS);
+        // 1. Press Left Ctrl and synchronize modifier state
+        let t1 = monotonic_time_ms();
+        self.virtual_keyboard.key(t1, KEY_LEFTCTRL, KEY_PRESS);
+        self.virtual_keyboard.modifiers(MOD_CONTROL, 0, 0, 0);
         self.connection.flush().map_err(|error| {
-            PasteError::Failed(format!("failed flushing Wayland key press events: {error}"))
+            PasteError::Failed(format!("failed flushing Wayland Ctrl press event: {error}"))
+        })?;
+
+        // Allow target window to register key down and modifier change
+        std::thread::sleep(KEY_INTERVAL);
+
+        // 2. Press V
+        let t2 = monotonic_time_ms();
+        self.virtual_keyboard.key(t2, KEY_V, KEY_PRESS);
+        self.connection.flush().map_err(|error| {
+            PasteError::Failed(format!("failed flushing Wayland V press event: {error}"))
         })?;
 
         // Allow target window to register key down
         std::thread::sleep(KEY_INTERVAL);
 
         // 3. Release V
-        self.virtual_keyboard.key(0, KEY_V, KEY_RELEASE);
-        // 4. Release Left Ctrl
-        self.virtual_keyboard.key(0, KEY_LEFTCTRL, KEY_RELEASE);
+        let t3 = monotonic_time_ms();
+        self.virtual_keyboard.key(t3, KEY_V, KEY_RELEASE);
+        self.connection.flush().map_err(|error| {
+            PasteError::Failed(format!("failed flushing Wayland V release event: {error}"))
+        })?;
+
+        // Allow target window to register key release before releasing modifier
+        std::thread::sleep(KEY_INTERVAL);
+
+        // 4. Release Left Ctrl and clear modifier state
+        let t4 = monotonic_time_ms();
+        self.virtual_keyboard.key(t4, KEY_LEFTCTRL, KEY_RELEASE);
+        self.virtual_keyboard.modifiers(0, 0, 0, 0);
         self.connection.flush().map_err(|error| {
             PasteError::Failed(format!(
-                "failed flushing Wayland key release events: {error}"
+                "failed flushing Wayland Ctrl release event: {error}"
             ))
         })?;
 
-        // Roundtrip to ensure compositor processed events
+        // Roundtrip to ensure compositor processed all events
         if let Ok(mut queue) = self.event_queue.lock() {
             let mut state = WlrootsState;
             let _ = queue.roundtrip(&mut state);
@@ -220,6 +252,16 @@ mod tests {
         assert_eq!(KEY_V, 47);
         assert_eq!(KEY_PRESS, 1);
         assert_eq!(KEY_RELEASE, 0);
+        assert_eq!(MOD_CONTROL, 4);
+    }
+
+    #[test]
+    fn monotonic_time_advances_and_is_nonzero() {
+        let t1 = monotonic_time_ms();
+        std::thread::sleep(Duration::from_millis(5));
+        let t2 = monotonic_time_ms();
+        assert!(t1 > 0);
+        assert!(t2 >= t1);
     }
 
     #[test]

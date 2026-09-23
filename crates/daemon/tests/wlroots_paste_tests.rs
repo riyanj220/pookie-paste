@@ -1,8 +1,8 @@
 use daemon::paste_backend::{PasteBackend, PasteCapability, PlatformPasteBackend};
 use daemon::platform_focus_backend::PlatformFocusBackend;
 use daemon::wlroots_paste_backend::{
-    KEY_INTERVAL, KEY_LEFTCTRL, KEY_PRESS, KEY_RELEASE, KEY_V, WlrootsPasteBackend,
-    XKB_KEYMAP_STRING, create_keymap_memfd,
+    KEY_INTERVAL, KEY_LEFTCTRL, KEY_PRESS, KEY_RELEASE, KEY_V, MOD_CONTROL, WlrootsPasteBackend,
+    XKB_KEYMAP_STRING, create_keymap_memfd, monotonic_time_ms,
 };
 
 #[test]
@@ -11,7 +11,17 @@ fn keycodes_match_linux_evdev_standard() {
     assert_eq!(KEY_V, 47);
     assert_eq!(KEY_PRESS, 1);
     assert_eq!(KEY_RELEASE, 0);
+    assert_eq!(MOD_CONTROL, 4);
     assert!(KEY_INTERVAL.as_millis() >= 10);
+}
+
+#[test]
+fn monotonic_time_advances_and_is_nonzero() {
+    let t1 = monotonic_time_ms();
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    let t2 = monotonic_time_ms();
+    assert!(t1 > 0);
+    assert!(t2 >= t1);
 }
 
 #[test]
