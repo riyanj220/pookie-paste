@@ -12,6 +12,8 @@ serde_json = "1"
 
 [dependencies]
 
+serde_json = "1"
+
 tokio = { version = "1", features = ["full"] }
 
 tracing = "0.1"
@@ -76,5 +78,15 @@ reis = {
 
 rustix = {
     version = "1",
-    features = ["time"]
+    features = [
+        "time",
+        "fs"
+    ]
+}
+
+wayland-client = "0.31"
+
+wayland-protocols-misc = {
+    version = "0.3",
+    features = ["client"]
 }

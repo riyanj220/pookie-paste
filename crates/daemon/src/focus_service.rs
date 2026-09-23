@@ -37,12 +37,12 @@ where
     }
 
     pub async fn restore_and_wait(&self, target: FocusTarget) -> Result<(), FocusError> {
-        self.backend.restore(target)?;
+        self.backend.restore(target.clone())?;
 
         let started = Instant::now();
 
         loop {
-            if self.backend.is_active(target)? {
+            if self.backend.is_active(target.clone())? {
                 return Ok(());
             }
 

@@ -44,4 +44,10 @@ pub mod wayland_shortcut_backend;
 
 pub mod app_paths;
 
+pub mod sway_focus_backend;
+
+pub mod hyprland_focus_backend;
+
+pub mod wlroots_paste_backend;
+
 pub mod platform;
