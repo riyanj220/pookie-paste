@@ -1,4 +1,7 @@
-use crate::shortcut_backend::{Shortcut, ShortcutActivation, ShortcutBackend, ShortcutError};
+use crate::shortcut_backend::{
+    Shortcut, ShortcutActivation, ShortcutBackend, ShortcutBackendCapability, ShortcutError,
+    ShortcutRegistrationOutcome,
+};
 
 use crate::wayland_shortcut_backend::WaylandShortcutBackend;
 
@@ -41,10 +44,29 @@ impl PlatformShortcutBackend {
             Self::Unavailable => "unavailable",
         }
     }
+
+    pub fn capability(&self) -> ShortcutBackendCapability {
+        match self {
+            Self::X11(backend) => backend.capability(),
+            Self::Wayland(backend) => backend.capability(),
+            Self::Unavailable => ShortcutBackendCapability::Unsupported,
+        }
+    }
 }
 
 impl ShortcutBackend for PlatformShortcutBackend {
-    fn register(&mut self, shortcut: Shortcut) -> Result<(), ShortcutError> {
+    fn name(&self) -> &'static str {
+        self.name()
+    }
+
+    fn capability(&self) -> ShortcutBackendCapability {
+        self.capability()
+    }
+
+    fn register(
+        &mut self,
+        shortcut: Shortcut,
+    ) -> Result<ShortcutRegistrationOutcome, ShortcutError> {
         match self {
             Self::X11(backend) => backend.register(shortcut),
 

@@ -2,7 +2,8 @@ use x11rb::connection::Connection;
 use x11rb::protocol::xproto::{ConnectionExt as _, GrabMode, ModMask};
 
 use crate::shortcut_backend::{
-    Shortcut, ShortcutActivation, ShortcutBackend, ShortcutError, ShortcutKey, ShortcutModifiers,
+    Shortcut, ShortcutActivation, ShortcutBackend, ShortcutBackendCapability, ShortcutError,
+    ShortcutKey, ShortcutModifiers, ShortcutRegistrationOutcome,
 };
 
 const XK_NUM_LOCK: u32 = 0xff7f;
@@ -61,7 +62,18 @@ impl X11ShortcutBackend {
 }
 
 impl ShortcutBackend for X11ShortcutBackend {
-    fn register(&mut self, shortcut: Shortcut) -> Result<(), ShortcutError> {
+    fn name(&self) -> &'static str {
+        "X11 global shortcut"
+    }
+
+    fn capability(&self) -> ShortcutBackendCapability {
+        ShortcutBackendCapability::Native
+    }
+
+    fn register(
+        &mut self,
+        shortcut: Shortcut,
+    ) -> Result<ShortcutRegistrationOutcome, ShortcutError> {
         let keysym = shortcut_keysym(shortcut.key)?;
 
         let keycode = find_keycode(&self.connection, keysym)?;
@@ -109,7 +121,9 @@ impl ShortcutBackend for X11ShortcutBackend {
 
         self.pending_event = None;
 
-        Ok(())
+        Ok(ShortcutRegistrationOutcome::Active {
+            description: format!("X11 root window grab for {shortcut}"),
+        })
     }
 
     fn wait_for_activation(&mut self) -> Result<ShortcutActivation, ShortcutError> {
@@ -173,6 +187,8 @@ fn shortcut_keysym(key: ShortcutKey) -> Result<u32, ShortcutError> {
         }
 
         ShortcutKey::Character(_) => Err(ShortcutError::Unavailable),
+
+        ShortcutKey::Named(named) => Ok(named.keysym()),
     }
 }
 

@@ -13,7 +13,8 @@ use zbus::{
 };
 
 use crate::shortcut_backend::{
-    Shortcut, ShortcutActivation, ShortcutBackend, ShortcutError, ShortcutKey,
+    Shortcut, ShortcutActivation, ShortcutBackend, ShortcutBackendCapability, ShortcutError,
+    ShortcutKey, ShortcutRegistrationOutcome,
 };
 
 const PORTAL_DESTINATION: &str = "org.freedesktop.portal.Desktop";
@@ -385,7 +386,18 @@ impl WaylandShortcutBackend {
 }
 
 impl ShortcutBackend for WaylandShortcutBackend {
-    fn register(&mut self, shortcut: Shortcut) -> Result<(), ShortcutError> {
+    fn name(&self) -> &'static str {
+        "Wayland portal global shortcut"
+    }
+
+    fn capability(&self) -> ShortcutBackendCapability {
+        ShortcutBackendCapability::Portal
+    }
+
+    fn register(
+        &mut self,
+        shortcut: Shortcut,
+    ) -> Result<ShortcutRegistrationOutcome, ShortcutError> {
         if self.registered {
             return Err(ShortcutError::Failed(
                 "Wayland shortcut backend is already registered".to_string(),
@@ -473,7 +485,9 @@ impl ShortcutBackend for WaylandShortcutBackend {
 
         self.registered = true;
 
-        Ok(())
+        Ok(ShortcutRegistrationOutcome::Active {
+            description: format!("XDG Desktop Portal global shortcut for {shortcut}"),
+        })
     }
 
     fn wait_for_activation(&mut self) -> Result<ShortcutActivation, ShortcutError> {
@@ -907,6 +921,10 @@ fn portal_trigger(shortcut: Shortcut) -> Result<String, ShortcutError> {
 
         ShortcutKey::Character(_) => {
             return Err(ShortcutError::Unavailable);
+        }
+
+        ShortcutKey::Named(named) => {
+            trigger.push_str(named.portal_name());
         }
     }
 

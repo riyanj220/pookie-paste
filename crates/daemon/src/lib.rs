@@ -32,6 +32,8 @@ pub mod x11_paste_backend;
 
 pub mod shortcut_backend;
 
+pub mod shortcut_config;
+
 pub mod shortcut_listener;
 
 pub mod x11_shortcut_backend;

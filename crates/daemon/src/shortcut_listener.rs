@@ -30,42 +30,45 @@ impl ShortcutListener {
 
             info!("shortcut backend: {}", backend.name());
 
-            if let Err(error) = backend.register(Shortcut::super_v()) {
-                match error {
-                    ShortcutError::Conflict(message) => {
-                        warn!(
-                            %message,
-                            "global shortcut is already in use"
-                        );
-                    }
-
-                    ShortcutError::Unavailable => {
-                        warn!("global shortcuts are unavailable on this session");
-                    }
-
-                    ShortcutError::Cancelled => {
-                        warn!("global shortcut setup was cancelled");
-                    }
-
-                    ShortcutError::TimedOut(message) => {
-                        warn!(
-                            %message,
-                            "global shortcut setup timed out"
-                        );
-                    }
-
-                    ShortcutError::Failed(message) => {
-                        warn!(
-                            %message,
-                            "failed to register global shortcut"
-                        );
-                    }
+            match backend.register(Shortcut::super_v()) {
+                Ok(outcome) => {
+                    info!("global shortcut registered: {}", outcome.description());
                 }
+                Err(error) => {
+                    match error {
+                        ShortcutError::Conflict(message) => {
+                            warn!(
+                                %message,
+                                "global shortcut is already in use"
+                            );
+                        }
 
-                return;
+                        ShortcutError::Unavailable => {
+                            warn!("global shortcuts are unavailable on this session");
+                        }
+
+                        ShortcutError::Cancelled => {
+                            warn!("global shortcut setup was cancelled");
+                        }
+
+                        ShortcutError::TimedOut(message) => {
+                            warn!(
+                                %message,
+                                "global shortcut setup timed out"
+                            );
+                        }
+
+                        ShortcutError::Failed(message) => {
+                            warn!(
+                                %message,
+                                "failed to register global shortcut"
+                            );
+                        }
+                    }
+
+                    return;
+                }
             }
-
-            info!("global shortcut registered: Super+V");
 
             loop {
                 match backend.wait_for_activation() {
