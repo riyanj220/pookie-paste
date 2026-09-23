@@ -1,6 +1,7 @@
 pub use crate::wayland_paste_backend::WaylandPasteBackend;
 
 use crate::portal_eis_paste_backend::PortalEisPasteBackend;
+use crate::wlroots_paste_backend::WlrootsPasteBackend;
 use crate::x11_paste_backend::X11PasteBackend;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -23,8 +24,7 @@ pub trait PasteBackend: Send + Sync {
     /*
      * Most paste backends own no persistent runtime resources.
      *
-     * Portal/EIS overrides this to terminate its worker and
-     * emulation session explicitly.
+     * Portal/EIS and Wlroots override this to terminate their emulation sessions explicitly.
      */
     fn shutdown(&self) {}
 }
@@ -47,6 +47,7 @@ fn classify_session_type(session_type: &str) -> PasteBackendKind {
 pub enum PlatformPasteBackend {
     X11(Box<X11PasteBackend>),
     WaylandDirect(PortalEisPasteBackend),
+    WaylandWlroots(WlrootsPasteBackend),
     WaylandFallback(WaylandPasteBackend),
 }
 
@@ -95,6 +96,7 @@ impl PlatformPasteBackend {
         match self {
             Self::X11(_) => "X11 direct paste",
             Self::WaylandDirect(_) => "Wayland Portal/EIS direct paste",
+            Self::WaylandWlroots(_) => "Wayland wlroots virtual keyboard direct paste",
             Self::WaylandFallback(_) => "Wayland clipboard-only",
         }
     }
@@ -105,6 +107,7 @@ impl PasteBackend for PlatformPasteBackend {
         match self {
             Self::X11(backend) => backend.capability(),
             Self::WaylandDirect(backend) => backend.capability(),
+            Self::WaylandWlroots(backend) => backend.capability(),
             Self::WaylandFallback(backend) => backend.capability(),
         }
     }
@@ -113,6 +116,7 @@ impl PasteBackend for PlatformPasteBackend {
         match self {
             Self::X11(backend) => backend.paste(),
             Self::WaylandDirect(backend) => backend.paste(),
+            Self::WaylandWlroots(backend) => backend.paste(),
             Self::WaylandFallback(backend) => backend.paste(),
         }
     }
@@ -121,6 +125,7 @@ impl PasteBackend for PlatformPasteBackend {
         match self {
             Self::X11(backend) => backend.shutdown(),
             Self::WaylandDirect(backend) => backend.shutdown(),
+            Self::WaylandWlroots(backend) => backend.shutdown(),
             Self::WaylandFallback(backend) => backend.shutdown(),
         }
     }

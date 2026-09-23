@@ -91,7 +91,10 @@ impl PlatformFocusBackend {
     }
 
     pub fn can_restore_focus(&self) -> bool {
-        matches!(self, Self::X11(_) | Self::Kde(_))
+        matches!(
+            self,
+            Self::X11(_) | Self::Kde(_) | Self::Sway(_) | Self::Hyprland(_)
+        )
     }
 }
 
