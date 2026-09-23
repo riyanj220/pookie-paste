@@ -140,7 +140,7 @@ where
         }
 
         if let Some(target) = target
-            && let Err(error) = self.focus_service.restore_and_wait(target).await
+            && let Err(error) = self.focus_service.restore_and_wait(target.clone()).await
         {
             tracing::error!(
                 error = ?error,

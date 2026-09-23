@@ -1,6 +1,8 @@
 use crate::focus_backend::{FocusBackend, FocusError, FocusTarget, UnavailableFocusBackend};
 
+use crate::hyprland_focus_backend::HyprlandFocusBackend;
 use crate::kde_focus_backend::KdeFocusBackend;
+use crate::sway_focus_backend::SwayFocusBackend;
 use crate::x11_focus_backend::X11FocusBackend;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,6 +38,10 @@ pub enum PlatformFocusBackend {
     X11(Box<X11FocusBackend>),
 
     Kde(KdeFocusBackend),
+
+    Sway(SwayFocusBackend),
+
+    Hyprland(HyprlandFocusBackend),
 
     Unavailable(UnavailableFocusBackend),
 }
@@ -76,12 +82,19 @@ impl PlatformFocusBackend {
 
             Self::Kde(_) => "KDE KWin focus",
 
+            Self::Sway(_) => "Sway focus",
+
+            Self::Hyprland(_) => "Hyprland focus",
+
             Self::Unavailable(_) => "unavailable",
         }
     }
 
     pub fn can_restore_focus(&self) -> bool {
-        matches!(self, Self::X11(_) | Self::Kde(_))
+        matches!(
+            self,
+            Self::X11(_) | Self::Kde(_) | Self::Sway(_) | Self::Hyprland(_)
+        )
     }
 }
 
@@ -91,6 +104,10 @@ impl FocusBackend for PlatformFocusBackend {
             Self::X11(backend) => backend.active_target(),
 
             Self::Kde(backend) => backend.active_target(),
+
+            Self::Sway(backend) => backend.active_target(),
+
+            Self::Hyprland(backend) => backend.active_target(),
 
             Self::Unavailable(backend) => backend.active_target(),
         }
@@ -102,6 +119,10 @@ impl FocusBackend for PlatformFocusBackend {
 
             Self::Kde(backend) => backend.restore(target),
 
+            Self::Sway(backend) => backend.restore(target),
+
+            Self::Hyprland(backend) => backend.restore(target),
+
             Self::Unavailable(backend) => backend.restore(target),
         }
     }
@@ -111,6 +132,10 @@ impl FocusBackend for PlatformFocusBackend {
             Self::X11(backend) => backend.is_active(target),
 
             Self::Kde(backend) => backend.is_active(target),
+
+            Self::Sway(backend) => backend.is_active(target),
+
+            Self::Hyprland(backend) => backend.is_active(target),
 
             Self::Unavailable(backend) => backend.is_active(target),
         }

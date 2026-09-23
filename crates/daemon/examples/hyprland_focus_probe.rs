@@ -1,29 +1,35 @@
 use std::time::Duration;
 
-use daemon::{focus_backend::FocusBackend, kde_focus_backend::KdeFocusBackend};
+use daemon::{focus_backend::FocusBackend, hyprland_focus_backend::HyprlandFocusBackend};
 
 fn main() -> anyhow::Result<()> {
-    println!("KDE focus backend production probe");
-    println!("----------------------------------");
+    println!("Hyprland focus backend production probe");
+    println!("---------------------------------------");
     println!();
-    println!("Focus Kate/KWrite now.");
-    println!("Capturing in 5 seconds...");
+
+    let backend = HyprlandFocusBackend::new().map_err(|error| {
+        anyhow::anyhow!(
+            "failed to initialize Hyprland focus backend: {error:?} (is HYPRLAND_INSTANCE_SIGNATURE set?)"
+        )
+    })?;
+
+    println!(
+        "OK: HyprlandFocusBackend initialized via {}",
+        backend.socket_path().display()
+    );
+    println!();
+    println!("Keep the window you want to test focused (e.g. this Terminal or a text editor).");
+    println!("Capturing active target in 5 seconds...");
 
     std::thread::sleep(Duration::from_secs(5));
-
-    let backend = KdeFocusBackend::new()
-        .map_err(|error| anyhow::anyhow!("failed to initialize KDE focus backend: {error:?}"))?;
-
-    println!("OK: KdeFocusBackend initialized");
 
     let target = backend
         .active_target()
         .map_err(|error| anyhow::anyhow!("failed to capture active target: {error:?}"))?;
 
     println!("Captured target: {target}");
-
     println!();
-    println!("Now switch to Terminal or Firefox.");
+    println!("Now switch to another window (e.g. Firefox or another terminal).");
     println!("Restore will happen in 5 seconds...");
 
     std::thread::sleep(Duration::from_secs(5));
@@ -32,10 +38,9 @@ fn main() -> anyhow::Result<()> {
         .restore(target.clone())
         .map_err(|error| anyhow::anyhow!("failed to request restore: {error:?}"))?;
 
-    println!("OK: restore requested");
-
+    println!("OK: restore requested for {target}");
     println!();
-    println!("Waiting for target to become active...");
+    println!("Waiting for target to become active again...");
 
     for attempt in 1..=50 {
         if backend
@@ -44,12 +49,11 @@ fn main() -> anyhow::Result<()> {
         {
             println!("OK: captured target is active again");
             println!();
-            println!("KDE production focus probe: PASS");
+            println!("Hyprland production focus probe: PASS");
             return Ok(());
         }
 
         println!("Focus check {attempt}: not active yet");
-
         std::thread::sleep(Duration::from_millis(20));
     }
 

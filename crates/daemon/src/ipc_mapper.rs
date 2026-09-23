@@ -85,6 +85,10 @@ pub fn to_ipc_focus_target(target: FocusTarget) -> IpcFocusTarget {
         FocusTarget::X11(id) => IpcFocusTarget::X11(id),
 
         FocusTarget::Kde(id) => IpcFocusTarget::Kde(id.to_string()),
+
+        FocusTarget::Sway(id) => IpcFocusTarget::Sway(id),
+
+        FocusTarget::Hyprland(address) => IpcFocusTarget::Hyprland(address),
     }
 }
 
@@ -98,6 +102,10 @@ pub fn from_ipc_focus_target(target: IpcFocusTarget) -> Result<FocusTarget, Stri
 
             Ok(FocusTarget::kde(id))
         }
+
+        IpcFocusTarget::Sway(id) => Ok(FocusTarget::sway(id)),
+
+        IpcFocusTarget::Hyprland(address) => Ok(FocusTarget::hyprland(address)),
     }
 }
 
@@ -269,6 +277,29 @@ mod tests {
         let result = from_ipc_focus_target(IpcFocusTarget::Kde("not-a-uuid".to_string()));
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn maps_sway_focus_target_bidirectionally() {
+        let target = FocusTarget::sway(42);
+        let ipc_target = to_ipc_focus_target(target.clone());
+        assert_eq!(ipc_target, IpcFocusTarget::Sway(42));
+
+        let round_tripped = from_ipc_focus_target(ipc_target).expect("mapping should succeed");
+        assert_eq!(round_tripped, target);
+    }
+
+    #[test]
+    fn maps_hyprland_focus_target_bidirectionally() {
+        let target = FocusTarget::hyprland("0x55a72f1b8a90");
+        let ipc_target = to_ipc_focus_target(target.clone());
+        assert_eq!(
+            ipc_target,
+            IpcFocusTarget::Hyprland("0x55a72f1b8a90".to_string())
+        );
+
+        let round_tripped = from_ipc_focus_target(ipc_target).expect("mapping should succeed");
+        assert_eq!(round_tripped, target);
     }
 
     #[test]

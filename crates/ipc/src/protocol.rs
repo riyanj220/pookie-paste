@@ -252,6 +252,10 @@ pub enum IpcFocusTarget {
     X11(u64),
 
     Kde(String),
+
+    Sway(i64),
+
+    Hyprland(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -549,6 +553,38 @@ mod tests {
 
         let decoded: IpcResponse = serde_json::from_str(&encoded).expect("deserialization failed");
 
+        assert_eq!(decoded, response);
+    }
+
+    #[test]
+    fn sway_focus_target_response_round_trips() {
+        let response = IpcResponse::FocusTarget {
+            target_id: Some(IpcFocusTarget::Sway(42)),
+        };
+
+        let encoded = serde_json::to_string(&response).expect("serialization failed");
+        assert_eq!(
+            encoded,
+            r#"{"type":"focus_target","target_id":{"kind":"sway","value":42}}"#
+        );
+
+        let decoded: IpcResponse = serde_json::from_str(&encoded).expect("deserialization failed");
+        assert_eq!(decoded, response);
+    }
+
+    #[test]
+    fn hyprland_focus_target_response_round_trips() {
+        let response = IpcResponse::FocusTarget {
+            target_id: Some(IpcFocusTarget::Hyprland("0x55a72f1b8a90".to_string())),
+        };
+
+        let encoded = serde_json::to_string(&response).expect("serialization failed");
+        assert_eq!(
+            encoded,
+            r#"{"type":"focus_target","target_id":{"kind":"hyprland","value":"0x55a72f1b8a90"}}"#
+        );
+
+        let decoded: IpcResponse = serde_json::from_str(&encoded).expect("deserialization failed");
         assert_eq!(decoded, response);
     }
 
