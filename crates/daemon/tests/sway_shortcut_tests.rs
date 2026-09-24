@@ -194,7 +194,7 @@ fn diagnoses_conflicts_and_absent_bindings() {
 
 #[test]
 fn backend_lifecycle_and_capability_offline() {
-    let mut backend = SwayShortcutBackend::from_socket(None);
+    let mut backend = SwayShortcutBackend::from_offline_config(None);
 
     assert_eq!(backend.name(), "Sway compositor-managed shortcut");
     assert_eq!(
@@ -230,4 +230,104 @@ fn backend_lifecycle_and_capability_offline() {
 
     backend.unregister().expect("clean unregister");
     assert_eq!(backend.registered_shortcut(), None);
+}
+
+#[test]
+fn offline_sway_backend_empty_config_yields_unverified_no_conflict() {
+    for empty_cfg in [None, Some(""), Some("# only comments\n\n")] {
+        let mut backend = SwayShortcutBackend::from_offline_config(empty_cfg);
+        let outcome = backend
+            .register(Shortcut::super_v())
+            .expect("registration succeeds");
+
+        match outcome {
+            ShortcutRegistrationOutcome::CompositorManaged {
+                binding_snippet,
+                verified,
+                conflict,
+            } => {
+                assert_eq!(binding_snippet, "bindsym Mod4+v exec pookie-paste --toggle");
+                assert!(!verified, "offline must never be verified without live IPC");
+                assert!(conflict.is_none(), "empty config should have no conflict");
+            }
+            other => panic!("expected CompositorManaged outcome, got: {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn offline_sway_backend_pookie_binding_yields_unverified_no_conflict() {
+    let pookie_configs = [
+        "bindsym Mod4+v exec pookie-paste --toggle",
+        "set $mod Mod4\nbindsym $mod+v exec pookie-paste --toggle",
+        "bindsym Mod4+v exec /usr/bin/pookie-paste -t",
+    ];
+
+    for config in pookie_configs {
+        let mut backend = SwayShortcutBackend::from_offline_config(Some(config));
+        let outcome = backend
+            .register(Shortcut::super_v())
+            .expect("registration succeeds");
+
+        match outcome {
+            ShortcutRegistrationOutcome::CompositorManaged {
+                binding_snippet,
+                verified,
+                conflict,
+            } => {
+                assert_eq!(binding_snippet, "bindsym Mod4+v exec pookie-paste --toggle");
+                // Even though the binding matches in the static file, offline inspection must NOT report verified = true!
+                assert!(
+                    !verified,
+                    "file-only fallback without live IPC must report verified = false"
+                );
+                assert!(
+                    conflict.is_none(),
+                    "matching pookie binding must not report conflict"
+                );
+            }
+            other => panic!("expected CompositorManaged outcome, got: {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn offline_sway_backend_conflicting_super_v_binding_yields_unverified_with_conflict() {
+    // Directly models the distro default on Fedora (/etc/sway/config with bindsym $mod+v splitv)
+    let conflicting_configs = [
+        ("bindsym Mod4+v splitv", "splitv"),
+        ("set $mod Mod4\nbindsym $mod+v splitv", "splitv"),
+        (
+            "bindsym Mod4+v exec clipman pick -t rofi",
+            "exec clipman pick -t rofi",
+        ),
+    ];
+
+    for (config, conflicting_cmd) in conflicting_configs {
+        let mut backend = SwayShortcutBackend::from_offline_config(Some(config));
+        let outcome = backend
+            .register(Shortcut::super_v())
+            .expect("registration succeeds");
+
+        match outcome {
+            ShortcutRegistrationOutcome::CompositorManaged {
+                binding_snippet,
+                verified,
+                conflict,
+            } => {
+                assert_eq!(binding_snippet, "bindsym Mod4+v exec pookie-paste --toggle");
+                assert!(!verified);
+                assert!(
+                    conflict.is_some(),
+                    "conflicting binding must report conflict"
+                );
+                let conflict_str = conflict.unwrap();
+                assert!(
+                    conflict_str.contains(conflicting_cmd),
+                    "conflict message '{conflict_str}' must mention '{conflicting_cmd}'"
+                );
+            }
+            other => panic!("expected CompositorManaged outcome, got: {other:?}"),
+        }
+    }
 }

@@ -20,8 +20,15 @@ pub enum SwayBindingDiagnosis {
     NotFound,
 }
 
+#[derive(Debug, Clone)]
+enum FallbackSource {
+    HostFilesystem,
+    Explicit(Option<String>),
+}
+
 pub struct SwayShortcutBackend {
     socket_path: Option<PathBuf>,
+    fallback_source: FallbackSource,
     registered_shortcut: Option<Shortcut>,
 }
 
@@ -34,16 +41,36 @@ impl SwayShortcutBackend {
 
         Ok(Self {
             socket_path,
+            fallback_source: FallbackSource::HostFilesystem,
             registered_shortcut: None,
         })
     }
 
-    /// Creates a backend with an explicit socket path (for deterministic testing).
+    /// Creates a backend with an explicit socket path and default host filesystem fallback.
     pub fn from_socket(socket_path: Option<PathBuf>) -> Self {
         Self {
             socket_path,
+            fallback_source: FallbackSource::HostFilesystem,
             registered_shortcut: None,
         }
+    }
+
+    /// Creates an isolated offline backend with explicit fallback configuration content (or None).
+    ///
+    /// This constructor bypasses host filesystem inspection (`~/.config/sway/config`, `/etc/sway/config`)
+    /// and IPC, providing 100% deterministic isolation for tests and controlled environments.
+    pub fn from_offline_config(config: Option<&str>) -> Self {
+        Self {
+            socket_path: None,
+            fallback_source: FallbackSource::Explicit(config.map(str::to_string)),
+            registered_shortcut: None,
+        }
+    }
+
+    /// Sets or overrides the fallback config source (for deterministic testing with or without IPC).
+    pub fn with_fallback_config(mut self, config: Option<&str>) -> Self {
+        self.fallback_source = FallbackSource::Explicit(config.map(str::to_string));
+        self
     }
 
     pub fn socket_path(&self) -> Option<&Path> {
@@ -112,9 +139,14 @@ impl ShortcutBackend for SwayShortcutBackend {
             }
         }
 
-        // 2. Diagnostic fallback to configuration file on disk (IPC unavailable)
+        // 2. Diagnostic fallback to configuration file or explicit mock content (IPC unavailable)
         self.registered_shortcut = Some(shortcut);
-        if let Some(file_content) = read_sway_config_file() {
+        let fallback_content = match &self.fallback_source {
+            FallbackSource::HostFilesystem => read_sway_config_file(),
+            FallbackSource::Explicit(content) => content.clone(),
+        };
+
+        if let Some(file_content) = fallback_content {
             let diagnosis = diagnose_sway_config(&file_content, shortcut);
             match diagnosis {
                 SwayBindingDiagnosis::MatchedPookie => {
