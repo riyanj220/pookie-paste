@@ -3,8 +3,9 @@ use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 use crate::platform_shortcut_backend::PlatformShortcutBackend;
-
-use crate::shortcut_backend::{Shortcut, ShortcutActivation, ShortcutBackend, ShortcutError};
+use crate::shortcut_backend::{
+    Shortcut, ShortcutActivation, ShortcutBackend, ShortcutBackendCapability, ShortcutError,
+};
 
 pub struct ShortcutListener {
     receiver: mpsc::UnboundedReceiver<ShortcutActivation>,
@@ -68,6 +69,13 @@ impl ShortcutListener {
 
                     return;
                 }
+            }
+
+            if backend.capability() == ShortcutBackendCapability::CompositorManaged {
+                info!(
+                    "compositor-managed shortcut backend active; activation is handled via daemon IPC"
+                );
+                return;
             }
 
             loop {

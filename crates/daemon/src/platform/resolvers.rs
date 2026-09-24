@@ -16,6 +16,7 @@ use crate::platform_shortcut_backend::PlatformShortcutBackend;
 use crate::portal_eis_paste_backend::PortalEisPasteBackend;
 use crate::shortcut_backend::ShortcutError;
 use crate::sway_focus_backend::SwayFocusBackend;
+use crate::sway_shortcut_backend::SwayShortcutBackend;
 use crate::wayland_shortcut_backend::WaylandShortcutBackend;
 use crate::wlroots_paste_backend::WlrootsPasteBackend;
 use crate::x11_focus_backend::X11FocusBackend;
@@ -156,10 +157,47 @@ pub fn resolve_shortcut_backend(
             X11ShortcutBackend::new()?,
         ))),
 
-        SessionKind::Wayland => Ok(PlatformShortcutBackend::Wayland(Box::new(
-            WaylandShortcutBackend::new()?,
-        ))),
+        SessionKind::Wayland => match audit.desktop {
+            DesktopKind::Kde => Ok(PlatformShortcutBackend::Wayland(Box::new(
+                WaylandShortcutBackend::new()?,
+            ))),
+            _ => {
+                if is_sway_environment(audit) {
+                    match SwayShortcutBackend::new() {
+                        Ok(backend) => Ok(PlatformShortcutBackend::Sway(Box::new(backend))),
+                        Err(err) => {
+                            tracing::warn!(
+                                error = ?err,
+                                "Sway shortcut backend unavailable; using portal fallback"
+                            );
+                            Ok(PlatformShortcutBackend::Wayland(Box::new(
+                                WaylandShortcutBackend::new()?,
+                            )))
+                        }
+                    }
+                } else {
+                    Ok(PlatformShortcutBackend::Wayland(Box::new(
+                        WaylandShortcutBackend::new()?,
+                    )))
+                }
+            }
+        },
 
         SessionKind::Unknown => Ok(PlatformShortcutBackend::Unavailable),
     }
+}
+
+fn is_sway_environment(audit: &EnvironmentAudit) -> bool {
+    let desktop_indicates_sway = audit
+        .raw_desktop
+        .to_ascii_lowercase()
+        .split([':', ';'])
+        .any(|p| p.trim() == "sway");
+
+    let swaysock_valid = std::env::var_os("SWAYSOCK")
+        .map(std::path::PathBuf::from)
+        .map(|p| p.exists())
+        .unwrap_or(false);
+
+    desktop_indicates_sway || swaysock_valid
 }

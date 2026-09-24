@@ -44,6 +44,8 @@ pub mod platform_shortcut_backend;
 
 pub mod wayland_shortcut_backend;
 
+pub mod sway_shortcut_backend;
+
 pub mod app_paths;
 
 pub mod sway_focus_backend;
