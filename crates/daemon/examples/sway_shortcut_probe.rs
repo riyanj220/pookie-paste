@@ -48,6 +48,7 @@ fn main() -> anyhow::Result<()> {
             binding_snippet,
             verified,
             conflict,
+            diagnostic: _,
         } => {
             println!("   Generated directive: {binding_snippet}");
             if verified {
@@ -86,6 +87,7 @@ fn main() -> anyhow::Result<()> {
             binding_snippet,
             verified,
             conflict,
+            diagnostic: _,
         } => {
             println!("   Generated directive: {binding_snippet}");
             if verified {
@@ -118,6 +120,7 @@ fn main() -> anyhow::Result<()> {
             binding_snippet,
             verified,
             conflict,
+            diagnostic: _,
         } => {
             println!("   Generated directive: {binding_snippet}");
             if verified {

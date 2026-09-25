@@ -110,6 +110,7 @@ impl ShortcutBackend for SwayShortcutBackend {
                                 binding_snippet,
                                 verified: true,
                                 conflict: None,
+                                diagnostic: None,
                             })
                         }
                         SwayBindingDiagnosis::Conflict { command } => {
@@ -119,6 +120,7 @@ impl ShortcutBackend for SwayShortcutBackend {
                                 conflict: Some(format!(
                                     "Key is bound to '{command}' in active Sway configuration"
                                 )),
+                                diagnostic: None,
                             })
                         }
                         SwayBindingDiagnosis::NotFound => {
@@ -126,6 +128,7 @@ impl ShortcutBackend for SwayShortcutBackend {
                                 binding_snippet,
                                 verified: false,
                                 conflict: None,
+                                diagnostic: None,
                             })
                         }
                     };
@@ -155,6 +158,7 @@ impl ShortcutBackend for SwayShortcutBackend {
                         binding_snippet,
                         verified: false,
                         conflict: None,
+                        diagnostic: None,
                     })
                 }
                 SwayBindingDiagnosis::Conflict { command } => {
@@ -164,6 +168,7 @@ impl ShortcutBackend for SwayShortcutBackend {
                         conflict: Some(format!(
                             "Key is bound to '{command}' in configuration file (Sway IPC unavailable)"
                         )),
+                        diagnostic: None,
                     })
                 }
                 SwayBindingDiagnosis::NotFound => {
@@ -171,6 +176,7 @@ impl ShortcutBackend for SwayShortcutBackend {
                         binding_snippet,
                         verified: false,
                         conflict: None,
+                        diagnostic: None,
                     })
                 }
             }
@@ -179,6 +185,7 @@ impl ShortcutBackend for SwayShortcutBackend {
                 binding_snippet,
                 verified: false,
                 conflict: None,
+                diagnostic: None,
             })
         }
     }

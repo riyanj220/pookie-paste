@@ -210,11 +210,13 @@ fn backend_lifecycle_and_capability_offline() {
             binding_snippet,
             verified,
             conflict,
+            diagnostic,
         } => {
             assert_eq!(binding_snippet, "bindsym Mod4+v exec pookie-paste --toggle");
             // Offline without IPC, verified MUST be false
             assert!(!verified);
             assert!(conflict.is_none());
+            assert!(diagnostic.is_none());
         }
         other => panic!("expected CompositorManaged outcome, got: {other:?}"),
     }
@@ -245,10 +247,12 @@ fn offline_sway_backend_empty_config_yields_unverified_no_conflict() {
                 binding_snippet,
                 verified,
                 conflict,
+                diagnostic,
             } => {
                 assert_eq!(binding_snippet, "bindsym Mod4+v exec pookie-paste --toggle");
                 assert!(!verified, "offline must never be verified without live IPC");
                 assert!(conflict.is_none(), "empty config should have no conflict");
+                assert!(diagnostic.is_none());
             }
             other => panic!("expected CompositorManaged outcome, got: {other:?}"),
         }
@@ -274,6 +278,7 @@ fn offline_sway_backend_pookie_binding_yields_unverified_no_conflict() {
                 binding_snippet,
                 verified,
                 conflict,
+                diagnostic,
             } => {
                 assert_eq!(binding_snippet, "bindsym Mod4+v exec pookie-paste --toggle");
                 // Even though the binding matches in the static file, offline inspection must NOT report verified = true!
@@ -285,6 +290,7 @@ fn offline_sway_backend_pookie_binding_yields_unverified_no_conflict() {
                     conflict.is_none(),
                     "matching pookie binding must not report conflict"
                 );
+                assert!(diagnostic.is_none());
             }
             other => panic!("expected CompositorManaged outcome, got: {other:?}"),
         }
@@ -314,6 +320,7 @@ fn offline_sway_backend_conflicting_super_v_binding_yields_unverified_with_confl
                 binding_snippet,
                 verified,
                 conflict,
+                diagnostic,
             } => {
                 assert_eq!(binding_snippet, "bindsym Mod4+v exec pookie-paste --toggle");
                 assert!(!verified);
@@ -326,6 +333,7 @@ fn offline_sway_backend_conflicting_super_v_binding_yields_unverified_with_confl
                     conflict_str.contains(conflicting_cmd),
                     "conflict message '{conflict_str}' must mention '{conflicting_cmd}'"
                 );
+                assert!(diagnostic.is_none());
             }
             other => panic!("expected CompositorManaged outcome, got: {other:?}"),
         }

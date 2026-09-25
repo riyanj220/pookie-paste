@@ -242,6 +242,7 @@ pub enum ShortcutRegistrationOutcome {
         binding_snippet: String,
         verified: bool,
         conflict: Option<String>,
+        diagnostic: Option<String>,
     },
 
     /// The key could not be bound because of an active conflict.

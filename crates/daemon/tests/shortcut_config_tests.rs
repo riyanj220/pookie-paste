@@ -211,6 +211,7 @@ fn capability_and_outcome_contracts_are_sound() {
         binding_snippet: "bind = SUPER, V, exec, pookie-paste --toggle".to_string(),
         verified: true,
         conflict: None,
+        diagnostic: None,
     };
     assert_eq!(
         outcome_managed.description(),

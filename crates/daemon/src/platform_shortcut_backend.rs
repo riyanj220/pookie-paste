@@ -3,6 +3,7 @@ use crate::shortcut_backend::{
     ShortcutRegistrationOutcome,
 };
 
+use crate::hyprland_shortcut_backend::HyprlandShortcutBackend;
 use crate::sway_shortcut_backend::SwayShortcutBackend;
 use crate::wayland_shortcut_backend::WaylandShortcutBackend;
 use crate::x11_shortcut_backend::X11ShortcutBackend;
@@ -18,6 +19,7 @@ enum SessionType {
 pub enum PlatformShortcutBackend {
     X11(Box<X11ShortcutBackend>),
     Sway(Box<SwayShortcutBackend>),
+    Hyprland(Box<HyprlandShortcutBackend>),
     Wayland(Box<WaylandShortcutBackend>),
     Unavailable,
 }
@@ -32,6 +34,7 @@ impl PlatformShortcutBackend {
         match self {
             Self::X11(b) => b.name(),
             Self::Sway(b) => b.name(),
+            Self::Hyprland(b) => b.name(),
             Self::Wayland(b) => b.name(),
             Self::Unavailable => "unavailable",
         }
@@ -41,6 +44,7 @@ impl PlatformShortcutBackend {
         match self {
             Self::X11(b) => b.capability(),
             Self::Sway(b) => b.capability(),
+            Self::Hyprland(b) => b.capability(),
             Self::Wayland(b) => b.capability(),
             Self::Unavailable => ShortcutBackendCapability::Unsupported,
         }
@@ -63,6 +67,7 @@ impl ShortcutBackend for PlatformShortcutBackend {
         match self {
             Self::X11(backend) => backend.register(shortcut),
             Self::Sway(backend) => backend.register(shortcut),
+            Self::Hyprland(backend) => backend.register(shortcut),
             Self::Wayland(backend) => backend.register(shortcut),
             Self::Unavailable => Err(ShortcutError::Unavailable),
         }
@@ -72,6 +77,7 @@ impl ShortcutBackend for PlatformShortcutBackend {
         match self {
             Self::X11(backend) => backend.wait_for_activation(),
             Self::Sway(backend) => backend.wait_for_activation(),
+            Self::Hyprland(backend) => backend.wait_for_activation(),
             Self::Wayland(backend) => backend.wait_for_activation(),
             Self::Unavailable => Err(ShortcutError::Unavailable),
         }
@@ -81,6 +87,7 @@ impl ShortcutBackend for PlatformShortcutBackend {
         match self {
             Self::X11(backend) => backend.unregister(),
             Self::Sway(backend) => backend.unregister(),
+            Self::Hyprland(backend) => backend.unregister(),
             Self::Wayland(backend) => backend.unregister(),
             Self::Unavailable => Ok(()),
         }
