@@ -3,8 +3,8 @@ use std::path::Path;
 use std::process;
 
 use ipc::{
-    IpcClient, IpcRequest, IpcResponse, IpcShortcutCapability, IpcShortcutState,
-    ShortcutStatusInfo, socket_path,
+    IpcClient, IpcCompositorBindingStatus, IpcRequest, IpcResponse, IpcShortcutCapability,
+    IpcShortcutState, ShortcutStatusInfo, socket_path,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -196,17 +196,16 @@ pub fn format_shortcut_status(status: &ShortcutStatusInfo) -> String {
             out.push_str(&format!("Details             : {}\n", description));
         }
         IpcShortcutState::CompositorManaged {
-            verified,
+            binding_status,
             snippet,
             conflict,
             diagnostic,
         } => {
-            let status_str = if *verified {
-                "Verified"
-            } else if conflict.is_some() {
-                "Conflict"
-            } else {
-                "Unconfigured / Unverified"
+            let status_str = match binding_status {
+                IpcCompositorBindingStatus::Verified => "Verified",
+                IpcCompositorBindingStatus::BoundUnverified => "Bound / Unverified",
+                IpcCompositorBindingStatus::Unconfigured => "Unconfigured / Missing",
+                IpcCompositorBindingStatus::Conflict => "Conflict",
             };
             out.push_str(&format!("Status              : {}\n", status_str));
             out.push_str(&format!("Binding Directive   : {}\n", snippet));
@@ -216,10 +215,23 @@ pub fn format_shortcut_status(status: &ShortcutStatusInfo) -> String {
             if let Some(d) = diagnostic {
                 out.push_str(&format!("Diagnostic          : {}\n", d));
             }
-            if !*verified {
-                out.push_str(
-                    "Action Required     : Add the binding directive above to your compositor configuration.\n",
-                );
+            match binding_status {
+                IpcCompositorBindingStatus::Unconfigured => {
+                    out.push_str(
+                        "Action Required     : Add the binding directive above to your compositor configuration.\n",
+                    );
+                }
+                IpcCompositorBindingStatus::Conflict => {
+                    out.push_str(
+                        "Action Required     : Resolve the conflicting shortcut in your compositor configuration.\n",
+                    );
+                }
+                IpcCompositorBindingStatus::BoundUnverified => {
+                    out.push_str(
+                        "Guidance            : Ensure the active binding executes 'pookie-paste --toggle'.\n",
+                    );
+                }
+                IpcCompositorBindingStatus::Verified => {}
             }
         }
         IpcShortcutState::Conflict { details } => {
@@ -325,7 +337,7 @@ mod tests {
             capability: Some(IpcShortcutCapability::CompositorManaged),
             effective_shortcut: None,
             state: IpcShortcutState::CompositorManaged {
-                verified: false,
+                binding_status: IpcCompositorBindingStatus::Conflict,
                 snippet: "bindsym $mod+v exec pookie-paste --toggle".to_string(),
                 conflict: Some("Existing binding found for $mod+v".to_string()),
                 diagnostic: Some("Found 1 conflict in ~/.config/sway/config".to_string()),
@@ -340,6 +352,35 @@ mod tests {
         assert!(
             formatted.contains("Diagnostic          : Found 1 conflict in ~/.config/sway/config")
         );
-        assert!(formatted.contains("Action Required     : Add the binding directive"));
+        assert!(formatted.contains("Action Required     : Resolve the conflicting shortcut"));
+    }
+
+    #[test]
+    fn formats_compositor_managed_bound_unverified_status() {
+        let status = ShortcutStatusInfo {
+            configured_shortcut: "Super+V".to_string(),
+            backend_name: Some("Hyprland compositor-managed shortcut".to_string()),
+            capability: Some(IpcShortcutCapability::CompositorManaged),
+            effective_shortcut: None,
+            state: IpcShortcutState::CompositorManaged {
+                binding_status: IpcCompositorBindingStatus::BoundUnverified,
+                snippet: "hl.bind(\"SUPER + V\", hl.dsp.exec_cmd(\"pookie-paste --toggle\"))"
+                    .to_string(),
+                conflict: None,
+                diagnostic: Some(
+                    "Key is actively bound to a Lua callback (__lua, id: 99) in Hyprland; runtime command target cannot be verified over IPC".to_string(),
+                ),
+            },
+        };
+        let formatted = format_shortcut_status(&status);
+        assert!(formatted.contains("Status              : Bound / Unverified"));
+        assert!(formatted.contains("Binding Directive   : hl.bind(\"SUPER + V\""));
+        assert!(formatted.contains(
+            "Diagnostic          : Key is actively bound to a Lua callback (__lua, id: 99)"
+        ));
+        assert!(formatted.contains(
+            "Guidance            : Ensure the active binding executes 'pookie-paste --toggle'"
+        ));
+        assert!(!formatted.contains("Action Required"));
     }
 }

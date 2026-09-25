@@ -321,6 +321,19 @@ pub enum IpcShortcutCapability {
     Unsupported,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IpcCompositorBindingStatus {
+    /// Binding exists in active compositor and target is verified as Pookie.
+    Verified,
+    /// Binding definitely exists, but its target cannot be verified (e.g. Hyprland __lua callback).
+    BoundUnverified,
+    /// No binding exists for the configured shortcut.
+    Unconfigured,
+    /// Binding exists and is known to target something else.
+    Conflict,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum IpcShortcutState {
@@ -329,7 +342,7 @@ pub enum IpcShortcutState {
         description: String,
     },
     CompositorManaged {
-        verified: bool,
+        binding_status: IpcCompositorBindingStatus,
         snippet: String,
         conflict: Option<String>,
         diagnostic: Option<String>,

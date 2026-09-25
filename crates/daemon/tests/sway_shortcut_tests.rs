@@ -1,6 +1,6 @@
 use daemon::shortcut_backend::{
-    NamedKey, Shortcut, ShortcutBackend, ShortcutBackendCapability, ShortcutError, ShortcutKey,
-    ShortcutModifiers, ShortcutRegistrationOutcome,
+    CompositorBindingStatus, NamedKey, Shortcut, ShortcutBackend, ShortcutBackendCapability,
+    ShortcutError, ShortcutKey, ShortcutModifiers, ShortcutRegistrationOutcome,
 };
 use daemon::sway_shortcut_backend::{
     SwayBindingDiagnosis, SwayShortcutBackend, diagnose_sway_config, format_sway_binding,
@@ -208,13 +208,14 @@ fn backend_lifecycle_and_capability_offline() {
     match outcome {
         ShortcutRegistrationOutcome::CompositorManaged {
             binding_snippet,
-            verified,
+            status,
             conflict,
             diagnostic,
         } => {
             assert_eq!(binding_snippet, "bindsym Mod4+v exec pookie-paste --toggle");
-            // Offline without IPC, verified MUST be false
-            assert!(!verified);
+            // Offline without IPC, status must be Unconfigured
+            assert_eq!(status, CompositorBindingStatus::Unconfigured);
+            assert!(!status.is_verified());
             assert!(conflict.is_none());
             assert!(diagnostic.is_none());
         }
@@ -245,12 +246,13 @@ fn offline_sway_backend_empty_config_yields_unverified_no_conflict() {
         match outcome {
             ShortcutRegistrationOutcome::CompositorManaged {
                 binding_snippet,
-                verified,
+                status,
                 conflict,
                 diagnostic,
             } => {
                 assert_eq!(binding_snippet, "bindsym Mod4+v exec pookie-paste --toggle");
-                assert!(!verified, "offline must never be verified without live IPC");
+                assert_eq!(status, CompositorBindingStatus::Unconfigured);
+                assert!(!status.is_verified());
                 assert!(conflict.is_none(), "empty config should have no conflict");
                 assert!(diagnostic.is_none());
             }
@@ -276,16 +278,14 @@ fn offline_sway_backend_pookie_binding_yields_unverified_no_conflict() {
         match outcome {
             ShortcutRegistrationOutcome::CompositorManaged {
                 binding_snippet,
-                verified,
+                status,
                 conflict,
                 diagnostic,
             } => {
                 assert_eq!(binding_snippet, "bindsym Mod4+v exec pookie-paste --toggle");
-                // Even though the binding matches in the static file, offline inspection must NOT report verified = true!
-                assert!(
-                    !verified,
-                    "file-only fallback without live IPC must report verified = false"
-                );
+                // Even though the binding matches in the static file, offline inspection must report BoundUnverified!
+                assert_eq!(status, CompositorBindingStatus::BoundUnverified);
+                assert!(!status.is_verified());
                 assert!(
                     conflict.is_none(),
                     "matching pookie binding must not report conflict"
@@ -318,12 +318,13 @@ fn offline_sway_backend_conflicting_super_v_binding_yields_unverified_with_confl
         match outcome {
             ShortcutRegistrationOutcome::CompositorManaged {
                 binding_snippet,
-                verified,
+                status,
                 conflict,
                 diagnostic,
             } => {
                 assert_eq!(binding_snippet, "bindsym Mod4+v exec pookie-paste --toggle");
-                assert!(!verified);
+                assert_eq!(status, CompositorBindingStatus::Conflict);
+                assert!(!status.is_verified());
                 assert!(
                     conflict.is_some(),
                     "conflicting binding must report conflict"

@@ -5,8 +5,9 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::shortcut_backend::{
-    NamedKey, Shortcut, ShortcutActivation, ShortcutBackend, ShortcutBackendCapability,
-    ShortcutError, ShortcutKey, ShortcutModifiers, ShortcutRegistrationOutcome,
+    CompositorBindingStatus, NamedKey, Shortcut, ShortcutActivation, ShortcutBackend,
+    ShortcutBackendCapability, ShortcutError, ShortcutKey, ShortcutModifiers,
+    ShortcutRegistrationOutcome,
 };
 
 const MAGIC: &[u8; 6] = b"i3-ipc";
@@ -108,7 +109,7 @@ impl ShortcutBackend for SwayShortcutBackend {
                         SwayBindingDiagnosis::MatchedPookie => {
                             Ok(ShortcutRegistrationOutcome::CompositorManaged {
                                 binding_snippet,
-                                verified: true,
+                                status: CompositorBindingStatus::Verified,
                                 conflict: None,
                                 diagnostic: None,
                             })
@@ -116,7 +117,7 @@ impl ShortcutBackend for SwayShortcutBackend {
                         SwayBindingDiagnosis::Conflict { command } => {
                             Ok(ShortcutRegistrationOutcome::CompositorManaged {
                                 binding_snippet,
-                                verified: false,
+                                status: CompositorBindingStatus::Conflict,
                                 conflict: Some(format!(
                                     "Key is bound to '{command}' in active Sway configuration"
                                 )),
@@ -126,7 +127,7 @@ impl ShortcutBackend for SwayShortcutBackend {
                         SwayBindingDiagnosis::NotFound => {
                             Ok(ShortcutRegistrationOutcome::CompositorManaged {
                                 binding_snippet,
-                                verified: false,
+                                status: CompositorBindingStatus::Unconfigured,
                                 conflict: None,
                                 diagnostic: None,
                             })
@@ -156,7 +157,7 @@ impl ShortcutBackend for SwayShortcutBackend {
                     // Must NOT report verified = true when IPC was unavailable
                     Ok(ShortcutRegistrationOutcome::CompositorManaged {
                         binding_snippet,
-                        verified: false,
+                        status: CompositorBindingStatus::BoundUnverified,
                         conflict: None,
                         diagnostic: None,
                     })
@@ -164,7 +165,7 @@ impl ShortcutBackend for SwayShortcutBackend {
                 SwayBindingDiagnosis::Conflict { command } => {
                     Ok(ShortcutRegistrationOutcome::CompositorManaged {
                         binding_snippet,
-                        verified: false,
+                        status: CompositorBindingStatus::Conflict,
                         conflict: Some(format!(
                             "Key is bound to '{command}' in configuration file (Sway IPC unavailable)"
                         )),
@@ -174,7 +175,7 @@ impl ShortcutBackend for SwayShortcutBackend {
                 SwayBindingDiagnosis::NotFound => {
                     Ok(ShortcutRegistrationOutcome::CompositorManaged {
                         binding_snippet,
-                        verified: false,
+                        status: CompositorBindingStatus::Unconfigured,
                         conflict: None,
                         diagnostic: None,
                     })
@@ -183,7 +184,7 @@ impl ShortcutBackend for SwayShortcutBackend {
         } else {
             Ok(ShortcutRegistrationOutcome::CompositorManaged {
                 binding_snippet,
-                verified: false,
+                status: CompositorBindingStatus::Unconfigured,
                 conflict: None,
                 diagnostic: None,
             })

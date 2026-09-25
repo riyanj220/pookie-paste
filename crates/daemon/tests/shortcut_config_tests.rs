@@ -209,7 +209,7 @@ fn capability_and_outcome_contracts_are_sound() {
 
     let outcome_managed = ShortcutRegistrationOutcome::CompositorManaged {
         binding_snippet: "bind = SUPER, V, exec, pookie-paste --toggle".to_string(),
-        verified: true,
+        status: daemon::shortcut_backend::CompositorBindingStatus::Verified,
         conflict: None,
         diagnostic: None,
     };

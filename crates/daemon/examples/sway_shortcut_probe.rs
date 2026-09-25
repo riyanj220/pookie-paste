@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use daemon::shortcut_backend::{
-    NamedKey, Shortcut, ShortcutBackend, ShortcutKey, ShortcutModifiers,
+    CompositorBindingStatus, NamedKey, Shortcut, ShortcutBackend, ShortcutKey, ShortcutModifiers,
     ShortcutRegistrationOutcome,
 };
 use daemon::sway_shortcut_backend::SwayShortcutBackend;
@@ -46,22 +46,36 @@ fn main() -> anyhow::Result<()> {
     match outcome {
         ShortcutRegistrationOutcome::CompositorManaged {
             binding_snippet,
-            verified,
+            status,
             conflict,
-            diagnostic: _,
+            diagnostic,
         } => {
             println!("   Generated directive: {binding_snippet}");
-            if verified {
-                println!("   Status: VERIFIED (active in running Sway compositor)");
-            } else if let Some(conflict_details) = conflict {
-                println!("   Status: CONFLICT DETECTED!");
-                println!("   Conflict: {conflict_details}");
-            } else {
-                println!("   Status: NOT CONFIGURED");
-                println!(
-                    "   Action required: Add the following line to ~/.config/sway/config and reload Sway ($mod+Shift+c):"
-                );
-                println!("     {binding_snippet}");
+            match status {
+                CompositorBindingStatus::Verified => {
+                    println!("   Status: VERIFIED (active in running Sway compositor)");
+                }
+                CompositorBindingStatus::BoundUnverified => {
+                    println!(
+                        "   Status: BOUND / UNVERIFIED (found in static config, Sway IPC offline)"
+                    );
+                    if let Some(d) = diagnostic {
+                        println!("   Diagnostic: {d}");
+                    }
+                }
+                CompositorBindingStatus::Conflict => {
+                    println!("   Status: CONFLICT DETECTED!");
+                    if let Some(conflict_details) = conflict {
+                        println!("   Conflict: {conflict_details}");
+                    }
+                }
+                CompositorBindingStatus::Unconfigured => {
+                    println!("   Status: NOT CONFIGURED");
+                    println!(
+                        "   Action required: Add the following line to ~/.config/sway/config and reload Sway ($mod+Shift+c):"
+                    );
+                    println!("     {binding_snippet}");
+                }
             }
         }
         other => anyhow::bail!("expected CompositorManaged outcome, got: {other:?}"),
@@ -85,17 +99,32 @@ fn main() -> anyhow::Result<()> {
     match alt_outcome {
         ShortcutRegistrationOutcome::CompositorManaged {
             binding_snippet,
-            verified,
+            status,
             conflict,
-            diagnostic: _,
+            diagnostic,
         } => {
             println!("   Generated directive: {binding_snippet}");
-            if verified {
-                println!("   Status: VERIFIED (active in running Sway compositor)");
-            } else if let Some(conflict_details) = conflict {
-                println!("   Status: CONFLICT DETECTED: {conflict_details}");
-            } else {
-                println!("   Status: NOT CONFIGURED");
+            match status {
+                CompositorBindingStatus::Verified => {
+                    println!("   Status: VERIFIED (active in running Sway compositor)");
+                }
+                CompositorBindingStatus::BoundUnverified => {
+                    println!(
+                        "   Status: BOUND / UNVERIFIED (found in static config, Sway IPC offline)"
+                    );
+                    if let Some(d) = diagnostic {
+                        println!("   Diagnostic: {d}");
+                    }
+                }
+                CompositorBindingStatus::Conflict => {
+                    println!("   Status: CONFLICT DETECTED!");
+                    if let Some(conflict_details) = conflict {
+                        println!("   Conflict: {conflict_details}");
+                    }
+                }
+                CompositorBindingStatus::Unconfigured => {
+                    println!("   Status: NOT CONFIGURED");
+                }
             }
         }
         other => anyhow::bail!("expected CompositorManaged outcome, got: {other:?}"),
@@ -118,17 +147,32 @@ fn main() -> anyhow::Result<()> {
     match space_outcome {
         ShortcutRegistrationOutcome::CompositorManaged {
             binding_snippet,
-            verified,
+            status,
             conflict,
-            diagnostic: _,
+            diagnostic,
         } => {
             println!("   Generated directive: {binding_snippet}");
-            if verified {
-                println!("   Status: VERIFIED");
-            } else if let Some(conflict_details) = conflict {
-                println!("   Status: CONFLICT DETECTED: {conflict_details}");
-            } else {
-                println!("   Status: NOT CONFIGURED");
+            match status {
+                CompositorBindingStatus::Verified => {
+                    println!("   Status: VERIFIED");
+                }
+                CompositorBindingStatus::BoundUnverified => {
+                    println!(
+                        "   Status: BOUND / UNVERIFIED (found in static config, Sway IPC offline)"
+                    );
+                    if let Some(d) = diagnostic {
+                        println!("   Diagnostic: {d}");
+                    }
+                }
+                CompositorBindingStatus::Conflict => {
+                    println!("   Status: CONFLICT DETECTED!");
+                    if let Some(conflict_details) = conflict {
+                        println!("   Conflict: {conflict_details}");
+                    }
+                }
+                CompositorBindingStatus::Unconfigured => {
+                    println!("   Status: NOT CONFIGURED");
+                }
             }
         }
         other => anyhow::bail!("expected CompositorManaged outcome, got: {other:?}"),

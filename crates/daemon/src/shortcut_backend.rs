@@ -231,6 +231,24 @@ impl ShortcutBackendCapability {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompositorBindingStatus {
+    /// Binding exists in active compositor and target is verified as Pookie.
+    Verified,
+    /// Binding definitely exists, but its target cannot be verified (e.g. Hyprland __lua callback).
+    BoundUnverified,
+    /// No binding exists for the configured shortcut.
+    Unconfigured,
+    /// Binding exists and is known to target something else.
+    Conflict,
+}
+
+impl CompositorBindingStatus {
+    pub fn is_verified(&self) -> bool {
+        matches!(self, Self::Verified)
+    }
+}
+
 /// Rich status outcome returned when registering or inspecting a global shortcut.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ShortcutRegistrationOutcome {
@@ -240,7 +258,7 @@ pub enum ShortcutRegistrationOutcome {
     /// Managed externally by window manager or compositor keybinding.
     CompositorManaged {
         binding_snippet: String,
-        verified: bool,
+        status: CompositorBindingStatus,
         conflict: Option<String>,
         diagnostic: Option<String>,
     },
@@ -257,6 +275,13 @@ impl ShortcutRegistrationOutcome {
                 binding_snippet, ..
             } => binding_snippet,
             Self::Conflict { details } => details,
+        }
+    }
+
+    pub fn is_verified(&self) -> bool {
+        match self {
+            Self::CompositorManaged { status, .. } => status.is_verified(),
+            _ => false,
         }
     }
 }

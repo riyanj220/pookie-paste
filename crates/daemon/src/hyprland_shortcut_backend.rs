@@ -4,8 +4,9 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::shortcut_backend::{
-    NamedKey, Shortcut, ShortcutActivation, ShortcutBackend, ShortcutBackendCapability,
-    ShortcutError, ShortcutKey, ShortcutModifiers, ShortcutRegistrationOutcome,
+    CompositorBindingStatus, NamedKey, Shortcut, ShortcutActivation, ShortcutBackend,
+    ShortcutBackendCapability, ShortcutError, ShortcutKey, ShortcutModifiers,
+    ShortcutRegistrationOutcome,
 };
 use crate::sway_shortcut_backend::is_pookie_command;
 
@@ -149,7 +150,7 @@ impl ShortcutBackend for HyprlandShortcutBackend {
                 HyprlandBindingDiagnosis::VerifiedPookie => {
                     Ok(ShortcutRegistrationOutcome::CompositorManaged {
                         binding_snippet,
-                        verified: true,
+                        status: CompositorBindingStatus::Verified,
                         conflict: None,
                         diagnostic: Some(
                             "Verified active in running Hyprland compositor (direct exec)"
@@ -160,7 +161,7 @@ impl ShortcutBackend for HyprlandShortcutBackend {
                 HyprlandBindingDiagnosis::Conflict { command } => {
                     Ok(ShortcutRegistrationOutcome::CompositorManaged {
                         binding_snippet,
-                        verified: false,
+                        status: CompositorBindingStatus::Conflict,
                         conflict: Some(format!(
                             "Key is bound to '{command}' in active Hyprland configuration"
                         )),
@@ -190,10 +191,10 @@ impl ShortcutBackend for HyprlandShortcutBackend {
                     };
 
                     // Opaque Lua callback: occupancy is confirmed, but command identity is opaque.
-                    // Must NOT claim verified=true, but also not a definite conflict.
+                    // Must be reported as BoundUnverified (NOT Unconfigured / Missing, and NOT a conflict).
                     Ok(ShortcutRegistrationOutcome::CompositorManaged {
                         binding_snippet,
-                        verified: false,
+                        status: CompositorBindingStatus::BoundUnverified,
                         conflict: None,
                         diagnostic: Some(diagnostic_msg),
                     })
@@ -201,7 +202,7 @@ impl ShortcutBackend for HyprlandShortcutBackend {
                 HyprlandBindingDiagnosis::NotFound => {
                     Ok(ShortcutRegistrationOutcome::CompositorManaged {
                         binding_snippet,
-                        verified: false,
+                        status: CompositorBindingStatus::Unconfigured,
                         conflict: None,
                         diagnostic: None,
                     })
@@ -222,7 +223,7 @@ impl ShortcutBackend for HyprlandShortcutBackend {
                     // Must NOT report verified = true when IPC was unavailable
                     Ok(ShortcutRegistrationOutcome::CompositorManaged {
                         binding_snippet,
-                        verified: false,
+                        status: CompositorBindingStatus::BoundUnverified,
                         conflict: None,
                         diagnostic: Some(
                             "Found matching Pookie binding in static configuration file (Hyprland IPC unavailable)"
@@ -233,7 +234,7 @@ impl ShortcutBackend for HyprlandShortcutBackend {
                 HyprlandBindingDiagnosis::Conflict { command } => {
                     Ok(ShortcutRegistrationOutcome::CompositorManaged {
                         binding_snippet,
-                        verified: false,
+                        status: CompositorBindingStatus::Conflict,
                         conflict: Some(format!(
                             "Key is bound to '{command}' in configuration file (Hyprland IPC unavailable)"
                         )),
@@ -244,7 +245,7 @@ impl ShortcutBackend for HyprlandShortcutBackend {
                 | HyprlandBindingDiagnosis::NotFound => {
                     Ok(ShortcutRegistrationOutcome::CompositorManaged {
                         binding_snippet,
-                        verified: false,
+                        status: CompositorBindingStatus::Unconfigured,
                         conflict: None,
                         diagnostic: None,
                     })
@@ -253,7 +254,7 @@ impl ShortcutBackend for HyprlandShortcutBackend {
         } else {
             Ok(ShortcutRegistrationOutcome::CompositorManaged {
                 binding_snippet,
-                verified: false,
+                status: CompositorBindingStatus::Unconfigured,
                 conflict: None,
                 diagnostic: None,
             })

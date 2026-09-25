@@ -1,13 +1,15 @@
 use std::sync::{Arc, RwLock};
 
-use ipc::{IpcShortcutCapability, IpcShortcutState, ShortcutStatusInfo};
+use ipc::{
+    IpcCompositorBindingStatus, IpcShortcutCapability, IpcShortcutState, ShortcutStatusInfo,
+};
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 use crate::platform_shortcut_backend::PlatformShortcutBackend;
 use crate::shortcut_backend::{
-    Shortcut, ShortcutActivation, ShortcutBackend, ShortcutBackendCapability, ShortcutError,
-    ShortcutRegistrationOutcome,
+    CompositorBindingStatus, Shortcut, ShortcutActivation, ShortcutBackend,
+    ShortcutBackendCapability, ShortcutError, ShortcutRegistrationOutcome,
 };
 use crate::shortcut_config::ShortcutConfig;
 
@@ -110,18 +112,34 @@ impl ShortcutListener {
                         }
                         ShortcutRegistrationOutcome::CompositorManaged {
                             binding_snippet,
-                            verified,
+                            status,
                             conflict,
                             diagnostic,
-                        } => (
-                            None,
-                            IpcShortcutState::CompositorManaged {
-                                verified,
-                                snippet: binding_snippet,
-                                conflict,
-                                diagnostic,
-                            },
-                        ),
+                        } => {
+                            let binding_status = match status {
+                                CompositorBindingStatus::Verified => {
+                                    IpcCompositorBindingStatus::Verified
+                                }
+                                CompositorBindingStatus::BoundUnverified => {
+                                    IpcCompositorBindingStatus::BoundUnverified
+                                }
+                                CompositorBindingStatus::Unconfigured => {
+                                    IpcCompositorBindingStatus::Unconfigured
+                                }
+                                CompositorBindingStatus::Conflict => {
+                                    IpcCompositorBindingStatus::Conflict
+                                }
+                            };
+                            (
+                                None,
+                                IpcShortcutState::CompositorManaged {
+                                    binding_status,
+                                    snippet: binding_snippet,
+                                    conflict,
+                                    diagnostic,
+                                },
+                            )
+                        }
                         ShortcutRegistrationOutcome::Conflict { details } => {
                             (None, IpcShortcutState::Conflict { details })
                         }

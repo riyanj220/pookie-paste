@@ -5,8 +5,8 @@ use daemon::hyprland_shortcut_backend::{
     matches_hyprland_key, shortcut_to_hyprland_modmask,
 };
 use daemon::shortcut_backend::{
-    NamedKey, Shortcut, ShortcutBackend, ShortcutBackendCapability, ShortcutError, ShortcutKey,
-    ShortcutModifiers, ShortcutRegistrationOutcome,
+    CompositorBindingStatus, NamedKey, Shortcut, ShortcutBackend, ShortcutBackendCapability,
+    ShortcutError, ShortcutKey, ShortcutModifiers, ShortcutRegistrationOutcome,
 };
 
 #[test]
@@ -391,7 +391,7 @@ fn backend_lifecycle_and_mock_ipc_outcomes() {
     match outcome {
         ShortcutRegistrationOutcome::CompositorManaged {
             binding_snippet,
-            verified,
+            status,
             conflict,
             diagnostic,
         } => {
@@ -399,8 +399,9 @@ fn backend_lifecycle_and_mock_ipc_outcomes() {
                 binding_snippet,
                 "hl.bind(\"SUPER + V\", hl.dsp.exec_cmd(\"pookie-paste --toggle\"))"
             );
-            // Crucial: Opaque Lua binding MUST NOT be reported as verified=true
-            assert!(!verified);
+            // Crucial: Opaque Lua binding MUST be reported as BoundUnverified
+            assert_eq!(status, CompositorBindingStatus::BoundUnverified);
+            assert!(!status.is_verified());
             // Crucial: Opaque Lua binding MUST NOT be reported as a conflict
             assert!(conflict.is_none());
             // Diagnostic MUST explain the opaque Lua callback state
@@ -426,7 +427,7 @@ fn backend_lifecycle_and_mock_ipc_outcomes() {
 
 #[test]
 fn offline_hyprland_backend_deterministic_isolation() {
-    // 1. Completely offline without config file -> NotConfigured
+    // 1. Completely offline without config file -> Unconfigured
     let mut backend = HyprlandShortcutBackend::from_offline_config(None);
     let outcome = backend
         .register(Shortcut::super_v())
@@ -435,7 +436,7 @@ fn offline_hyprland_backend_deterministic_isolation() {
     match outcome {
         ShortcutRegistrationOutcome::CompositorManaged {
             binding_snippet,
-            verified,
+            status,
             conflict,
             diagnostic,
         } => {
@@ -443,14 +444,15 @@ fn offline_hyprland_backend_deterministic_isolation() {
                 binding_snippet,
                 "hl.bind(\"SUPER + V\", hl.dsp.exec_cmd(\"pookie-paste --toggle\"))"
             );
-            assert!(!verified);
+            assert_eq!(status, CompositorBindingStatus::Unconfigured);
+            assert!(!status.is_verified());
             assert!(conflict.is_none());
             assert!(diagnostic.is_none());
         }
         other => panic!("expected CompositorManaged outcome, got: {other:?}"),
     }
 
-    // 2. Offline with static Pookie config -> verified remains false because IPC was offline
+    // 2. Offline with static Pookie config -> BoundUnverified because live IPC was offline
     let static_pookie = "bind = SUPER, V, exec, pookie-paste --toggle";
     let mut backend_pookie = HyprlandShortcutBackend::from_offline_config(Some(static_pookie));
     let outcome_pookie = backend_pookie
@@ -459,13 +461,14 @@ fn offline_hyprland_backend_deterministic_isolation() {
 
     match outcome_pookie {
         ShortcutRegistrationOutcome::CompositorManaged {
-            verified,
+            status,
             conflict,
             diagnostic,
             ..
         } => {
-            // Must NOT report verified=true when live IPC was offline!
-            assert!(!verified);
+            // Must NOT report verified when live IPC was offline!
+            assert_eq!(status, CompositorBindingStatus::BoundUnverified);
+            assert!(!status.is_verified());
             assert!(conflict.is_none());
             assert!(diagnostic.is_some());
         }

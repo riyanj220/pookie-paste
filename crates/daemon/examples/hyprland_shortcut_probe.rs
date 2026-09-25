@@ -12,7 +12,7 @@ use daemon::hyprland_shortcut_backend::{
     HyprlandShortcutBackend, format_hyprland_hyprlang_binding, format_hyprland_lua_binding,
 };
 use daemon::shortcut_backend::{
-    NamedKey, Shortcut, ShortcutBackend, ShortcutKey, ShortcutModifiers,
+    CompositorBindingStatus, NamedKey, Shortcut, ShortcutBackend, ShortcutKey, ShortcutModifiers,
     ShortcutRegistrationOutcome,
 };
 
@@ -159,26 +159,37 @@ fn test_shortcut(
     match outcome {
         ShortcutRegistrationOutcome::CompositorManaged {
             binding_snippet,
-            verified,
+            status,
             conflict,
             diagnostic,
         } => {
             println!("   Generated directive (Lua): {binding_snippet}");
-            if verified {
-                println!("   Status: VERIFIED (active direct exec in running Hyprland compositor)");
-            } else if let Some(conflict_details) = conflict {
-                println!("   Status: CONFLICT DETECTED!");
-                println!("   Conflict:   {conflict_details}");
-            } else if let Some(diag_info) = diagnostic {
-                println!("   Status: OCCUPIED (Opaque Lua Callback)");
-                println!("   Diagnostic: {diag_info}");
-            } else {
-                println!("   Status: NOT CONFIGURED");
-                println!("   Action required: Add one of the following to your configuration:");
-                println!("     For ~/.config/hypr/hyprland.lua (modern Lua):");
-                println!("       {}", format_hyprland_lua_binding(shortcut));
-                println!("     For ~/.config/hypr/hyprland.conf (classic Hyprlang):");
-                println!("       {}", format_hyprland_hyprlang_binding(shortcut));
+            match status {
+                CompositorBindingStatus::Verified => {
+                    println!(
+                        "   Status: VERIFIED (active direct exec in running Hyprland compositor)"
+                    );
+                }
+                CompositorBindingStatus::Conflict => {
+                    println!("   Status: CONFLICT DETECTED!");
+                    if let Some(conflict_details) = conflict {
+                        println!("   Conflict:   {conflict_details}");
+                    }
+                }
+                CompositorBindingStatus::BoundUnverified => {
+                    println!("   Status: BOUND / UNVERIFIED (e.g. Opaque Lua Callback)");
+                    if let Some(diag_info) = diagnostic {
+                        println!("   Diagnostic: {diag_info}");
+                    }
+                }
+                CompositorBindingStatus::Unconfigured => {
+                    println!("   Status: NOT CONFIGURED");
+                    println!("   Action required: Add one of the following to your configuration:");
+                    println!("     For ~/.config/hypr/hyprland.lua (modern Lua):");
+                    println!("       {}", format_hyprland_lua_binding(shortcut));
+                    println!("     For ~/.config/hypr/hyprland.conf (classic Hyprlang):");
+                    println!("       {}", format_hyprland_hyprlang_binding(shortcut));
+                }
             }
         }
         other => anyhow::bail!("expected CompositorManaged outcome, got: {other:?}"),
