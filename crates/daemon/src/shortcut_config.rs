@@ -117,6 +117,12 @@ impl ShortcutConfig {
             }
         };
 
+        Self::load_or_default_from_path(&path)
+    }
+
+    /// Loads configuration from a specified file path,
+    /// or returns safe defaults if the file does not exist or fails validation.
+    pub fn load_or_default_from_path(path: &Path) -> Self {
         if !path.exists() {
             debug!(
                 "config file not found at {}; using defaults",
@@ -125,7 +131,7 @@ impl ShortcutConfig {
             return Self::default();
         }
 
-        match Self::load_from_path(&path) {
+        match Self::load_from_path(path) {
             Ok(config) => config,
             Err(err) => {
                 warn!(
@@ -370,7 +376,8 @@ key = "UnknownLongKeyName"
 
     #[test]
     fn loads_or_defaults_gracefully_when_nonexistent() {
-        let config = ShortcutConfig::load_or_default();
+        let nonexistent = Path::new("/nonexistent/path/pookie-paste/config.toml");
+        let config = ShortcutConfig::load_or_default_from_path(nonexistent);
         let sc = config.primary_shortcut().expect("default resolution");
         assert_eq!(sc, Shortcut::super_v());
     }
