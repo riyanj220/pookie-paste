@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use daemon::activation_service::ClipboardActivationService;
@@ -9,7 +9,7 @@ use daemon::ui_launcher::UiLauncher;
 
 use history::ClipboardHistoryService;
 
-use ipc::{IpcConnection, IpcServer, ServerError, socket_path};
+use ipc::{IpcConnection, IpcServer, ServerError, ShortcutStatusInfo, socket_path};
 
 use pookie_clipboard::ClipboardBackend;
 
@@ -52,6 +52,7 @@ pub async fn run<B, P, F>(
     history_service: Arc<ClipboardHistoryService>,
     activation_service: Arc<ClipboardActivationService<B, P, F>>,
     ui_launcher: Arc<UiLauncher>,
+    shortcut_status: Arc<RwLock<ShortcutStatusInfo>>,
 ) -> anyhow::Result<()>
 where
     B: ClipboardBackend + Send + Sync + 'static,
@@ -75,8 +76,17 @@ where
 
         let ui_launcher = Arc::clone(&ui_launcher);
 
+        let shortcut_status = Arc::clone(&shortcut_status);
+
         tokio::spawn(async move {
-            handle_connection(connection, history_service, activation_service, ui_launcher).await;
+            handle_connection(
+                connection,
+                history_service,
+                activation_service,
+                ui_launcher,
+                shortcut_status,
+            )
+            .await;
         });
     }
 }
@@ -86,6 +96,7 @@ async fn handle_connection<B, P, F>(
     history_service: Arc<ClipboardHistoryService>,
     activation_service: Arc<ClipboardActivationService<B, P, F>>,
     ui_launcher: Arc<UiLauncher>,
+    shortcut_status: Arc<RwLock<ShortcutStatusInfo>>,
 ) where
     B: ClipboardBackend + Send + Sync + 'static,
     P: PasteBackend + Send + Sync + 'static,
@@ -96,6 +107,7 @@ async fn handle_connection<B, P, F>(
         history_service,
         activation_service,
         ui_launcher,
+        shortcut_status,
         IPC_READ_TIMEOUT,
     )
     .await;
@@ -106,6 +118,7 @@ async fn handle_connection_with_timeout<B, P, F>(
     history_service: Arc<ClipboardHistoryService>,
     activation_service: Arc<ClipboardActivationService<B, P, F>>,
     ui_launcher: Arc<UiLauncher>,
+    shortcut_status: Arc<RwLock<ShortcutStatusInfo>>,
     read_timeout: Duration,
 ) where
     B: ClipboardBackend + Send + Sync + 'static,
@@ -138,6 +151,7 @@ async fn handle_connection_with_timeout<B, P, F>(
             history_service.as_ref(),
             activation_service.as_ref(),
             ui_launcher.as_ref(),
+            &shortcut_status,
         )
         .await;
 
@@ -274,12 +288,20 @@ mod tests {
         let connection_task = tokio::spawn(async move {
             let connection = server.accept().await.expect("accept failed");
             let ui_launcher = Arc::new(UiLauncher::new());
+            let shortcut_status = Arc::new(RwLock::new(ShortcutStatusInfo {
+                configured_shortcut: "Super+V".to_string(),
+                backend_name: None,
+                capability: None,
+                effective_shortcut: None,
+                state: ipc::IpcShortcutState::Initializing,
+            }));
 
             handle_connection_with_timeout(
                 connection,
                 service,
                 activation,
                 ui_launcher,
+                shortcut_status,
                 Duration::from_millis(50),
             )
             .await;

@@ -355,3 +355,147 @@ fn decodes_shortcuts_changed_payload_correctly() {
         Some("Ctrl+Shift+P")
     );
 }
+
+struct ControllableShortcutBackend {
+    registered: Arc<Mutex<Option<Shortcut>>>,
+    activation_rx: Arc<Mutex<std::sync::mpsc::Receiver<Result<ShortcutActivation, ShortcutError>>>>,
+}
+
+impl ShortcutBackend for ControllableShortcutBackend {
+    fn name(&self) -> &'static str {
+        "Mock Controllable Shortcut Backend"
+    }
+
+    fn capability(&self) -> ShortcutBackendCapability {
+        ShortcutBackendCapability::Native
+    }
+
+    fn register(
+        &mut self,
+        shortcut: Shortcut,
+    ) -> Result<ShortcutRegistrationOutcome, ShortcutError> {
+        *self.registered.lock().unwrap() = Some(shortcut);
+        Ok(ShortcutRegistrationOutcome::Active {
+            description: format!("registered {shortcut}"),
+        })
+    }
+
+    fn wait_for_activation(&mut self) -> Result<ShortcutActivation, ShortcutError> {
+        match self.activation_rx.lock().unwrap().recv() {
+            Ok(result) => result,
+            Err(_) => Err(ShortcutError::Unavailable),
+        }
+    }
+}
+
+#[test]
+fn shortcut_listener_status_transitions_to_active() {
+    let recorded = Arc::new(Mutex::new(None));
+    let (_tx, rx) = std::sync::mpsc::channel();
+    let backend = ControllableShortcutBackend {
+        registered: Arc::clone(&recorded),
+        activation_rx: Arc::new(Mutex::new(rx)),
+    };
+    let listener = ShortcutListener::start_with_backend_and_shortcut(backend, Shortcut::super_v());
+
+    // Wait for registration
+    for _ in 0..20 {
+        if recorded.lock().unwrap().is_some() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    let status = listener.status();
+    assert_eq!(status.configured_shortcut, "Super+V");
+    assert_eq!(
+        status.backend_name.as_deref(),
+        Some("Mock Controllable Shortcut Backend")
+    );
+    assert_eq!(status.capability, Some(ipc::IpcShortcutCapability::Native));
+    match status.state {
+        ipc::IpcShortcutState::Active { description } => {
+            assert!(description.contains("registered Super+V"));
+        }
+        other => panic!("expected active state, got {:?}", other),
+    }
+}
+
+#[test]
+fn shortcut_listener_status_transitions_to_unavailable_when_activation_stream_dies() {
+    let recorded = Arc::new(Mutex::new(None));
+    let (tx, rx) = std::sync::mpsc::channel();
+    let backend = ControllableShortcutBackend {
+        registered: Arc::clone(&recorded),
+        activation_rx: Arc::new(Mutex::new(rx)),
+    };
+    let listener = ShortcutListener::start_with_backend_and_shortcut(backend, Shortcut::super_v());
+
+    for _ in 0..20 {
+        if recorded.lock().unwrap().is_some() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    // Trigger activation stream termination
+    tx.send(Err(ShortcutError::Unavailable)).unwrap();
+
+    // Give background thread a moment to update status and break
+    for _ in 0..20 {
+        if matches!(
+            listener.status().state,
+            ipc::IpcShortcutState::Unavailable { .. }
+        ) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    match listener.status().state {
+        ipc::IpcShortcutState::Unavailable { reason } => {
+            assert!(reason.contains("unavailable"));
+        }
+        other => panic!("expected unavailable state, got {:?}", other),
+    }
+}
+
+#[test]
+fn shortcut_listener_status_transitions_to_failed_when_backend_errors() {
+    let recorded = Arc::new(Mutex::new(None));
+    let (tx, rx) = std::sync::mpsc::channel();
+    let backend = ControllableShortcutBackend {
+        registered: Arc::clone(&recorded),
+        activation_rx: Arc::new(Mutex::new(rx)),
+    };
+    let listener = ShortcutListener::start_with_backend_and_shortcut(backend, Shortcut::super_v());
+
+    for _ in 0..20 {
+        if recorded.lock().unwrap().is_some() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    // Trigger backend error
+    tx.send(Err(ShortcutError::Failed("device lost".to_string())))
+        .unwrap();
+
+    // Give background thread a moment to update status and break
+    for _ in 0..20 {
+        if matches!(
+            listener.status().state,
+            ipc::IpcShortcutState::Failed { .. }
+        ) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    match listener.status().state {
+        ipc::IpcShortcutState::Failed { error } => {
+            assert!(error.contains("device lost"));
+        }
+        other => panic!("expected failed state, got {:?}", other),
+    }
+}

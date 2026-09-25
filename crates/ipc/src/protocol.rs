@@ -284,6 +284,8 @@ pub enum IpcRequest {
     ClearHistory,
 
     ToggleUi,
+
+    GetShortcutStatus,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -305,7 +307,51 @@ pub enum IpcResponse {
 
     UiToggled { launched: bool },
 
+    ShortcutStatus { status: ShortcutStatusInfo },
+
     Error { message: String },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IpcShortcutCapability {
+    Native,
+    Portal,
+    CompositorManaged,
+    Unsupported,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum IpcShortcutState {
+    Initializing,
+    Active {
+        description: String,
+    },
+    CompositorManaged {
+        verified: bool,
+        snippet: String,
+        conflict: Option<String>,
+        diagnostic: Option<String>,
+    },
+    Conflict {
+        details: String,
+    },
+    Unavailable {
+        reason: String,
+    },
+    Failed {
+        error: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShortcutStatusInfo {
+    pub configured_shortcut: String,
+    pub backend_name: Option<String>,
+    pub capability: Option<IpcShortcutCapability>,
+    pub effective_shortcut: Option<String>,
+    pub state: IpcShortcutState,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

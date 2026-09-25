@@ -551,6 +551,10 @@ impl ShortcutBackend for WaylandShortcutBackend {
             .recv()
             .map_err(|_| ShortcutError::Failed("Wayland activation listener stopped".to_string()))?
     }
+
+    fn effective_trigger(&self) -> Option<&str> {
+        self.effective_trigger()
+    }
 }
 
 pub async fn probe_global_shortcuts() -> Result<WaylandShortcutCapability, ShortcutError> {

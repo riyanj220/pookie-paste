@@ -147,11 +147,14 @@ async fn main() -> anyhow::Result<()> {
 
     let processor = ClipboardProcessor::new();
 
+    let shortcut_status = shortcut_listener.status_handle();
+
     let ipc_future = ipc_server::run(
         ipc_listener,
         Arc::clone(&history_service),
         Arc::clone(&activation_service),
         Arc::clone(&ui_launcher),
+        shortcut_status,
     );
 
     tokio::pin!(ipc_future);

@@ -10,7 +10,7 @@ pub use codec::{CodecError, MAX_FRAME_SIZE, decode, encode};
 
 pub use protocol::{
     ActivationOutcome, HistoryContentRef, HistoryItem, HistoryItemError, IpcFocusTarget,
-    IpcRequest, IpcResponse,
+    IpcRequest, IpcResponse, IpcShortcutCapability, IpcShortcutState, ShortcutStatusInfo,
 };
 
 pub use server::{IpcConnection, IpcServer, ServerError};

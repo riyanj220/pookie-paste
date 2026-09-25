@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::{Arc, Mutex as StdMutex, RwLock};
 
 use chrono::{Duration as ChronoDuration, Utc};
 
@@ -15,7 +15,8 @@ use daemon::request_handler::handle_request;
 use history::{ClipboardHistoryService, HistoryConfig};
 
 use ipc::{
-    ActivationOutcome, IpcClient, IpcFocusTarget, IpcRequest, IpcResponse, IpcServer, ServerError,
+    ActivationOutcome, IpcClient, IpcFocusTarget, IpcRequest, IpcResponse, IpcServer,
+    IpcShortcutCapability, IpcShortcutState, ServerError, ShortcutStatusInfo,
 };
 
 use pookie_clipboard::{ClipboardBackend, ClipboardContent, ClipboardError};
@@ -248,12 +249,22 @@ async fn handle_test_connection<P>(
                 break;
             }
         };
+        let shortcut_status = Arc::new(RwLock::new(ShortcutStatusInfo {
+            configured_shortcut: "Super+V".to_string(),
+            backend_name: Some("test-ipc-backend".to_string()),
+            capability: Some(IpcShortcutCapability::Native),
+            effective_shortcut: Some("Super+V".to_string()),
+            state: IpcShortcutState::Active {
+                description: "test active grab".to_string(),
+            },
+        }));
 
         let response = handle_request(
             request,
             history_service.as_ref(),
             activation_service.as_ref(),
             &ui_launcher,
+            &shortcut_status,
         )
         .await;
 
@@ -941,5 +952,27 @@ async fn handles_toggle_ui_ipc_request() {
             );
         }
         other => panic!("unexpected response for ToggleUi: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn handles_get_shortcut_status_ipc_request() {
+    let app = TestIpcApp::start().await;
+    let mut client = app.client().await;
+
+    let response = client
+        .send(&IpcRequest::GetShortcutStatus)
+        .await
+        .expect("GetShortcutStatus request failed");
+
+    match response {
+        IpcResponse::ShortcutStatus { status } => {
+            assert_eq!(status.configured_shortcut, "Super+V");
+            assert_eq!(status.backend_name.as_deref(), Some("test-ipc-backend"));
+            assert_eq!(status.capability, Some(IpcShortcutCapability::Native));
+            assert_eq!(status.effective_shortcut.as_deref(), Some("Super+V"));
+            assert!(matches!(status.state, IpcShortcutState::Active { .. }));
+        }
+        other => panic!("unexpected response for GetShortcutStatus: {other:?}"),
     }
 }

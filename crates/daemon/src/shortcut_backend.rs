@@ -273,6 +273,10 @@ pub trait ShortcutBackend: Send {
 
     fn wait_for_activation(&mut self) -> Result<ShortcutActivation, ShortcutError>;
 
+    fn effective_trigger(&self) -> Option<&str> {
+        None
+    }
+
     fn unregister(&mut self) -> Result<(), ShortcutError> {
         Ok(())
     }

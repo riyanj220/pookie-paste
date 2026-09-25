@@ -83,6 +83,13 @@ impl ShortcutBackend for PlatformShortcutBackend {
         }
     }
 
+    fn effective_trigger(&self) -> Option<&str> {
+        match self {
+            Self::Wayland(backend) => backend.effective_trigger(),
+            _ => None,
+        }
+    }
+
     fn unregister(&mut self) -> Result<(), ShortcutError> {
         match self {
             Self::X11(backend) => backend.unregister(),

@@ -1,5 +1,7 @@
+use std::sync::{Arc, RwLock};
+
 use history::ClipboardHistoryService;
-use ipc::{ActivationOutcome, IpcRequest, IpcResponse};
+use ipc::{ActivationOutcome, IpcRequest, IpcResponse, IpcShortcutState, ShortcutStatusInfo};
 use pookie_clipboard::ClipboardBackend;
 
 use crate::activation_service::{ActivationResult, ClipboardActivationService};
@@ -13,6 +15,7 @@ pub async fn handle_request<B, P, F>(
     history_service: &ClipboardHistoryService,
     activation_service: &ClipboardActivationService<B, P, F>,
     ui_launcher: &UiLauncher,
+    shortcut_status: &Arc<RwLock<ShortcutStatusInfo>>,
 ) -> IpcResponse
 where
     B: ClipboardBackend,
@@ -146,6 +149,23 @@ where
                 message: format!("failed to launch UI: {error:?}"),
             },
         },
+
+        IpcRequest::GetShortcutStatus => {
+            let status = shortcut_status
+                .read()
+                .map(|s| s.clone())
+                .unwrap_or_else(|_| ShortcutStatusInfo {
+                    configured_shortcut: String::new(),
+                    backend_name: None,
+                    capability: None,
+                    effective_shortcut: None,
+                    state: IpcShortcutState::Unavailable {
+                        reason: "shortcut status lock poisoned".to_string(),
+                    },
+                });
+
+            IpcResponse::ShortcutStatus { status }
+        }
     }
 }
 
@@ -275,6 +295,18 @@ mod tests {
         (activation_service, backend_handle)
     }
 
+    fn create_test_shortcut_status() -> Arc<RwLock<ShortcutStatusInfo>> {
+        Arc::new(RwLock::new(ShortcutStatusInfo {
+            configured_shortcut: "Super+V".to_string(),
+            backend_name: Some("test-backend".to_string()),
+            capability: Some(ipc::IpcShortcutCapability::Native),
+            effective_shortcut: Some("Super+V".to_string()),
+            state: IpcShortcutState::Active {
+                description: "test active".to_string(),
+            },
+        }))
+    }
+
     async fn handle_test_request<B, P, F>(
         request: IpcRequest,
         history_service: &ClipboardHistoryService,
@@ -286,7 +318,15 @@ mod tests {
         F: FocusBackend,
     {
         let ui_launcher = UiLauncher::new();
-        handle_request(request, history_service, activation_service, &ui_launcher).await
+        let shortcut_status = create_test_shortcut_status();
+        handle_request(
+            request,
+            history_service,
+            activation_service,
+            &ui_launcher,
+            &shortcut_status,
+        )
+        .await
     }
 
     #[tokio::test]
@@ -706,14 +746,38 @@ mod tests {
         let ui_launcher = UiLauncher::new();
         ui_launcher.set_running_for_test(true);
 
+        let shortcut_status = create_test_shortcut_status();
         let response = handle_request(
             IpcRequest::ToggleUi,
             service.as_ref(),
             &activation_service,
             &ui_launcher,
+            &shortcut_status,
         )
         .await;
 
         assert_eq!(response, IpcResponse::UiToggled { launched: false });
+    }
+
+    #[tokio::test]
+    async fn handles_get_shortcut_status_request() {
+        let service = create_history_service().await;
+        let (activation_service, _backend_handle) = create_activation_service(Arc::clone(&service));
+
+        let response = handle_test_request(
+            IpcRequest::GetShortcutStatus,
+            service.as_ref(),
+            &activation_service,
+        )
+        .await;
+
+        match response {
+            IpcResponse::ShortcutStatus { status } => {
+                assert_eq!(status.configured_shortcut, "Super+V");
+                assert_eq!(status.backend_name.as_deref(), Some("test-backend"));
+                assert!(matches!(status.state, IpcShortcutState::Active { .. }));
+            }
+            other => panic!("unexpected response: {other:?}"),
+        }
     }
 }
