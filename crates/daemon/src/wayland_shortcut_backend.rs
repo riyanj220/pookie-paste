@@ -895,7 +895,7 @@ fn clipboard_history_shortcuts(
     vec![(CLIPBOARD_HISTORY_SHORTCUT_ID.to_string(), properties)]
 }
 
-fn portal_trigger(shortcut: Shortcut) -> Result<String, ShortcutError> {
+pub fn portal_trigger(shortcut: Shortcut) -> Result<String, ShortcutError> {
     let mut trigger = String::new();
 
     if shortcut.modifiers.control {

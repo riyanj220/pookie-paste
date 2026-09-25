@@ -6,32 +6,60 @@ use crate::platform_shortcut_backend::PlatformShortcutBackend;
 use crate::shortcut_backend::{
     Shortcut, ShortcutActivation, ShortcutBackend, ShortcutBackendCapability, ShortcutError,
 };
+use crate::shortcut_config::ShortcutConfig;
 
 pub struct ShortcutListener {
     receiver: mpsc::UnboundedReceiver<ShortcutActivation>,
 }
 
 impl ShortcutListener {
+    /// Starts the global shortcut listener using the configured primary shortcut
+    /// from `ShortcutConfig` (or default Super+V if unconfigured/invalid).
     pub fn start() -> Self {
+        let config = ShortcutConfig::load_or_default();
+        let shortcut = config.primary_shortcut().unwrap_or_else(|err| {
+            warn!(
+                error = %err,
+                "failed to parse primary shortcut from config; falling back to default Super+V"
+            );
+            Shortcut::super_v()
+        });
+
+        Self::start_with_shortcut(shortcut)
+    }
+
+    /// Starts the global shortcut listener with an explicit `Shortcut` against
+    /// the platform's auto-detected shortcut backend.
+    pub fn start_with_shortcut(shortcut: Shortcut) -> Self {
+        let backend = match PlatformShortcutBackend::new() {
+            Ok(backend) => backend,
+
+            Err(error) => {
+                warn!(
+                    error = ?error,
+                    "global shortcut backend unavailable"
+                );
+
+                let (_sender, receiver) = mpsc::unbounded_channel();
+                return Self { receiver };
+            }
+        };
+
+        Self::start_with_backend_and_shortcut(backend, shortcut)
+    }
+
+    /// Starts the global shortcut listener with an explicit backend and shortcut,
+    /// enabling complete deterministic testing and generic platform decoupling.
+    pub fn start_with_backend_and_shortcut<B: ShortcutBackend + Send + 'static>(
+        mut backend: B,
+        shortcut: Shortcut,
+    ) -> Self {
         let (sender, receiver) = mpsc::unbounded_channel();
 
         std::thread::spawn(move || {
-            let mut backend = match PlatformShortcutBackend::new() {
-                Ok(backend) => backend,
-
-                Err(error) => {
-                    warn!(
-                        error = ?error,
-                        "global shortcut backend unavailable"
-                    );
-
-                    return;
-                }
-            };
-
             info!("shortcut backend: {}", backend.name());
 
-            match backend.register(Shortcut::super_v()) {
+            match backend.register(shortcut) {
                 Ok(outcome) => {
                     info!("global shortcut registered: {}", outcome.description());
                 }
