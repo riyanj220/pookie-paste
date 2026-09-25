@@ -150,3 +150,208 @@ fn custom_shortcut_converts_correctly_for_compositor_managed_backends() {
         "hl.bind(\"CTRL + SHIFT + P\", hl.dsp.exec_cmd(\"pookie-paste --toggle\"))"
     );
 }
+
+#[test]
+fn decodes_portal_shortcuts_with_populated_trigger() {
+    use daemon::wayland_shortcut_backend::decode_shortcuts_result;
+    use std::collections::HashMap;
+    use zbus::zvariant::{OwnedValue, Str, Value};
+
+    let mut properties = HashMap::new();
+    properties.insert(
+        "trigger_description".to_string(),
+        OwnedValue::from(Str::from("Meta+V")),
+    );
+    let shortcuts_vec = vec![("clipboard-history".to_string(), properties)];
+    let mut results = HashMap::new();
+    results.insert(
+        "shortcuts".to_string(),
+        OwnedValue::try_from(Value::from(shortcuts_vec)).unwrap(),
+    );
+
+    let decoded = decode_shortcuts_result(results, "test").unwrap();
+    assert_eq!(decoded.len(), 1);
+    assert_eq!(decoded[0].id, "clipboard-history");
+    assert_eq!(decoded[0].trigger_description.as_deref(), Some("Meta+V"));
+}
+
+#[test]
+fn decodes_portal_shortcuts_filters_empty_or_whitespace_trigger() {
+    use daemon::wayland_shortcut_backend::decode_shortcuts_result;
+    use std::collections::HashMap;
+    use zbus::zvariant::{OwnedValue, Str, Value};
+
+    let mut properties = HashMap::new();
+    properties.insert(
+        "trigger_description".to_string(),
+        OwnedValue::from(Str::from("   ")),
+    );
+    let shortcuts_vec = vec![("clipboard-history".to_string(), properties)];
+    let mut results = HashMap::new();
+    results.insert(
+        "shortcuts".to_string(),
+        OwnedValue::try_from(Value::from(shortcuts_vec)).unwrap(),
+    );
+
+    let decoded = decode_shortcuts_result(results, "test").unwrap();
+    assert_eq!(decoded.len(), 1);
+    assert_eq!(decoded[0].id, "clipboard-history");
+    assert_eq!(decoded[0].trigger_description, None);
+}
+
+#[test]
+fn decodes_portal_shortcuts_handles_missing_trigger() {
+    use daemon::wayland_shortcut_backend::decode_shortcuts_result;
+    use std::collections::HashMap;
+    use zbus::zvariant::{OwnedValue, Value};
+
+    let properties: HashMap<String, OwnedValue> = HashMap::new();
+    let shortcuts_vec = vec![("clipboard-history".to_string(), properties)];
+    let mut results = HashMap::new();
+    results.insert(
+        "shortcuts".to_string(),
+        OwnedValue::try_from(Value::from(shortcuts_vec)).unwrap(),
+    );
+
+    let decoded = decode_shortcuts_result(results, "test").unwrap();
+    assert_eq!(decoded.len(), 1);
+    assert_eq!(decoded[0].id, "clipboard-history");
+    assert_eq!(decoded[0].trigger_description, None);
+}
+
+#[test]
+fn evaluates_bound_shortcuts_when_requested_matches_effective() {
+    use daemon::wayland_shortcut_backend::{BoundShortcut, evaluate_bound_shortcuts};
+
+    let requested = Shortcut::new(
+        ShortcutKey::Character('p'),
+        ShortcutModifiers {
+            control: true,
+            shift: true,
+            ..ShortcutModifiers::NONE
+        },
+    );
+
+    let bound = vec![BoundShortcut {
+        id: "clipboard-history".to_string(),
+        trigger_description: Some("Ctrl+Shift+P".to_string()),
+    }];
+
+    let (effective, outcome) = evaluate_bound_shortcuts(&bound, requested).unwrap();
+    assert_eq!(effective.as_deref(), Some("Ctrl+Shift+P"));
+    match outcome {
+        ShortcutRegistrationOutcome::Active { description } => {
+            assert!(description.contains("Ctrl+Shift+P"));
+        }
+        _ => panic!("expected active registration outcome"),
+    }
+}
+
+#[test]
+fn evaluates_bound_shortcuts_when_requested_differs_from_portal_persisted() {
+    use daemon::wayland_shortcut_backend::{BoundShortcut, evaluate_bound_shortcuts};
+
+    let requested = Shortcut::new(
+        ShortcutKey::Character('p'),
+        ShortcutModifiers {
+            control: true,
+            shift: true,
+            ..ShortcutModifiers::NONE
+        },
+    );
+
+    let bound = vec![BoundShortcut {
+        id: "clipboard-history".to_string(),
+        trigger_description: Some("Meta+V".to_string()),
+    }];
+
+    let (effective, outcome) = evaluate_bound_shortcuts(&bound, requested).unwrap();
+    assert_eq!(effective.as_deref(), Some("Meta+V"));
+    match outcome {
+        ShortcutRegistrationOutcome::Active { description } => {
+            assert!(description.contains("Meta+V"));
+            assert!(description.contains("Ctrl+Shift+P"));
+        }
+        _ => panic!("expected active registration outcome"),
+    }
+}
+
+#[test]
+fn evaluates_bound_shortcuts_when_trigger_description_is_missing() {
+    use daemon::wayland_shortcut_backend::{BoundShortcut, evaluate_bound_shortcuts};
+
+    let requested = Shortcut::super_v();
+
+    let bound = vec![BoundShortcut {
+        id: "clipboard-history".to_string(),
+        trigger_description: None,
+    }];
+
+    let (effective, outcome) = evaluate_bound_shortcuts(&bound, requested).unwrap();
+    assert_eq!(effective, None);
+    match outcome {
+        ShortcutRegistrationOutcome::Active { description } => {
+            assert!(description.contains("Super+V"));
+        }
+        _ => panic!("expected active registration outcome"),
+    }
+}
+
+#[test]
+fn evaluates_bound_shortcuts_when_trigger_description_is_empty() {
+    use daemon::wayland_shortcut_backend::{BoundShortcut, evaluate_bound_shortcuts};
+
+    let requested = Shortcut::super_v();
+
+    let bound = vec![BoundShortcut {
+        id: "clipboard-history".to_string(),
+        trigger_description: Some("   ".to_string()),
+    }];
+
+    let (effective, outcome) = evaluate_bound_shortcuts(&bound, requested).unwrap();
+    assert_eq!(effective, None);
+    match outcome {
+        ShortcutRegistrationOutcome::Active { description } => {
+            assert!(description.contains("Super+V"));
+        }
+        _ => panic!("expected active registration outcome"),
+    }
+}
+
+#[test]
+fn evaluates_bound_shortcuts_fails_when_id_is_absent() {
+    use daemon::wayland_shortcut_backend::{BoundShortcut, evaluate_bound_shortcuts};
+
+    let requested = Shortcut::super_v();
+
+    let bound = vec![BoundShortcut {
+        id: "some-other-action".to_string(),
+        trigger_description: Some("Super+V".to_string()),
+    }];
+
+    let result = evaluate_bound_shortcuts(&bound, requested);
+    assert!(result.is_err());
+    assert!(matches!(result.unwrap_err(), ShortcutError::Unavailable));
+}
+
+#[test]
+fn decodes_shortcuts_changed_payload_correctly() {
+    use daemon::wayland_shortcut_backend::decode_shortcuts_vec;
+    use std::collections::HashMap;
+    use zbus::zvariant::{OwnedValue, Str};
+
+    let mut properties = HashMap::new();
+    properties.insert(
+        "trigger_description".to_string(),
+        OwnedValue::from(Str::from("Ctrl+Shift+P")),
+    );
+    let shortcuts_changed_vec = vec![("clipboard-history".to_string(), properties)];
+
+    let decoded = decode_shortcuts_vec(shortcuts_changed_vec);
+    assert_eq!(decoded.len(), 1);
+    assert_eq!(decoded[0].id, "clipboard-history");
+    assert_eq!(
+        decoded[0].trigger_description.as_deref(),
+        Some("Ctrl+Shift+P")
+    );
+}
