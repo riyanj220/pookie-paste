@@ -307,7 +307,12 @@ mod tests {
             let reload_handle = daemon::shortcut_listener::ShortcutReloadHandle::new_test_handle(
                 Arc::clone(&shortcut_status),
             );
-            let reload_coordinator = Arc::new(ReloadCoordinator::new(reload_handle));
+            let dummy = std::path::PathBuf::from("/nonexistent/test/pookie/config.toml");
+            let reload_coordinator = Arc::new(ReloadCoordinator::with_custom_paths(
+                reload_handle,
+                dummy.clone(),
+                dummy,
+            ));
 
             handle_connection_with_timeout(
                 connection,

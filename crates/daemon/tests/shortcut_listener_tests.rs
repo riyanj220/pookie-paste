@@ -670,11 +670,24 @@ async fn reload_coordinator_resets_to_default_super_v_on_missing_config() {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
 
-    let coordinator = ReloadCoordinator::new(listener.reload_handle());
+    let temp_dir =
+        std::env::temp_dir().join(format!("pookie_reload_missing_{}", uuid::Uuid::new_v4()));
+    let missing_config = temp_dir.join("config.toml");
+    let coordinator = ReloadCoordinator::with_custom_paths(
+        listener.reload_handle(),
+        missing_config.clone(),
+        missing_config.clone(),
+    );
 
     // When config file doesn't exist, strict reload bootstraps canonical config and resets to default Super+V
     let status = coordinator.reload().await.expect("default reset reload");
     assert_eq!(status.configured_shortcut, "Super+V");
+    assert!(
+        missing_config.exists(),
+        "canonical default config must be bootstrapped when missing"
+    );
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
 }
 
 struct LateWakeBackend {

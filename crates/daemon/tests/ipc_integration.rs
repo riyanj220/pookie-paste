@@ -300,9 +300,16 @@ impl TestIpcApp {
                     default,
                 ),
             ),
-            None => Arc::new(daemon::reload_coordinator::ReloadCoordinator::new(
-                reload_handle,
-            )),
+            None => {
+                let dummy = std::path::PathBuf::from("/nonexistent/test/pookie/config.toml");
+                Arc::new(
+                    daemon::reload_coordinator::ReloadCoordinator::with_custom_paths(
+                        reload_handle,
+                        dummy.clone(),
+                        dummy,
+                    ),
+                )
+            }
         };
 
         let coordinator_for_server = Arc::clone(&reload_coordinator);
@@ -1019,9 +1026,14 @@ async fn x11_style_direct_activation_round_trips_through_ipc() {
     }));
     let reload_handle =
         daemon::shortcut_listener::ShortcutReloadHandle::new_test_handle(shortcut_status);
-    let reload_coordinator = Arc::new(daemon::reload_coordinator::ReloadCoordinator::new(
-        reload_handle,
-    ));
+    let dummy = std::path::PathBuf::from("/nonexistent/test/pookie/config.toml");
+    let reload_coordinator = Arc::new(
+        daemon::reload_coordinator::ReloadCoordinator::with_custom_paths(
+            reload_handle,
+            dummy.clone(),
+            dummy,
+        ),
+    );
 
     let server_task = tokio::spawn(async move {
         let connection = server.accept().await.expect("accept failed");
