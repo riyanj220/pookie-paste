@@ -63,8 +63,12 @@ pub fn config_directory() -> io::Result<PathBuf> {
     Ok(PathBuf::from(home).join(".config").join(APP_DIRECTORY))
 }
 
+pub fn default_config_path() -> io::Result<PathBuf> {
+    Ok(config_directory()?.join(CONFIG_FILE))
+}
+
 pub fn config_path() -> io::Result<PathBuf> {
-    let default_path = config_directory()?.join(CONFIG_FILE);
+    let default_path = default_config_path()?;
     if default_path.exists() {
         return Ok(default_path);
     }

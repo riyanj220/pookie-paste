@@ -499,3 +499,281 @@ fn shortcut_listener_status_transitions_to_failed_when_backend_errors() {
         other => panic!("expected failed state, got {:?}", other),
     }
 }
+
+struct ReloadableMockBackend {
+    registered: Arc<Mutex<Option<Shortcut>>>,
+    activation_tx: std::sync::mpsc::Sender<Result<ShortcutActivation, ShortcutError>>,
+    activation_rx: Arc<Mutex<std::sync::mpsc::Receiver<Result<ShortcutActivation, ShortcutError>>>>,
+    should_fail_rebind: Arc<Mutex<bool>>,
+}
+
+impl ShortcutBackend for ReloadableMockBackend {
+    fn name(&self) -> &'static str {
+        "Reloadable Mock Backend"
+    }
+
+    fn capability(&self) -> ShortcutBackendCapability {
+        ShortcutBackendCapability::Native
+    }
+
+    fn register(
+        &mut self,
+        shortcut: Shortcut,
+    ) -> Result<ShortcutRegistrationOutcome, ShortcutError> {
+        *self.registered.lock().unwrap() = Some(shortcut);
+        Ok(ShortcutRegistrationOutcome::Active {
+            description: format!("registered {shortcut}"),
+        })
+    }
+
+    fn wait_for_activation(&mut self) -> Result<ShortcutActivation, ShortcutError> {
+        match self.activation_rx.lock().unwrap().recv() {
+            Ok(result) => result,
+            Err(_) => Err(ShortcutError::Unavailable),
+        }
+    }
+
+    fn wake_trigger(&self) -> Option<Arc<dyn Fn() + Send + Sync>> {
+        let tx = self.activation_tx.clone();
+        Some(Arc::new(move || {
+            let _ = tx.send(Err(ShortcutError::Interrupted));
+        }))
+    }
+
+    fn rebind(&mut self, shortcut: Shortcut) -> Result<ShortcutRegistrationOutcome, ShortcutError> {
+        if *self.should_fail_rebind.lock().unwrap() {
+            return Err(ShortcutError::Conflict(format!(
+                "key {shortcut} in conflict"
+            )));
+        }
+        *self.registered.lock().unwrap() = Some(shortcut);
+        Ok(ShortcutRegistrationOutcome::Active {
+            description: format!("reloaded {shortcut}"),
+        })
+    }
+}
+
+#[tokio::test]
+async fn listener_reload_rebinds_new_shortcut_successfully() {
+    let recorded = Arc::new(Mutex::new(None));
+    let (tx, rx) = std::sync::mpsc::channel();
+    let backend = ReloadableMockBackend {
+        registered: Arc::clone(&recorded),
+        activation_tx: tx,
+        activation_rx: Arc::new(Mutex::new(rx)),
+        should_fail_rebind: Arc::new(Mutex::new(false)),
+    };
+    let listener = ShortcutListener::start_with_backend_and_shortcut(backend, Shortcut::super_v());
+
+    // Wait for initial registration
+    for _ in 0..20 {
+        if recorded.lock().unwrap().is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(*recorded.lock().unwrap(), Some(Shortcut::super_v()));
+
+    // Reload with a new shortcut
+    let new_shortcut = Shortcut::new(
+        ShortcutKey::Character('p'),
+        ShortcutModifiers {
+            control: true,
+            shift: true,
+            ..ShortcutModifiers::NONE
+        },
+    );
+    let status = listener
+        .reload(new_shortcut)
+        .await
+        .expect("reload should succeed");
+
+    assert_eq!(status.configured_shortcut, "Ctrl+Shift+P");
+    assert_eq!(*recorded.lock().unwrap(), Some(new_shortcut));
+    match status.state {
+        ipc::IpcShortcutState::Active { description } => {
+            assert!(description.contains("reloaded Ctrl+Shift+P"));
+        }
+        other => panic!("expected active state, got {:?}", other),
+    }
+}
+
+#[tokio::test]
+async fn listener_reload_preserves_old_shortcut_when_rebind_fails() {
+    let recorded = Arc::new(Mutex::new(None));
+    let (tx, rx) = std::sync::mpsc::channel();
+    let should_fail = Arc::new(Mutex::new(false));
+    let backend = ReloadableMockBackend {
+        registered: Arc::clone(&recorded),
+        activation_tx: tx,
+        activation_rx: Arc::new(Mutex::new(rx)),
+        should_fail_rebind: Arc::clone(&should_fail),
+    };
+    let listener = ShortcutListener::start_with_backend_and_shortcut(backend, Shortcut::super_v());
+
+    // Wait for initial registration
+    for _ in 0..20 {
+        if recorded.lock().unwrap().is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(*recorded.lock().unwrap(), Some(Shortcut::super_v()));
+
+    // Make rebind fail
+    *should_fail.lock().unwrap() = true;
+
+    let target_shortcut = Shortcut::new(
+        ShortcutKey::Character('x'),
+        ShortcutModifiers {
+            super_key: true,
+            ..ShortcutModifiers::NONE
+        },
+    );
+    let err = listener
+        .reload(target_shortcut)
+        .await
+        .expect_err("reload must fail when rebind fails");
+
+    assert!(matches!(err, ShortcutError::Conflict(_)));
+
+    // Verify running shortcut and status are 100% PRESERVED
+    assert_eq!(*recorded.lock().unwrap(), Some(Shortcut::super_v()));
+    let status = listener.status();
+    assert_eq!(status.configured_shortcut, "Super+V");
+    match status.state {
+        ipc::IpcShortcutState::Active { description } => {
+            assert!(description.contains("registered Super+V"));
+        }
+        other => panic!("expected active state preserved, got {:?}", other),
+    }
+}
+
+#[tokio::test]
+async fn reload_coordinator_resets_to_default_super_v_on_missing_config() {
+    use daemon::reload_coordinator::ReloadCoordinator;
+
+    let recorded = Arc::new(Mutex::new(None));
+    let (tx, rx) = std::sync::mpsc::channel();
+    let backend = ReloadableMockBackend {
+        registered: Arc::clone(&recorded),
+        activation_tx: tx,
+        activation_rx: Arc::new(Mutex::new(rx)),
+        should_fail_rebind: Arc::new(Mutex::new(false)),
+    };
+    let listener = Arc::new(ShortcutListener::start_with_backend_and_shortcut(
+        backend,
+        Shortcut::super_v(),
+    ));
+
+    for _ in 0..20 {
+        if recorded.lock().unwrap().is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    let coordinator = ReloadCoordinator::new(Arc::clone(&listener));
+
+    // When config file doesn't exist, strict reload bootstraps canonical config and resets to default Super+V
+    let status = coordinator.reload().await.expect("default reset reload");
+    assert_eq!(status.configured_shortcut, "Super+V");
+}
+
+struct LateWakeBackend {
+    registered: Arc<Mutex<Option<Shortcut>>>,
+    wake_sender: Option<std::sync::mpsc::Sender<Result<ShortcutActivation, ShortcutError>>>,
+    activation_rx: Option<std::sync::mpsc::Receiver<Result<ShortcutActivation, ShortcutError>>>,
+}
+
+impl ShortcutBackend for LateWakeBackend {
+    fn name(&self) -> &'static str {
+        "Late Wake Backend"
+    }
+
+    fn capability(&self) -> ShortcutBackendCapability {
+        ShortcutBackendCapability::Native
+    }
+
+    fn register(
+        &mut self,
+        shortcut: Shortcut,
+    ) -> Result<ShortcutRegistrationOutcome, ShortcutError> {
+        *self.registered.lock().unwrap() = Some(shortcut);
+        // Wake mechanism and activation channel are initialized ONLY during register(),
+        // mirroring the lifecycle of WaylandShortcutBackend (KDE Plasma portal).
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.wake_sender = Some(tx);
+        self.activation_rx = Some(rx);
+        Ok(ShortcutRegistrationOutcome::Active {
+            description: format!("registered {shortcut}"),
+        })
+    }
+
+    fn wait_for_activation(&mut self) -> Result<ShortcutActivation, ShortcutError> {
+        let rx = self.activation_rx.as_ref().expect("registered before wait");
+        match rx.recv() {
+            Ok(result) => result,
+            Err(_) => Err(ShortcutError::Unavailable),
+        }
+    }
+
+    fn wake_trigger(&self) -> Option<Arc<dyn Fn() + Send + Sync>> {
+        // Before register(), wake_sender is None and returns None!
+        let tx = self.wake_sender.clone()?;
+        Some(Arc::new(move || {
+            let _ = tx.send(Err(ShortcutError::Interrupted));
+        }))
+    }
+
+    fn rebind(&mut self, shortcut: Shortcut) -> Result<ShortcutRegistrationOutcome, ShortcutError> {
+        *self.registered.lock().unwrap() = Some(shortcut);
+        Ok(ShortcutRegistrationOutcome::Active {
+            description: format!("reloaded {shortcut}"),
+        })
+    }
+}
+
+#[tokio::test]
+async fn listener_reload_wakes_backend_whose_wake_trigger_is_initialized_during_register() {
+    let recorded = Arc::new(Mutex::new(None));
+    let backend = LateWakeBackend {
+        registered: Arc::clone(&recorded),
+        wake_sender: None,
+        activation_rx: None,
+    };
+
+    // Verify precondition: before registration, wake_trigger() is None!
+    assert!(backend.wake_trigger().is_none());
+
+    let listener = ShortcutListener::start_with_backend_and_shortcut(backend, Shortcut::super_v());
+
+    // Wait for initial registration to complete on the background thread
+    for _ in 0..20 {
+        if recorded.lock().unwrap().is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(*recorded.lock().unwrap(), Some(Shortcut::super_v()));
+
+    // Worker is now blocked in wait_for_activation() waiting for events!
+    // A reload must wake it via the newly installed wake_trigger.
+    // If the wake_trigger was not refreshed after register(), reload() would hang indefinitely.
+    let new_shortcut = Shortcut::new(
+        ShortcutKey::Character('k'),
+        ShortcutModifiers {
+            super_key: true,
+            ..ShortcutModifiers::NONE
+        },
+    );
+
+    let reload_fut = listener.reload(new_shortcut);
+    let status = tokio::time::timeout(Duration::from_secs(1), reload_fut)
+        .await
+        .expect("reload must not hang; worker must be woken via refreshed wake_trigger")
+        .expect("reload should succeed");
+
+    assert_eq!(status.configured_shortcut, "Super+K");
+    assert_eq!(*recorded.lock().unwrap(), Some(new_shortcut));
+}

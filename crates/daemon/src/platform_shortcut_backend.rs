@@ -99,6 +99,40 @@ impl ShortcutBackend for PlatformShortcutBackend {
             Self::Unavailable => Ok(()),
         }
     }
+
+    fn rebind(&mut self, shortcut: Shortcut) -> Result<ShortcutRegistrationOutcome, ShortcutError> {
+        match self {
+            Self::X11(backend) => backend.rebind(shortcut),
+            Self::Sway(backend) => backend.rebind(shortcut),
+            Self::Hyprland(backend) => backend.rebind(shortcut),
+            Self::Wayland(backend) => backend.rebind(shortcut),
+            Self::Unavailable => Err(ShortcutError::Unavailable),
+        }
+    }
+
+    fn wake_handle(&self) -> Option<std::os::unix::net::UnixStream> {
+        match self {
+            Self::X11(backend) => backend.wake_handle(),
+            Self::Wayland(backend) => backend.wake_handle(),
+            _ => None,
+        }
+    }
+
+    fn wake(&self) -> Result<(), ShortcutError> {
+        match self {
+            Self::X11(backend) => backend.wake(),
+            Self::Wayland(backend) => backend.wake(),
+            _ => Ok(()),
+        }
+    }
+
+    fn wake_trigger(&self) -> Option<std::sync::Arc<dyn Fn() + Send + Sync>> {
+        match self {
+            Self::X11(backend) => backend.wake_trigger(),
+            Self::Wayland(backend) => backend.wake_trigger(),
+            _ => None,
+        }
+    }
 }
 
 #[allow(dead_code)]

@@ -29,6 +29,10 @@ pub struct X11ShortcutBackend {
     key_down: bool,
 
     pending_event: Option<x11rb::protocol::Event>,
+
+    wake_reader: std::os::unix::net::UnixStream,
+
+    wake_writer: std::os::unix::net::UnixStream,
 }
 
 impl X11ShortcutBackend {
@@ -49,6 +53,16 @@ impl X11ShortcutBackend {
             .ok()
             .and_then(|keycode| find_modifier_mask(&connection, keycode).ok().flatten());
 
+        let (wake_reader, wake_writer) = std::os::unix::net::UnixStream::pair().map_err(|e| {
+            ShortcutError::Failed(format!("failed to create self-pipe for X11 wake: {e}"))
+        })?;
+        wake_reader.set_nonblocking(true).map_err(|e| {
+            ShortcutError::Failed(format!("failed to set wake_reader nonblocking: {e}"))
+        })?;
+        wake_writer.set_nonblocking(true).map_err(|e| {
+            ShortcutError::Failed(format!("failed to set wake_writer nonblocking: {e}"))
+        })?;
+
         Ok(Self {
             connection,
             root_window,
@@ -56,7 +70,19 @@ impl X11ShortcutBackend {
             registered_grab: None,
             key_down: false,
             pending_event: None,
+            wake_reader,
+            wake_writer,
         })
+    }
+
+    fn drain_wake_pipe(&self) {
+        use std::io::Read;
+        let mut buf = [0u8; 64];
+        while let Ok(n) = (&self.wake_reader).read(&mut buf) {
+            if n == 0 {
+                break;
+            }
+        }
     }
 
     /// Returns the currently active registered shortcut, if any.
@@ -173,9 +199,54 @@ impl X11ShortcutBackend {
             return Ok(event);
         }
 
-        self.connection.wait_for_event().map_err(|error| {
-            ShortcutError::Failed(format!("failed waiting for X11 shortcut: {error}"))
-        })
+        use std::os::unix::io::AsRawFd;
+
+        loop {
+            // Drain already-buffered X11 events before blocking on raw file descriptors
+            if let Some(event) = self.connection.poll_for_event().map_err(|error| {
+                ShortcutError::Failed(format!("failed polling X11 event: {error}"))
+            })? {
+                return Ok(event);
+            }
+
+            let conn_fd = self.connection.stream().as_raw_fd();
+            let wake_fd = self.wake_reader.as_raw_fd();
+
+            let mut fds = [
+                libc::pollfd {
+                    fd: conn_fd,
+                    events: libc::POLLIN,
+                    revents: 0,
+                },
+                libc::pollfd {
+                    fd: wake_fd,
+                    events: libc::POLLIN,
+                    revents: 0,
+                },
+            ];
+
+            let ret = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, -1) };
+            if ret < 0 {
+                let err = std::io::Error::last_os_error();
+                if err.kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(ShortcutError::Failed(format!("libc::poll failed: {err}")));
+            }
+
+            if fds[1].revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR) != 0 {
+                self.drain_wake_pipe();
+                return Err(ShortcutError::Interrupted);
+            }
+
+            if fds[0].revents & (libc::POLLHUP | libc::POLLERR) != 0 {
+                return Err(ShortcutError::Failed(
+                    "X11 connection socket error or hangup".to_string(),
+                ));
+            }
+
+            // Connection FD is readable; loop will poll_for_event() at start of next iteration
+        }
     }
 }
 
@@ -285,6 +356,26 @@ impl ShortcutBackend for X11ShortcutBackend {
 
     fn unregister(&mut self) -> Result<(), ShortcutError> {
         self.release_grab()
+    }
+
+    fn wake_handle(&self) -> Option<std::os::unix::net::UnixStream> {
+        self.wake_writer.try_clone().ok()
+    }
+
+    fn wake(&self) -> Result<(), ShortcutError> {
+        use std::io::Write;
+        (&self.wake_writer)
+            .write_all(&[1])
+            .map_err(|e| ShortcutError::Failed(format!("failed to write to X11 wake pipe: {e}")))?;
+        Ok(())
+    }
+
+    fn wake_trigger(&self) -> Option<std::sync::Arc<dyn Fn() + Send + Sync>> {
+        let writer = self.wake_writer.try_clone().ok()?;
+        Some(std::sync::Arc::new(move || {
+            use std::io::Write;
+            let _ = (&writer).write_all(&[1]);
+        }))
     }
 }
 

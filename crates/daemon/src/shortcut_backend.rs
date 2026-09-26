@@ -185,6 +185,7 @@ impl ShortcutActivation {
 pub enum ShortcutError {
     Unavailable,
     Cancelled,
+    Interrupted,
     TimedOut(String),
     Conflict(String),
     Failed(String),
@@ -195,6 +196,7 @@ impl fmt::Display for ShortcutError {
         match self {
             Self::Unavailable => write!(f, "shortcut backend is unavailable"),
             Self::Cancelled => write!(f, "shortcut registration was cancelled"),
+            Self::Interrupted => write!(f, "shortcut operation was interrupted"),
             Self::TimedOut(msg) => write!(f, "shortcut operation timed out: {msg}"),
             Self::Conflict(msg) => write!(f, "shortcut conflict: {msg}"),
             Self::Failed(msg) => write!(f, "shortcut operation failed: {msg}"),
@@ -304,6 +306,28 @@ pub trait ShortcutBackend: Send {
 
     fn unregister(&mut self) -> Result<(), ShortcutError> {
         Ok(())
+    }
+
+    /// Re-binds or reconciles the shortcut when configuration changes at runtime.
+    /// Default implementation delegates to `register(shortcut)`.
+    fn rebind(&mut self, shortcut: Shortcut) -> Result<ShortcutRegistrationOutcome, ShortcutError> {
+        self.register(shortcut)
+    }
+
+    /// Provides a cloned wake handle (e.g. self-pipe stream) for interrupting
+    /// blocking event loops, if supported by the backend.
+    fn wake_handle(&self) -> Option<std::os::unix::net::UnixStream> {
+        None
+    }
+
+    /// Wakes the backend if it is currently blocking waiting for activation.
+    fn wake(&self) -> Result<(), ShortcutError> {
+        Ok(())
+    }
+
+    /// Provides an optional wake trigger callback to interrupt a blocking wait.
+    fn wake_trigger(&self) -> Option<std::sync::Arc<dyn Fn() + Send + Sync>> {
+        None
     }
 }
 

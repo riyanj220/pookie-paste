@@ -685,6 +685,7 @@ dependencies = [
  "futures-util",
  "history",
  "ipc",
+ "libc",
  "pookie-clipboard",
  "pookie-core",
  "reis",

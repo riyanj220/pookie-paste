@@ -95,6 +95,8 @@ pub struct WaylandShortcutBackend {
 
     activation_receiver: Option<Receiver<ActivationResult>>,
 
+    wake_sender: Option<Sender<ActivationResult>>,
+
     registered: bool,
 
     effective_trigger: Option<String>,
@@ -394,6 +396,7 @@ impl WaylandShortcutBackend {
             runtime,
             session: None,
             activation_receiver: None,
+            wake_sender: None,
             registered: false,
             effective_trigger: None,
         })
@@ -500,6 +503,7 @@ impl ShortcutBackend for WaylandShortcutBackend {
         let listener_session = session.clone();
 
         let terminal_sender = activation_sender.clone();
+        self.wake_sender = Some(activation_sender.clone());
 
         self.runtime.handle().spawn(async move {
             let result = listener_session
@@ -554,6 +558,51 @@ impl ShortcutBackend for WaylandShortcutBackend {
 
     fn effective_trigger(&self) -> Option<&str> {
         self.effective_trigger()
+    }
+
+    fn rebind(&mut self, shortcut: Shortcut) -> Result<ShortcutRegistrationOutcome, ShortcutError> {
+        let Some(ref session) = self.session else {
+            return self.register(shortcut);
+        };
+
+        // Validate requested shortcut for portal trigger format
+        let _preferred_trigger = portal_trigger(shortcut)?;
+
+        // Non-destructively query current effective binding if ListShortcuts is supported
+        if let Ok(bound) = self.runtime.block_on(list_shortcuts(
+            &session.connection,
+            &session.session_handle.as_ref(),
+        )) && let Ok((effective_trigger, outcome)) = evaluate_bound_shortcuts(&bound, shortcut)
+        {
+            self.effective_trigger = effective_trigger;
+            return Ok(outcome);
+        }
+
+        // ListShortcuts unsupported or failed: preserve existing effective trigger
+        let description = match &self.effective_trigger {
+            Some(trigger) => {
+                format!("XDG Desktop Portal global shortcut for {trigger} (requested {shortcut})")
+            }
+            None => {
+                format!("XDG Desktop Portal global shortcut (requested {shortcut})")
+            }
+        };
+
+        Ok(ShortcutRegistrationOutcome::Active { description })
+    }
+
+    fn wake(&self) -> Result<(), ShortcutError> {
+        if let Some(ref sender) = self.wake_sender {
+            let _ = sender.send(Err(ShortcutError::Interrupted));
+        }
+        Ok(())
+    }
+
+    fn wake_trigger(&self) -> Option<std::sync::Arc<dyn Fn() + Send + Sync>> {
+        let wake_sender = self.wake_sender.clone()?;
+        Some(std::sync::Arc::new(move || {
+            let _ = wake_sender.send(Err(ShortcutError::Interrupted));
+        }))
     }
 }
 

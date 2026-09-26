@@ -32,9 +32,11 @@ use daemon::shortcut_listener::ShortcutListener;
 
 use daemon::ui_launcher::{UiLaunchOutcome, UiLauncher};
 
+use daemon::app_paths;
+
 use daemon::clipboard_watcher;
 
-use daemon::app_paths;
+use daemon::shortcut_config::ShortcutConfig;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -131,6 +133,10 @@ async fn main() -> anyhow::Result<()> {
     info!("paste backend: {}", paste_backend.name());
 
     let focus_service = FocusService::new(focus_backend);
+
+    if let Err(err) = ShortcutConfig::ensure_config_file_exists() {
+        warn!(error = %err, "could not bootstrap configuration file");
+    }
 
     let mut shortcut_listener = ShortcutListener::start();
 

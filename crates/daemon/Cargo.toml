@@ -61,6 +61,8 @@ x11rb = {
 
 zbus = "5.19"
 
+libc = "0.2"
+
 futures-util = "0.3"
 
 ashpd = {
