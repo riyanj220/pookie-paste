@@ -787,3 +787,553 @@ async fn listener_reload_wakes_backend_whose_wake_trigger_is_initialized_during_
     assert_eq!(status.configured_shortcut, "Super+K");
     assert_eq!(*recorded.lock().unwrap(), Some(new_shortcut));
 }
+
+type RebindHandler =
+    Box<dyn FnMut(Shortcut) -> Result<ShortcutRegistrationOutcome, ShortcutError> + Send>;
+type PortalHandler = Box<dyn FnMut(Option<&str>) -> Result<Option<String>, ShortcutError> + Send>;
+
+struct FlexibleMockBackend {
+    capability: ShortcutBackendCapability,
+    registered: Arc<Mutex<Option<Shortcut>>>,
+    rebind_handler: Arc<Mutex<RebindHandler>>,
+    portal_handler: Arc<Mutex<PortalHandler>>,
+    wake_sender: Option<std::sync::mpsc::Sender<Result<ShortcutActivation, ShortcutError>>>,
+    activation_rx: Option<std::sync::mpsc::Receiver<Result<ShortcutActivation, ShortcutError>>>,
+}
+
+impl ShortcutBackend for FlexibleMockBackend {
+    fn name(&self) -> &'static str {
+        "Flexible Mock Backend"
+    }
+
+    fn capability(&self) -> ShortcutBackendCapability {
+        self.capability
+    }
+
+    fn register(
+        &mut self,
+        shortcut: Shortcut,
+    ) -> Result<ShortcutRegistrationOutcome, ShortcutError> {
+        *self.registered.lock().unwrap() = Some(shortcut);
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.wake_sender = Some(tx);
+        self.activation_rx = Some(rx);
+        Ok(ShortcutRegistrationOutcome::Active {
+            description: format!("registered {shortcut}"),
+        })
+    }
+
+    fn wait_for_activation(&mut self) -> Result<ShortcutActivation, ShortcutError> {
+        let rx = self.activation_rx.as_ref().expect("registered before wait");
+        match rx.recv() {
+            Ok(result) => result,
+            Err(_) => Err(ShortcutError::Unavailable),
+        }
+    }
+
+    fn wake_trigger(&self) -> Option<Arc<dyn Fn() + Send + Sync>> {
+        let tx = self.wake_sender.clone()?;
+        Some(Arc::new(move || {
+            let _ = tx.send(Err(ShortcutError::Interrupted));
+        }))
+    }
+
+    fn rebind(&mut self, shortcut: Shortcut) -> Result<ShortcutRegistrationOutcome, ShortcutError> {
+        let mut handler = self.rebind_handler.lock().unwrap();
+        handler(shortcut)
+    }
+
+    fn configure_portal_shortcuts(
+        &mut self,
+        parent_window: Option<&str>,
+    ) -> Result<Option<String>, ShortcutError> {
+        let mut handler = self.portal_handler.lock().unwrap();
+        handler(parent_window)
+    }
+}
+
+#[tokio::test]
+async fn set_shortcut_native_success() {
+    use daemon::reload_coordinator::ReloadCoordinator;
+
+    let recorded = Arc::new(Mutex::new(None));
+    let registered_clone = Arc::clone(&recorded);
+    let backend = FlexibleMockBackend {
+        capability: ShortcutBackendCapability::Native,
+        registered: Arc::clone(&recorded),
+        rebind_handler: Arc::new(Mutex::new(Box::new(move |shortcut| {
+            *registered_clone.lock().unwrap() = Some(shortcut);
+            Ok(ShortcutRegistrationOutcome::Active {
+                description: format!("rebound {shortcut}"),
+            })
+        }))),
+        portal_handler: Arc::new(Mutex::new(Box::new(|_| Err(ShortcutError::Unavailable)))),
+        wake_sender: None,
+        activation_rx: None,
+    };
+    let listener = ShortcutListener::start_with_backend_and_shortcut(backend, Shortcut::super_v());
+
+    for _ in 0..20 {
+        if recorded.lock().unwrap().is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    let temp_dir =
+        std::env::temp_dir().join(format!("pookie_set_native_ok_{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&temp_dir).unwrap();
+    let config_path = temp_dir.join("config.toml");
+    std::fs::write(
+        &config_path,
+        "# initial comment\n[shortcut.primary]\nmodifiers = [\"SUPER\"]\nkey = \"V\"\n",
+    )
+    .unwrap();
+
+    let coordinator = ReloadCoordinator::with_custom_paths(
+        listener.reload_handle(),
+        config_path.clone(),
+        config_path.clone(),
+    );
+
+    let new_shortcut = Shortcut::new(
+        ShortcutKey::Character('p'),
+        ShortcutModifiers {
+            control: true,
+            shift: true,
+            ..ShortcutModifiers::NONE
+        },
+    );
+
+    let status = coordinator
+        .set_shortcut(new_shortcut)
+        .await
+        .expect("set_shortcut succeeds");
+    assert_eq!(status.configured_shortcut, "Ctrl+Shift+P");
+    assert_eq!(*recorded.lock().unwrap(), Some(new_shortcut));
+
+    // Verify config file was updated and comments were preserved
+    let file_content = std::fs::read_to_string(&config_path).unwrap();
+    assert!(file_content.contains("# initial comment"));
+    assert!(file_content.contains("CTRL"));
+    assert!(file_content.contains("P"));
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn set_shortcut_native_rebind_conflict_leaves_config_and_runtime_old() {
+    use daemon::reload_coordinator::{ReloadCoordinator, ReloadError};
+
+    let recorded = Arc::new(Mutex::new(None));
+    let backend = FlexibleMockBackend {
+        capability: ShortcutBackendCapability::Native,
+        registered: Arc::clone(&recorded),
+        rebind_handler: Arc::new(Mutex::new(Box::new(|shortcut| {
+            Err(ShortcutError::Conflict(format!(
+                "shortcut {shortcut} already registered by another application"
+            )))
+        }))),
+        portal_handler: Arc::new(Mutex::new(Box::new(|_| Err(ShortcutError::Unavailable)))),
+        wake_sender: None,
+        activation_rx: None,
+    };
+    let listener = ShortcutListener::start_with_backend_and_shortcut(backend, Shortcut::super_v());
+
+    for _ in 0..20 {
+        if recorded.lock().unwrap().is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    let temp_dir = std::env::temp_dir().join(format!(
+        "pookie_set_native_conflict_{}",
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::create_dir_all(&temp_dir).unwrap();
+    let config_path = temp_dir.join("config.toml");
+    let initial_toml =
+        "# pristine comment\n[shortcut.primary]\nmodifiers = [\"SUPER\"]\nkey = \"V\"\n";
+    std::fs::write(&config_path, initial_toml).unwrap();
+
+    let coordinator = ReloadCoordinator::with_custom_paths(
+        listener.reload_handle(),
+        config_path.clone(),
+        config_path.clone(),
+    );
+
+    let new_shortcut = Shortcut::new(
+        ShortcutKey::Character('x'),
+        ShortcutModifiers {
+            control: true,
+            ..ShortcutModifiers::NONE
+        },
+    );
+
+    let err = coordinator
+        .set_shortcut(new_shortcut)
+        .await
+        .expect_err("rebind conflict fails");
+    assert!(matches!(
+        err,
+        ReloadError::Shortcut(ShortcutError::Conflict(_))
+    ));
+
+    // Runtime shortcut preserved
+    assert_eq!(*recorded.lock().unwrap(), Some(Shortcut::super_v()));
+
+    // Config file untouched
+    let file_content = std::fs::read_to_string(&config_path).unwrap();
+    assert_eq!(file_content, initial_toml);
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn set_shortcut_native_commit_failure_triggers_runtime_rollback() {
+    use daemon::reload_coordinator::{ReloadCoordinator, ReloadError};
+
+    let recorded = Arc::new(Mutex::new(None));
+    let registered_clone = Arc::clone(&recorded);
+
+    let temp_dir = std::env::temp_dir().join(format!(
+        "pookie_set_native_rollback_{}",
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::create_dir_all(&temp_dir).unwrap();
+    let config_path = temp_dir.join("config.toml");
+    let initial_toml = "[shortcut.primary]\nmodifiers = [\"SUPER\"]\nkey = \"V\"\n";
+    std::fs::write(&config_path, initial_toml).unwrap();
+
+    let sabotage_path = config_path.clone();
+    let backend = FlexibleMockBackend {
+        capability: ShortcutBackendCapability::Native,
+        registered: Arc::clone(&recorded),
+        rebind_handler: Arc::new(Mutex::new(Box::new(move |shortcut| {
+            *registered_clone.lock().unwrap() = Some(shortcut);
+            if shortcut != Shortcut::super_v() {
+                // Sabotage target config path by replacing it with a non-empty directory!
+                // This causes fs::rename(temp_file, config_path) to fail.
+                let _ = std::fs::remove_file(&sabotage_path);
+                let _ = std::fs::create_dir(&sabotage_path);
+                let _ = std::fs::write(sabotage_path.join("blocker"), "block");
+            }
+            Ok(ShortcutRegistrationOutcome::Active {
+                description: format!("bound {shortcut}"),
+            })
+        }))),
+        portal_handler: Arc::new(Mutex::new(Box::new(|_| Err(ShortcutError::Unavailable)))),
+        wake_sender: None,
+        activation_rx: None,
+    };
+    let listener = ShortcutListener::start_with_backend_and_shortcut(backend, Shortcut::super_v());
+
+    for _ in 0..20 {
+        if recorded.lock().unwrap().is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    let coordinator = ReloadCoordinator::with_custom_paths(
+        listener.reload_handle(),
+        config_path.clone(),
+        config_path.clone(),
+    );
+
+    let new_shortcut = Shortcut::new(
+        ShortcutKey::Character('p'),
+        ShortcutModifiers {
+            control: true,
+            shift: true,
+            ..ShortcutModifiers::NONE
+        },
+    );
+
+    let err = coordinator
+        .set_shortcut(new_shortcut)
+        .await
+        .expect_err("commit failure must return error");
+    assert!(matches!(err, ReloadError::Config(_)));
+
+    // Rollback succeeded: runtime is restored to previous shortcut (Super+V)!
+    assert_eq!(*recorded.lock().unwrap(), Some(Shortcut::super_v()));
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn set_shortcut_native_simulated_rollback_failure_surfaced_explicitly() {
+    use daemon::reload_coordinator::{ReloadCoordinator, ReloadError};
+
+    let recorded = Arc::new(Mutex::new(None));
+    let registered_clone = Arc::clone(&recorded);
+
+    let temp_dir = std::env::temp_dir().join(format!(
+        "pookie_set_native_dblfail_{}",
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::create_dir_all(&temp_dir).unwrap();
+    let config_path = temp_dir.join("config.toml");
+    let initial_toml = "[shortcut.primary]\nmodifiers = [\"SUPER\"]\nkey = \"V\"\n";
+    std::fs::write(&config_path, initial_toml).unwrap();
+
+    let sabotage_path = config_path.clone();
+    let backend = FlexibleMockBackend {
+        capability: ShortcutBackendCapability::Native,
+        registered: Arc::clone(&recorded),
+        rebind_handler: Arc::new(Mutex::new(Box::new(move |shortcut| {
+            if shortcut != Shortcut::super_v() {
+                *registered_clone.lock().unwrap() = Some(shortcut);
+                // Sabotage target config path to fail rename
+                let _ = std::fs::remove_file(&sabotage_path);
+                let _ = std::fs::create_dir(&sabotage_path);
+                let _ = std::fs::write(sabotage_path.join("blocker"), "block");
+                Ok(ShortcutRegistrationOutcome::Active {
+                    description: format!("bound {shortcut}"),
+                })
+            } else {
+                // Rollback ALSO fails!
+                Err(ShortcutError::Conflict(
+                    "original key Super+V is suddenly claimed".to_string(),
+                ))
+            }
+        }))),
+        portal_handler: Arc::new(Mutex::new(Box::new(|_| Err(ShortcutError::Unavailable)))),
+        wake_sender: None,
+        activation_rx: None,
+    };
+    let listener = ShortcutListener::start_with_backend_and_shortcut(backend, Shortcut::super_v());
+
+    for _ in 0..20 {
+        if recorded.lock().unwrap().is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    let coordinator = ReloadCoordinator::with_custom_paths(
+        listener.reload_handle(),
+        config_path.clone(),
+        config_path.clone(),
+    );
+
+    let new_shortcut = Shortcut::new(
+        ShortcutKey::Character('p'),
+        ShortcutModifiers {
+            control: true,
+            shift: true,
+            ..ShortcutModifiers::NONE
+        },
+    );
+
+    let err = coordinator
+        .set_shortcut(new_shortcut)
+        .await
+        .expect_err("double failure must return error");
+    match err {
+        ReloadError::Shortcut(ShortcutError::Failed(msg)) => {
+            assert!(msg.contains("failed to commit configuration"));
+            assert!(msg.contains("rollback to previous runtime shortcut also failed"));
+            assert!(
+                msg.contains("current runtime shortcut may differ from persisted configuration")
+            );
+        }
+        other => panic!("expected combined explicit error, got {:?}", other),
+    }
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn set_shortcut_portal_rejected() {
+    use daemon::reload_coordinator::{ReloadCoordinator, ReloadError};
+
+    let recorded = Arc::new(Mutex::new(None));
+    let backend = FlexibleMockBackend {
+        capability: ShortcutBackendCapability::Portal,
+        registered: Arc::clone(&recorded),
+        rebind_handler: Arc::new(Mutex::new(Box::new(|_| Err(ShortcutError::Unavailable)))),
+        portal_handler: Arc::new(Mutex::new(Box::new(|_| Ok(None)))),
+        wake_sender: None,
+        activation_rx: None,
+    };
+    let listener = ShortcutListener::start_with_backend_and_shortcut(backend, Shortcut::super_v());
+
+    for _ in 0..20 {
+        if recorded.lock().unwrap().is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    let temp_dir =
+        std::env::temp_dir().join(format!("pookie_set_portal_rej_{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&temp_dir).unwrap();
+    let config_path = temp_dir.join("config.toml");
+    std::fs::write(
+        &config_path,
+        "[shortcut.primary]\nmodifiers = [\"SUPER\"]\nkey = \"V\"\n",
+    )
+    .unwrap();
+
+    let coordinator = ReloadCoordinator::with_custom_paths(
+        listener.reload_handle(),
+        config_path.clone(),
+        config_path.clone(),
+    );
+
+    let new_shortcut = Shortcut::new(
+        ShortcutKey::Character('p'),
+        ShortcutModifiers {
+            control: true,
+            shift: true,
+            ..ShortcutModifiers::NONE
+        },
+    );
+
+    let err = coordinator
+        .set_shortcut(new_shortcut)
+        .await
+        .expect_err("portal must reject SetShortcut");
+    match err {
+        ReloadError::Shortcut(ShortcutError::Failed(msg)) => {
+            assert_eq!(
+                msg,
+                "Shortcut is managed by the desktop portal; use ConfigurePortalShortcut"
+            );
+        }
+        other => panic!("expected Portal explicit rejection error, got {:?}", other),
+    }
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn set_shortcut_compositor_managed_persists_even_when_unconfigured_or_conflict() {
+    use daemon::reload_coordinator::ReloadCoordinator;
+    use daemon::shortcut_backend::CompositorBindingStatus;
+
+    let recorded = Arc::new(Mutex::new(None));
+    let backend = FlexibleMockBackend {
+        capability: ShortcutBackendCapability::CompositorManaged,
+        registered: Arc::clone(&recorded),
+        rebind_handler: Arc::new(Mutex::new(Box::new(|shortcut| {
+            Ok(ShortcutRegistrationOutcome::CompositorManaged {
+                binding_snippet: format!("bindsym Mod4+{} exec pookie-paste", shortcut.key),
+                status: CompositorBindingStatus::Unconfigured,
+                conflict: None,
+                diagnostic: Some("Key not found in sway config".into()),
+            })
+        }))),
+        portal_handler: Arc::new(Mutex::new(Box::new(|_| Err(ShortcutError::Unavailable)))),
+        wake_sender: None,
+        activation_rx: None,
+    };
+    let listener = ShortcutListener::start_with_backend_and_shortcut(backend, Shortcut::super_v());
+
+    for _ in 0..20 {
+        if recorded.lock().unwrap().is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    let temp_dir =
+        std::env::temp_dir().join(format!("pookie_set_comp_unconf_{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&temp_dir).unwrap();
+    let config_path = temp_dir.join("config.toml");
+    std::fs::write(
+        &config_path,
+        "[shortcut.primary]\nmodifiers = [\"SUPER\"]\nkey = \"V\"\n",
+    )
+    .unwrap();
+
+    let coordinator = ReloadCoordinator::with_custom_paths(
+        listener.reload_handle(),
+        config_path.clone(),
+        config_path.clone(),
+    );
+
+    let new_shortcut = Shortcut::new(
+        ShortcutKey::Character('p'),
+        ShortcutModifiers {
+            super_key: true,
+            ..ShortcutModifiers::NONE
+        },
+    );
+
+    let status = coordinator
+        .set_shortcut(new_shortcut)
+        .await
+        .expect("compositor managed persists desired shortcut");
+    assert_eq!(status.configured_shortcut, "Super+P");
+    match status.state {
+        ipc::IpcShortcutState::CompositorManaged {
+            binding_status,
+            snippet,
+            ..
+        } => {
+            assert_eq!(
+                binding_status,
+                ipc::IpcCompositorBindingStatus::Unconfigured
+            );
+            assert!(snippet.contains("bindsym Mod4+P"));
+        }
+        other => panic!("expected CompositorManaged status, got {:?}", other),
+    }
+
+    // Verify config.toml was actually updated on disk
+    let file_content = std::fs::read_to_string(&config_path).unwrap();
+    assert!(file_content.contains("key = \"P\""));
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn configure_portal_reconciles_with_list_shortcuts() {
+    use daemon::reload_coordinator::ReloadCoordinator;
+
+    let recorded = Arc::new(Mutex::new(None));
+    let backend = FlexibleMockBackend {
+        capability: ShortcutBackendCapability::Portal,
+        registered: Arc::clone(&recorded),
+        rebind_handler: Arc::new(Mutex::new(Box::new(|_| Err(ShortcutError::Unavailable)))),
+        portal_handler: Arc::new(Mutex::new(Box::new(|_| Ok(Some("Ctrl+Alt+V".to_string()))))),
+        wake_sender: None,
+        activation_rx: None,
+    };
+    let listener = ShortcutListener::start_with_backend_and_shortcut(backend, Shortcut::super_v());
+
+    for _ in 0..20 {
+        if recorded.lock().unwrap().is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    let temp_dir =
+        std::env::temp_dir().join(format!("pookie_portal_recon_{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&temp_dir).unwrap();
+    let config_path = temp_dir.join("config.toml");
+    std::fs::write(
+        &config_path,
+        "[shortcut.primary]\nmodifiers = [\"SUPER\"]\nkey = \"V\"\n",
+    )
+    .unwrap();
+
+    let coordinator = ReloadCoordinator::with_custom_paths(
+        listener.reload_handle(),
+        config_path.clone(),
+        config_path.clone(),
+    );
+
+    let status = coordinator
+        .configure_portal()
+        .await
+        .expect("portal configuration succeeds");
+    assert_eq!(status.effective_shortcut.as_deref(), Some("Ctrl+Alt+V"));
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}

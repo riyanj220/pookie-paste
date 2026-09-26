@@ -50,6 +50,7 @@ pub(crate) fn render_header(
     ui: &mut egui::Ui,
     palette: ui_style::UiPalette,
     can_clear: bool,
+    in_settings: bool,
 ) -> HeaderResponse {
     let mut response = HeaderResponse::default();
 
@@ -58,8 +59,14 @@ pub(crate) fn render_header(
     ui.horizontal(|ui| {
         ui.add_space(ui_style::WINDOW_PADDING);
 
+        let title = if in_settings {
+            "Shortcut Setup"
+        } else {
+            "Pookie Paste"
+        };
+
         ui.label(
-            egui::RichText::new("Pookie Paste")
+            egui::RichText::new(title)
                 .size(ui_style::HEADER_TEXT_SIZE)
                 .color(palette.text_primary)
                 .strong(),
@@ -83,7 +90,34 @@ pub(crate) fn render_header(
                 response.close_clicked = true;
             }
 
-            if can_clear {
+            ui.add_space(2.0);
+
+            let gear_color = if in_settings {
+                palette.accent
+            } else {
+                palette.text_secondary
+            };
+
+            let gear_button =
+                egui::Button::new(egui::RichText::new("⚙").size(14.0).color(gear_color))
+                    .frame(false);
+
+            let gear_tooltip = if in_settings {
+                "Back to clipboard history"
+            } else {
+                "Shortcut setup"
+            };
+
+            let gear_res = ui
+                .add_sized([28.0, 28.0], gear_button)
+                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                .on_hover_text(gear_tooltip);
+
+            if gear_res.clicked() {
+                response.settings_clicked = true;
+            }
+
+            if can_clear && !in_settings {
                 ui.add_space(6.0);
 
                 if render_header_clear_button(ui, palette) {

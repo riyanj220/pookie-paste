@@ -288,6 +288,13 @@ pub enum IpcRequest {
     GetShortcutStatus,
 
     ReloadConfig,
+
+    SetShortcut {
+        modifiers: Vec<String>,
+        key: String,
+    },
+
+    ConfigurePortalShortcut,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -754,5 +761,26 @@ mod tests {
         assert!(encoded.contains(r#""type":"config_reloaded""#));
         let decoded: IpcResponse = serde_json::from_str(&encoded).expect("deserialization failed");
         assert_eq!(decoded, response);
+    }
+
+    #[test]
+    fn set_shortcut_request_round_trips() {
+        let request = IpcRequest::SetShortcut {
+            modifiers: vec!["Ctrl".to_string(), "Shift".to_string()],
+            key: "P".to_string(),
+        };
+        let encoded = serde_json::to_string(&request).expect("serialization failed");
+        assert!(encoded.contains(r#""type":"set_shortcut""#));
+        let decoded: IpcRequest = serde_json::from_str(&encoded).expect("deserialization failed");
+        assert_eq!(decoded, request);
+    }
+
+    #[test]
+    fn configure_portal_shortcut_request_round_trips() {
+        let request = IpcRequest::ConfigurePortalShortcut;
+        let encoded = serde_json::to_string(&request).expect("serialization failed");
+        assert_eq!(encoded, r#"{"type":"configure_portal_shortcut"}"#);
+        let decoded: IpcRequest = serde_json::from_str(&encoded).expect("deserialization failed");
+        assert_eq!(decoded, request);
     }
 }

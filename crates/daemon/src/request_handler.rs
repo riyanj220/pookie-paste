@@ -9,6 +9,7 @@ use crate::focus_backend::{FocusBackend, FocusError};
 use crate::ipc_mapper::{from_ipc_focus_target, to_history_item, to_ipc_focus_target};
 use crate::paste_backend::PasteBackend;
 use crate::reload_coordinator::ReloadCoordinator;
+use crate::shortcut_config::{KeyBindingConfig, ModifiersConfig};
 use crate::ui_launcher::{UiLaunchOutcome, UiLauncher};
 
 pub async fn handle_request<B, P, F>(
@@ -171,6 +172,31 @@ where
 
         IpcRequest::ReloadConfig => match reload_coordinator.reload().await {
             Ok(status) => IpcResponse::ConfigReloaded { status },
+            Err(error) => IpcResponse::Error {
+                message: format!("{error}"),
+            },
+        },
+
+        IpcRequest::SetShortcut { modifiers, key } => {
+            let key_binding = KeyBindingConfig {
+                modifiers: ModifiersConfig::Multiple(modifiers),
+                key,
+            };
+            match key_binding.to_shortcut() {
+                Ok(shortcut) => match reload_coordinator.set_shortcut(shortcut).await {
+                    Ok(status) => IpcResponse::ShortcutStatus { status },
+                    Err(error) => IpcResponse::Error {
+                        message: format!("{error}"),
+                    },
+                },
+                Err(error) => IpcResponse::Error {
+                    message: format!("{error}"),
+                },
+            }
+        }
+
+        IpcRequest::ConfigurePortalShortcut => match reload_coordinator.configure_portal().await {
+            Ok(status) => IpcResponse::ShortcutStatus { status },
             Err(error) => IpcResponse::Error {
                 message: format!("{error}"),
             },

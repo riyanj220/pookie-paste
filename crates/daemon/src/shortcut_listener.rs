@@ -18,6 +18,10 @@ pub enum ListenerCommand {
         shortcut: Shortcut,
         reply_tx: tokio::sync::oneshot::Sender<Result<ShortcutStatusInfo, ShortcutError>>,
     },
+    ConfigurePortal {
+        parent_window: Option<String>,
+        reply_tx: tokio::sync::oneshot::Sender<Result<ShortcutStatusInfo, ShortcutError>>,
+    },
     Shutdown,
 }
 
@@ -137,20 +141,13 @@ impl ShortcutListener {
                     "compositor-managed shortcut backend active; activation is handled via daemon IPC"
                 );
                 while let Ok(cmd) = command_rx.recv() {
-                    match cmd {
-                        ListenerCommand::Rebind {
-                            shortcut: target,
-                            reply_tx,
-                        } => {
-                            let res = handle_rebind(
-                                &mut backend,
-                                &thread_status,
-                                &thread_wake_trigger,
-                                target,
-                            );
-                            let _ = reply_tx.send(res);
-                        }
-                        ListenerCommand::Shutdown => break,
+                    if !process_listener_command(
+                        cmd,
+                        &mut backend,
+                        &thread_status,
+                        &thread_wake_trigger,
+                    ) {
+                        break;
                     }
                 }
                 return;
@@ -159,20 +156,13 @@ impl ShortcutListener {
             loop {
                 // 1. Drain pending control commands before blocking
                 while let Ok(cmd) = command_rx.try_recv() {
-                    match cmd {
-                        ListenerCommand::Rebind {
-                            shortcut: target,
-                            reply_tx,
-                        } => {
-                            let res = handle_rebind(
-                                &mut backend,
-                                &thread_status,
-                                &thread_wake_trigger,
-                                target,
-                            );
-                            let _ = reply_tx.send(res);
-                        }
-                        ListenerCommand::Shutdown => return,
+                    if !process_listener_command(
+                        cmd,
+                        &mut backend,
+                        &thread_status,
+                        &thread_wake_trigger,
+                    ) {
+                        return;
                     }
                 }
 
@@ -198,24 +188,13 @@ impl ShortcutListener {
                         }
                         // Stay alive to accept rebind or shutdown
                         while let Ok(cmd) = command_rx.recv() {
-                            match cmd {
-                                ListenerCommand::Rebind {
-                                    shortcut: target,
-                                    reply_tx,
-                                } => {
-                                    let res = handle_rebind(
-                                        &mut backend,
-                                        &thread_status,
-                                        &thread_wake_trigger,
-                                        target,
-                                    );
-                                    let is_ok = res.is_ok();
-                                    let _ = reply_tx.send(res);
-                                    if is_ok {
-                                        break;
-                                    }
-                                }
-                                ListenerCommand::Shutdown => return,
+                            if !process_listener_command(
+                                cmd,
+                                &mut backend,
+                                &thread_status,
+                                &thread_wake_trigger,
+                            ) {
+                                return;
                             }
                         }
                     }
@@ -242,24 +221,13 @@ impl ShortcutListener {
                         }
                         // Stay alive to accept rebind or shutdown
                         while let Ok(cmd) = command_rx.recv() {
-                            match cmd {
-                                ListenerCommand::Rebind {
-                                    shortcut: target,
-                                    reply_tx,
-                                } => {
-                                    let res = handle_rebind(
-                                        &mut backend,
-                                        &thread_status,
-                                        &thread_wake_trigger,
-                                        target,
-                                    );
-                                    let is_ok = res.is_ok();
-                                    let _ = reply_tx.send(res);
-                                    if is_ok {
-                                        break;
-                                    }
-                                }
-                                ListenerCommand::Shutdown => return,
+                            if !process_listener_command(
+                                cmd,
+                                &mut backend,
+                                &thread_status,
+                                &thread_wake_trigger,
+                            ) {
+                                return;
                             }
                         }
                     }
@@ -291,6 +259,13 @@ impl ShortcutListener {
         new_shortcut: Shortcut,
     ) -> Result<ShortcutStatusInfo, ShortcutError> {
         self.reload_handle().reload(new_shortcut).await
+    }
+
+    pub async fn configure_portal(
+        &self,
+        parent_window: Option<String>,
+    ) -> Result<ShortcutStatusInfo, ShortcutError> {
+        self.reload_handle().configure_portal(parent_window).await
     }
 
     pub fn status(&self) -> ShortcutStatusInfo {
@@ -344,6 +319,29 @@ impl ShortcutReloadHandle {
         reply_rx
             .await
             .map_err(|_| ShortcutError::Failed("reload reply channel closed".to_string()))?
+    }
+
+    /// Triggers portal shortcut configuration on the background worker thread (e.g. KDE Plasma).
+    pub async fn configure_portal(
+        &self,
+        parent_window: Option<String>,
+    ) -> Result<ShortcutStatusInfo, ShortcutError> {
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+
+        self.command_tx
+            .send(ListenerCommand::ConfigurePortal {
+                parent_window,
+                reply_tx,
+            })
+            .map_err(|_| {
+                ShortcutError::Failed("shortcut listener worker is not running".to_string())
+            })?;
+
+        self.wake();
+
+        reply_rx
+            .await
+            .map_err(|_| ShortcutError::Failed("portal reply channel closed".to_string()))?
     }
 
     pub fn wake(&self) {
@@ -501,6 +499,53 @@ fn apply_error_to_status(
         lock.effective_shortcut = None;
         lock.state = state;
     }
+}
+
+fn process_listener_command<B: ShortcutBackend>(
+    cmd: ListenerCommand,
+    backend: &mut B,
+    thread_status: &Arc<RwLock<ShortcutStatusInfo>>,
+    thread_wake_trigger: &Arc<RwLock<Option<WakeTrigger>>>,
+) -> bool {
+    match cmd {
+        ListenerCommand::Rebind {
+            shortcut: target,
+            reply_tx,
+        } => {
+            let res = handle_rebind(backend, thread_status, thread_wake_trigger, target);
+            let _ = reply_tx.send(res);
+            true
+        }
+        ListenerCommand::ConfigurePortal {
+            parent_window,
+            reply_tx,
+        } => {
+            let res = handle_configure_portal(backend, thread_status, parent_window.as_deref());
+            let _ = reply_tx.send(res);
+            true
+        }
+        ListenerCommand::Shutdown => false,
+    }
+}
+
+fn handle_configure_portal<B: ShortcutBackend>(
+    backend: &mut B,
+    status: &Arc<RwLock<ShortcutStatusInfo>>,
+    parent_window: Option<&str>,
+) -> Result<ShortcutStatusInfo, ShortcutError> {
+    let effective = backend.configure_portal_shortcuts(parent_window)?;
+    if let Ok(mut lock) = status.write()
+        && let Some(ref effective_str) = effective
+    {
+        lock.effective_shortcut = Some(effective_str.clone());
+        lock.state = IpcShortcutState::Active {
+            description: format!("Desktop portal global shortcut active ({effective_str})"),
+        };
+    }
+    status
+        .read()
+        .map(|s| s.clone())
+        .map_err(|_| ShortcutError::Failed("status lock poisoned".to_string()))
 }
 
 fn handle_rebind<B: ShortcutBackend>(

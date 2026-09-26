@@ -329,6 +329,15 @@ pub trait ShortcutBackend: Send {
     fn wake_trigger(&self) -> Option<std::sync::Arc<dyn Fn() + Send + Sync>> {
         None
     }
+
+    /// Opens the desktop portal's shortcut configuration dialog if supported (e.g. KDE Plasma).
+    /// Default returns `ShortcutError::Unavailable`.
+    fn configure_portal_shortcuts(
+        &mut self,
+        _parent_window: Option<&str>,
+    ) -> Result<Option<String>, ShortcutError> {
+        Err(ShortcutError::Unavailable)
+    }
 }
 
 #[cfg(test)]

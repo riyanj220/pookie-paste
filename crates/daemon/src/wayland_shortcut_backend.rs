@@ -427,11 +427,23 @@ impl WaylandShortcutBackend {
         let parent = parent_window.unwrap_or("");
         let updated = self.runtime.block_on(session.configure_shortcuts(parent))?;
 
-        let effective = updated
-            .into_iter()
-            .find(|s| s.id == CLIPBOARD_HISTORY_SHORTCUT_ID)
-            .and_then(|s| s.trigger_description)
-            .filter(|t| !t.trim().is_empty());
+        // Explicit reconciliation: query current bindings via ListShortcuts
+        let effective = if let Ok(bound) = self.runtime.block_on(list_shortcuts(
+            &session.connection,
+            &session.session_handle.as_ref(),
+        )) {
+            bound
+                .into_iter()
+                .find(|s| s.id == CLIPBOARD_HISTORY_SHORTCUT_ID)
+                .and_then(|s| s.trigger_description)
+                .filter(|t| !t.trim().is_empty())
+        } else {
+            updated
+                .into_iter()
+                .find(|s| s.id == CLIPBOARD_HISTORY_SHORTCUT_ID)
+                .and_then(|s| s.trigger_description)
+                .filter(|t| !t.trim().is_empty())
+        };
 
         self.effective_trigger = effective.clone();
         Ok(effective)
@@ -603,6 +615,13 @@ impl ShortcutBackend for WaylandShortcutBackend {
         Some(std::sync::Arc::new(move || {
             let _ = wake_sender.send(Err(ShortcutError::Interrupted));
         }))
+    }
+
+    fn configure_portal_shortcuts(
+        &mut self,
+        parent_window: Option<&str>,
+    ) -> Result<Option<String>, ShortcutError> {
+        self.configure_shortcuts(parent_window)
     }
 }
 

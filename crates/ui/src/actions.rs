@@ -25,6 +25,7 @@ pub(crate) enum UiActionOutcome {
 pub(crate) struct HeaderResponse {
     pub(crate) close_clicked: bool,
     pub(crate) clear_clicked: bool,
+    pub(crate) settings_clicked: bool,
 }
 
 #[cfg(test)]

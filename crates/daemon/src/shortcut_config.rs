@@ -128,6 +128,11 @@ impl ShortcutConfig {
         Self::load_or_default_from_path(&path)
     }
 
+    /// Resolves or bootstraps the target configuration file path.
+    pub fn config_path() -> std::io::Result<PathBuf> {
+        Self::ensure_config_file_exists()
+    }
+
     /// Bootstraps the default configuration file if no configuration file currently exists.
     ///
     /// Respects any existing configuration file already resolved by `app_paths::config_path()`
@@ -285,6 +290,136 @@ impl ShortcutConfig {
     pub fn primary_shortcut(&self) -> Result<Shortcut, ShortcutConfigError> {
         let binding = self.primary_binding();
         binding.to_shortcut()
+    }
+
+    /// Updates only the shortcut configuration inside an existing TOML string using format-preserving
+    /// editing, retaining comments, whitespace, and unrelated sections.
+    pub fn update_shortcut_in_toml_str(
+        existing_content: &str,
+        shortcut: Shortcut,
+    ) -> Result<String, ShortcutConfigError> {
+        use toml_edit::{Array, DocumentMut, Item, Table, Value, value};
+
+        let mut doc: DocumentMut = if existing_content.trim().is_empty() {
+            DEFAULT_CONFIG_TEMPLATE
+                .parse()
+                .map_err(|e: toml_edit::TomlError| ShortcutConfigError::Parse(e.to_string()))?
+        } else {
+            existing_content
+                .parse()
+                .map_err(|e: toml_edit::TomlError| ShortcutConfigError::Parse(e.to_string()))?
+        };
+
+        let mut mods = Vec::new();
+        if shortcut.modifiers.super_key {
+            mods.push("SUPER");
+        }
+        if shortcut.modifiers.control {
+            mods.push("CTRL");
+        }
+        if shortcut.modifiers.alt {
+            mods.push("ALT");
+        }
+        if shortcut.modifiers.shift {
+            mods.push("SHIFT");
+        }
+
+        let key_str = shortcut.key.to_string();
+
+        let mut arr = Array::new();
+        for m in mods {
+            arr.push(m);
+        }
+
+        if let Some(table) = doc.get_mut("shortcut").and_then(|i| i.as_table_like_mut()) {
+            if table.contains_key("primary") || !table.contains_key("key") {
+                let primary_item = table.entry("primary").or_insert(Item::Table(Table::new()));
+                if let Some(primary_table) = primary_item.as_table_like_mut() {
+                    primary_table.insert("modifiers", Item::Value(Value::Array(arr)));
+                    primary_table.insert("key", value(key_str));
+                }
+            } else {
+                table.insert("modifiers", Item::Value(Value::Array(arr)));
+                table.insert("key", value(key_str));
+            }
+        } else {
+            let mut primary = Table::new();
+            primary.insert("modifiers", Item::Value(Value::Array(arr)));
+            primary.insert("key", value(key_str));
+            let mut shortcut_table = Table::new();
+            shortcut_table.insert("primary", Item::Table(primary));
+            doc.insert("shortcut", Item::Table(shortcut_table));
+        }
+
+        let updated = doc.to_string();
+        // Validate that updated content is valid ShortcutConfig
+        let _ = Self::parse_str(&updated)?;
+        Ok(updated)
+    }
+
+    /// Prepares an updated configuration in a sibling temporary file within the same directory,
+    /// preserving existing permissions if the target file exists.
+    pub fn prepare_new_config_file(
+        target_path: &Path,
+        shortcut: Shortcut,
+    ) -> Result<PathBuf, ShortcutConfigError> {
+        let parent = target_path.parent().ok_or_else(|| {
+            ShortcutConfigError::Io(format!("no parent directory for {}", target_path.display()))
+        })?;
+        fs::create_dir_all(parent).map_err(|e| {
+            ShortcutConfigError::Io(format!(
+                "failed creating directory {}: {e}",
+                parent.display()
+            ))
+        })?;
+
+        let existing_content = if target_path.exists() {
+            fs::read_to_string(target_path)
+                .map_err(|e| ShortcutConfigError::Io(format!("{}: {e}", target_path.display())))?
+        } else {
+            String::new()
+        };
+
+        let updated_content = Self::update_shortcut_in_toml_str(&existing_content, shortcut)?;
+
+        let temp_filename = format!(
+            ".{}.tmp.{}",
+            target_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("config.toml"),
+            uuid::Uuid::new_v4()
+        );
+        let temp_path = parent.join(temp_filename);
+
+        fs::write(&temp_path, updated_content.as_bytes())
+            .map_err(|e| ShortcutConfigError::Io(format!("{}: {e}", temp_path.display())))?;
+
+        if let Ok(metadata) = fs::metadata(target_path) {
+            let _ = fs::set_permissions(&temp_path, metadata.permissions());
+        }
+
+        Ok(temp_path)
+    }
+
+    /// Atomically commits a prepared temporary file over the target configuration file.
+    pub fn commit_prepared_file(
+        temp_path: &Path,
+        target_path: &Path,
+    ) -> Result<(), ShortcutConfigError> {
+        fs::rename(temp_path, target_path).map_err(|e| {
+            let _ = fs::remove_file(temp_path);
+            ShortcutConfigError::Io(format!(
+                "failed committing {} to {}: {e}",
+                temp_path.display(),
+                target_path.display()
+            ))
+        })
+    }
+
+    /// Cleans up a prepared temporary file on failure.
+    pub fn clean_prepared_file(temp_path: &Path) {
+        let _ = fs::remove_file(temp_path);
     }
 }
 
@@ -604,5 +739,87 @@ key = "UnknownLongKeyName"
 
         let _ = fs::remove_file(file_path);
         let _ = fs::remove_dir(temp_dir);
+    }
+
+    #[test]
+    fn update_shortcut_preserves_comments_and_unrelated_sections() {
+        let original = r#"# User configuration header comment
+# Author: Test User
+
+[shortcut.primary]
+modifiers = ["SUPER"]
+key = "V"
+
+# Settings for a future feature
+[something.future]
+enabled = true
+threshold = 42
+"#;
+
+        let new_shortcut = Shortcut::new(
+            ShortcutKey::Character('p'),
+            ShortcutModifiers {
+                control: true,
+                shift: true,
+                ..ShortcutModifiers::NONE
+            },
+        );
+
+        let updated = ShortcutConfig::update_shortcut_in_toml_str(original, new_shortcut).unwrap();
+
+        assert!(updated.contains("# User configuration header comment"));
+        assert!(updated.contains("# Author: Test User"));
+        assert!(updated.contains("# Settings for a future feature"));
+        assert!(updated.contains("[something.future]"));
+        assert!(updated.contains("enabled = true"));
+        assert!(updated.contains("threshold = 42"));
+
+        let parsed = ShortcutConfig::parse_str(&updated).unwrap();
+        assert_eq!(
+            parsed.primary_shortcut().unwrap().to_string(),
+            "Ctrl+Shift+P"
+        );
+    }
+
+    #[test]
+    fn prepare_and_commit_config_file_atomically_updates_target() {
+        let temp_dir = std::env::temp_dir().join(format!("pookie_atomic_{}", uuid::Uuid::new_v4()));
+        let _ = fs::create_dir_all(&temp_dir);
+        let target_file = temp_dir.join("config.toml");
+
+        fs::write(
+            &target_file,
+            "# Original\n[shortcut.primary]\nmodifiers = ['SUPER']\nkey = 'V'\n",
+        )
+        .unwrap();
+
+        let new_shortcut = Shortcut::new(
+            ShortcutKey::Character('p'),
+            ShortcutModifiers {
+                control: true,
+                shift: true,
+                ..ShortcutModifiers::NONE
+            },
+        );
+
+        let prepared_path =
+            ShortcutConfig::prepare_new_config_file(&target_file, new_shortcut).unwrap();
+        assert!(prepared_path.exists());
+        assert_ne!(prepared_path, target_file);
+
+        // Before commit, target file still has original content
+        let before_commit = fs::read_to_string(&target_file).unwrap();
+        assert!(before_commit.contains("modifiers = ['SUPER']"));
+
+        // Commit prepared file
+        ShortcutConfig::commit_prepared_file(&prepared_path, &target_file).unwrap();
+        assert!(!prepared_path.exists());
+
+        // Target file has new content and preserved comments
+        let after_commit = fs::read_to_string(&target_file).unwrap();
+        assert!(after_commit.contains("# Original"));
+        assert!(after_commit.contains("P"));
+
+        let _ = fs::remove_dir_all(&temp_dir);
     }
 }

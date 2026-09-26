@@ -10,6 +10,7 @@ mod popup_anchor;
 mod popup_focus;
 mod popup_position;
 mod rows;
+mod shortcut_view;
 mod theme;
 mod ui_style;
 
