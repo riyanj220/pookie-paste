@@ -164,10 +164,12 @@ async fn main() -> anyhow::Result<()> {
         Arc::clone(&activation_service),
         Arc::clone(&ui_launcher),
         shortcut_status,
-        reload_coordinator,
+        Arc::clone(&reload_coordinator),
     );
 
     tokio::pin!(ipc_future);
+
+    let mut sighup = shutdown::SighupListener::new()?;
 
     info!("Pookie daemon running");
 
@@ -239,6 +241,25 @@ async fn main() -> anyhow::Result<()> {
                         );
 
                         break;
+                    }
+                }
+            }
+
+            Some(()) = sighup.recv() => {
+                info!("SIGHUP received; initiating configuration reload");
+                match reload_coordinator.reload().await {
+                    Ok(status) => {
+                        info!(
+                            configured_shortcut = %status.configured_shortcut,
+                            effective_shortcut = ?status.effective_shortcut,
+                            "configuration and shortcut reloaded successfully via SIGHUP"
+                        );
+                    }
+                    Err(error) => {
+                        warn!(
+                            error = %error,
+                            "configuration reload via SIGHUP failed; current runtime shortcut and active bindings have been preserved"
+                        );
                     }
                 }
             }
