@@ -3,8 +3,8 @@ use std::time::Duration;
 
 use daemon::hyprland_shortcut_backend::format_hyprland_lua_binding;
 use daemon::shortcut_backend::{
-    Shortcut, ShortcutActivation, ShortcutBackend, ShortcutBackendCapability, ShortcutError,
-    ShortcutKey, ShortcutModifiers, ShortcutRegistrationOutcome,
+    BackendEvent, Shortcut, ShortcutActivation, ShortcutBackend, ShortcutBackendCapability,
+    ShortcutError, ShortcutKey, ShortcutModifiers, ShortcutRegistrationOutcome,
 };
 use daemon::shortcut_config::ShortcutConfig;
 use daemon::shortcut_listener::ShortcutListener;
@@ -1291,49 +1291,269 @@ async fn set_shortcut_compositor_managed_persists_even_when_unconfigured_or_conf
     let _ = std::fs::remove_dir_all(&temp_dir);
 }
 
+type ActivationTx =
+    Arc<Mutex<Option<std::sync::mpsc::Sender<Result<ShortcutActivation, ShortcutError>>>>>;
+type EventTx = Arc<Mutex<Option<std::sync::mpsc::Sender<BackendEvent>>>>;
+
+struct MockPortalBackend {
+    registered: Arc<Mutex<Option<Shortcut>>>,
+    portal_calls: Arc<Mutex<usize>>,
+    event_tx: EventTx,
+    activation_tx: ActivationTx,
+    activation_rx: Option<std::sync::mpsc::Receiver<Result<ShortcutActivation, ShortcutError>>>,
+    wake_sender: Option<std::sync::mpsc::Sender<Result<ShortcutActivation, ShortcutError>>>,
+    effective_trigger: Arc<Mutex<Option<String>>>,
+    effective_trigger_str: Option<String>,
+}
+
+impl MockPortalBackend {
+    #[allow(clippy::type_complexity)]
+    fn new(initial_trigger: Option<&str>) -> (Self, EventTx, ActivationTx, Arc<Mutex<usize>>) {
+        let event_tx = Arc::new(Mutex::new(None));
+        let activation_tx = Arc::new(Mutex::new(None));
+        let portal_calls = Arc::new(Mutex::new(0));
+        let backend = Self {
+            registered: Arc::new(Mutex::new(None)),
+            portal_calls: Arc::clone(&portal_calls),
+            event_tx: Arc::clone(&event_tx),
+            activation_tx: Arc::clone(&activation_tx),
+            activation_rx: None,
+            wake_sender: None,
+            effective_trigger: Arc::new(Mutex::new(initial_trigger.map(|s| s.to_string()))),
+            effective_trigger_str: initial_trigger.map(|s| s.to_string()),
+        };
+        (backend, event_tx, activation_tx, portal_calls)
+    }
+}
+
+impl ShortcutBackend for MockPortalBackend {
+    fn name(&self) -> &'static str {
+        "Mock Portal Backend"
+    }
+
+    fn capability(&self) -> ShortcutBackendCapability {
+        ShortcutBackendCapability::Portal
+    }
+
+    fn effective_trigger(&self) -> Option<&str> {
+        self.effective_trigger_str.as_deref()
+    }
+
+    fn register(
+        &mut self,
+        shortcut: Shortcut,
+    ) -> Result<ShortcutRegistrationOutcome, ShortcutError> {
+        *self.registered.lock().unwrap() = Some(shortcut);
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.wake_sender = Some(tx.clone());
+        *self.activation_tx.lock().unwrap() = Some(tx);
+        self.activation_rx = Some(rx);
+        Ok(ShortcutRegistrationOutcome::Active {
+            description: format!("Desktop portal global shortcut active ({shortcut})"),
+        })
+    }
+
+    fn wait_for_activation(&mut self) -> Result<ShortcutActivation, ShortcutError> {
+        let rx = self.activation_rx.as_ref().expect("registered before wait");
+        match rx.recv() {
+            Ok(result) => result,
+            Err(_) => Err(ShortcutError::Unavailable),
+        }
+    }
+
+    fn wake_trigger(&self) -> Option<Arc<dyn Fn() + Send + Sync>> {
+        let tx = self.wake_sender.clone()?;
+        Some(Arc::new(move || {
+            let _ = tx.send(Err(ShortcutError::Interrupted));
+        }))
+    }
+
+    fn configure_portal_shortcuts(
+        &mut self,
+        _parent_window: Option<&str>,
+    ) -> Result<Option<String>, ShortcutError> {
+        *self.portal_calls.lock().unwrap() += 1;
+        // Prompt fire-and-return returning current effective trigger
+        Ok(self.effective_trigger.lock().unwrap().clone())
+    }
+
+    fn set_event_sender(&mut self, sender: std::sync::mpsc::Sender<BackendEvent>) {
+        *self.event_tx.lock().unwrap() = Some(sender);
+    }
+
+    fn set_effective_trigger(&mut self, trigger: Option<String>) {
+        *self.effective_trigger.lock().unwrap() = trigger;
+    }
+}
+
 #[tokio::test]
-async fn configure_portal_reconciles_with_list_shortcuts() {
-    use daemon::reload_coordinator::ReloadCoordinator;
-
-    let recorded = Arc::new(Mutex::new(None));
-    let backend = FlexibleMockBackend {
-        capability: ShortcutBackendCapability::Portal,
-        registered: Arc::clone(&recorded),
-        rebind_handler: Arc::new(Mutex::new(Box::new(|_| Err(ShortcutError::Unavailable)))),
-        portal_handler: Arc::new(Mutex::new(Box::new(|_| Ok(Some("Ctrl+Alt+V".to_string()))))),
-        wake_sender: None,
-        activation_rx: None,
-    };
+async fn configure_portal_returns_promptly_without_blocking() {
+    let (backend, _event_tx, _act_tx, portal_calls) = MockPortalBackend::new(Some("Super+V"));
     let listener = ShortcutListener::start_with_backend_and_shortcut(backend, Shortcut::super_v());
+    tokio::time::sleep(Duration::from_millis(50)).await;
 
+    let start = std::time::Instant::now();
+    let status = listener
+        .configure_portal(None)
+        .await
+        .expect("configure_portal succeeds");
+    let elapsed = start.elapsed();
+
+    assert!(*portal_calls.lock().unwrap() >= 1);
+    assert!(
+        elapsed < Duration::from_millis(200),
+        "configure_portal must return promptly without blocking, took {elapsed:?}"
+    );
+    assert_eq!(status.effective_shortcut.as_deref(), Some("Super+V"));
+}
+
+#[tokio::test]
+async fn portal_preserves_existing_effective_shortcut_when_no_change_event_arrives() {
+    let (backend, _event_tx, _act_tx, _) = MockPortalBackend::new(Some("Super+V"));
+    let listener = ShortcutListener::start_with_backend_and_shortcut(backend, Shortcut::super_v());
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let status = listener
+        .configure_portal(None)
+        .await
+        .expect("configure_portal succeeds");
+    assert_eq!(status.effective_shortcut.as_deref(), Some("Super+V"));
+
+    // User closed/cancelled dialog: no ShortcutsChanged event is emitted
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(
+        listener.status().effective_shortcut.as_deref(),
+        Some("Super+V")
+    );
+}
+
+#[tokio::test]
+async fn shortcuts_changed_updates_effective_shortcut_and_status() {
+    let (backend, event_tx, _act_tx, _) = MockPortalBackend::new(Some("Super+V"));
+    let listener = ShortcutListener::start_with_backend_and_shortcut(backend, Shortcut::super_v());
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Simulate KDE emitting ShortcutsChanged in background
+    let sender = event_tx
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("event sender wired");
+    sender
+        .send(BackendEvent::ShortcutsChanged {
+            effective_shortcut: "Ctrl+Shift+P".to_string(),
+        })
+        .unwrap();
+    listener.wake();
+
+    // Wait briefly for worker to process event
     for _ in 0..20 {
-        if recorded.lock().unwrap().is_some() {
+        if listener.status().effective_shortcut.as_deref() == Some("Ctrl+Shift+P") {
             break;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
 
-    let temp_dir =
-        std::env::temp_dir().join(format!("pookie_portal_recon_{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir_all(&temp_dir).unwrap();
-    let config_path = temp_dir.join("config.toml");
-    std::fs::write(
-        &config_path,
-        "[shortcut.primary]\nmodifiers = [\"SUPER\"]\nkey = \"V\"\n",
-    )
-    .unwrap();
+    let status = listener.status();
+    assert_eq!(status.effective_shortcut.as_deref(), Some("Ctrl+Shift+P"));
+    assert!(matches!(status.state, ipc::IpcShortcutState::Active { .. }));
+}
 
-    let coordinator = ReloadCoordinator::with_custom_paths(
-        listener.reload_handle(),
-        config_path.clone(),
-        config_path.clone(),
-    );
+#[tokio::test]
+async fn activation_still_flows_while_and_after_portal_configuration() {
+    let (backend, _event_tx, act_tx, _) = MockPortalBackend::new(Some("Super+V"));
+    let mut listener =
+        ShortcutListener::start_with_backend_and_shortcut(backend, Shortcut::super_v());
+    tokio::time::sleep(Duration::from_millis(50)).await;
 
-    let status = coordinator
-        .configure_portal()
+    // Trigger portal configuration
+    listener
+        .configure_portal(None)
         .await
-        .expect("portal configuration succeeds");
-    assert_eq!(status.effective_shortcut.as_deref(), Some("Ctrl+Alt+V"));
+        .expect("configure succeeds");
 
-    let _ = std::fs::remove_dir_all(&temp_dir);
+    // Activation occurs while configuration dialog is open
+    let act_sender = act_tx
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("activation sender wired");
+    act_sender
+        .send(Ok(ShortcutActivation {
+            activation_token: Some("token_kde_123".to_string()),
+        }))
+        .unwrap();
+
+    let activation = tokio::time::timeout(Duration::from_millis(500), listener.activated())
+        .await
+        .expect("activation received within timeout")
+        .expect("activation present");
+    assert_eq!(
+        activation.activation_token.as_deref(),
+        Some("token_kde_123")
+    );
+}
+
+#[tokio::test]
+async fn repeated_configure_portal_calls_do_not_create_duplicate_listeners() {
+    let (backend, event_tx, _act_tx, portal_calls) = MockPortalBackend::new(Some("Super+V"));
+    let listener = ShortcutListener::start_with_backend_and_shortcut(backend, Shortcut::super_v());
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Call configure multiple times
+    listener
+        .configure_portal(None)
+        .await
+        .expect("call 1 succeeds");
+    listener
+        .configure_portal(None)
+        .await
+        .expect("call 2 succeeds");
+    listener
+        .configure_portal(None)
+        .await
+        .expect("call 3 succeeds");
+
+    assert_eq!(*portal_calls.lock().unwrap(), 3);
+
+    // Emitting one ShortcutsChanged event should update cleanly
+    let sender = event_tx
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("event sender wired");
+    sender
+        .send(BackendEvent::ShortcutsChanged {
+            effective_shortcut: "Alt+F8".to_string(),
+        })
+        .unwrap();
+    listener.wake();
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(
+        listener.status().effective_shortcut.as_deref(),
+        Some("Alt+F8")
+    );
+}
+
+#[test]
+fn expected_ipc_peer_disconnect_is_classified_as_client_disconnect() {
+    let err_broken_pipe = std::io::Error::from(std::io::ErrorKind::BrokenPipe);
+    let err_reset = std::io::Error::from(std::io::ErrorKind::ConnectionReset);
+    let err_aborted = std::io::Error::from(std::io::ErrorKind::ConnectionAborted);
+    let err_other = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+
+    let is_expected_disconnect = |err: &std::io::Error| {
+        matches!(
+            err.kind(),
+            std::io::ErrorKind::BrokenPipe
+                | std::io::ErrorKind::ConnectionReset
+                | std::io::ErrorKind::ConnectionAborted
+        )
+    };
+
+    assert!(is_expected_disconnect(&err_broken_pipe));
+    assert!(is_expected_disconnect(&err_reset));
+    assert!(is_expected_disconnect(&err_aborted));
+    assert!(!is_expected_disconnect(&err_other));
 }

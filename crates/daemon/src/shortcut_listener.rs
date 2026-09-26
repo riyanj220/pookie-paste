@@ -8,7 +8,7 @@ use tracing::{info, warn};
 
 use crate::platform_shortcut_backend::PlatformShortcutBackend;
 use crate::shortcut_backend::{
-    CompositorBindingStatus, Shortcut, ShortcutActivation, ShortcutBackend,
+    BackendEvent, CompositorBindingStatus, Shortcut, ShortcutActivation, ShortcutBackend,
     ShortcutBackendCapability, ShortcutError, ShortcutRegistrationOutcome,
 };
 use crate::shortcut_config::ShortcutConfig;
@@ -93,6 +93,8 @@ impl ShortcutListener {
     ) -> Self {
         let (sender, receiver) = mpsc::unbounded_channel();
         let (command_tx, command_rx) = std::sync::mpsc::channel::<ListenerCommand>();
+        let (event_tx, event_rx) = std::sync::mpsc::channel::<BackendEvent>();
+        backend.set_event_sender(event_tx);
         let wake_trigger = Arc::new(RwLock::new(backend.wake_trigger()));
         let thread_wake_trigger = Arc::clone(&wake_trigger);
 
@@ -166,7 +168,12 @@ impl ShortcutListener {
                     }
                 }
 
-                // 2. Wait for activation or wake
+                // 2. Drain pending backend events
+                while let Ok(event) = event_rx.try_recv() {
+                    process_backend_event(event, &mut backend, &thread_status);
+                }
+
+                // 3. Wait for activation or wake
                 match backend.wait_for_activation() {
                     Ok(activation) => {
                         if sender.send(activation).is_err() {
@@ -276,7 +283,7 @@ impl ShortcutListener {
         Arc::clone(&self.status)
     }
 
-    fn wake(&self) {
+    pub fn wake(&self) {
         self.reload_handle().wake();
     }
 
@@ -533,19 +540,35 @@ fn handle_configure_portal<B: ShortcutBackend>(
     status: &Arc<RwLock<ShortcutStatusInfo>>,
     parent_window: Option<&str>,
 ) -> Result<ShortcutStatusInfo, ShortcutError> {
-    let effective = backend.configure_portal_shortcuts(parent_window)?;
-    if let Ok(mut lock) = status.write()
-        && let Some(ref effective_str) = effective
-    {
-        lock.effective_shortcut = Some(effective_str.clone());
-        lock.state = IpcShortcutState::Active {
-            description: format!("Desktop portal global shortcut active ({effective_str})"),
-        };
-    }
+    backend.configure_portal_shortcuts(parent_window)?;
     status
         .read()
         .map(|s| s.clone())
         .map_err(|_| ShortcutError::Failed("status lock poisoned".to_string()))
+}
+
+fn process_backend_event<B: ShortcutBackend>(
+    event: BackendEvent,
+    backend: &mut B,
+    status: &Arc<RwLock<ShortcutStatusInfo>>,
+) {
+    match event {
+        BackendEvent::ShortcutsChanged { effective_shortcut } => {
+            info!(
+                effective = %effective_shortcut,
+                "desktop portal global shortcut updated"
+            );
+            backend.set_effective_trigger(Some(effective_shortcut.clone()));
+            if let Ok(mut lock) = status.write() {
+                lock.effective_shortcut = Some(effective_shortcut.clone());
+                lock.state = IpcShortcutState::Active {
+                    description: format!(
+                        "Desktop portal global shortcut active ({effective_shortcut})"
+                    ),
+                };
+            }
+        }
+    }
 }
 
 fn handle_rebind<B: ShortcutBackend>(

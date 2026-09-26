@@ -16,7 +16,7 @@ use pookie_clipboard::ClipboardBackend;
 
 use tokio::time::timeout;
 
-use tracing::{error, info};
+use tracing::{debug, error, info};
 
 const IPC_READ_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -165,7 +165,21 @@ async fn handle_connection_with_timeout<B, P, F>(
         .await;
 
         if let Err(error) = connection.send_response(&response).await {
-            error!("failed to send IPC response: {:?}", error);
+            match &error {
+                ServerError::Io(io_err)
+                    if matches!(
+                        io_err.kind(),
+                        std::io::ErrorKind::BrokenPipe
+                            | std::io::ErrorKind::ConnectionReset
+                            | std::io::ErrorKind::ConnectionAborted
+                    ) =>
+                {
+                    debug!("client disconnected before IPC response could be sent: {io_err}");
+                }
+                _ => {
+                    error!("failed to send IPC response: {:?}", error);
+                }
+            }
 
             break;
         }

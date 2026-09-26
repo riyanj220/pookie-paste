@@ -45,12 +45,14 @@ async fn main() {
         println!();
         println!("Requesting portal shortcut configuration dialog (ConfigureShortcuts)...");
         match session.configure_shortcuts("").await {
-            Ok(updated) => {
-                println!("ConfigureShortcuts dialog finished successfully.");
-                bound_shortcuts = updated;
+            Ok(()) => {
+                println!("ConfigureShortcuts request succeeded.");
+                if let Ok(updated) = session.list_shortcuts().await {
+                    bound_shortcuts = updated;
+                }
             }
             Err(error) => {
-                eprintln!("ConfigureShortcuts failed or was cancelled by user: {error:?}");
+                eprintln!("ConfigureShortcuts failed: {error:?}");
             }
         }
         println!();

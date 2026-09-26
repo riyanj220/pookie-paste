@@ -1,6 +1,6 @@
 use crate::shortcut_backend::{
-    Shortcut, ShortcutActivation, ShortcutBackend, ShortcutBackendCapability, ShortcutError,
-    ShortcutRegistrationOutcome,
+    BackendEvent, Shortcut, ShortcutActivation, ShortcutBackend, ShortcutBackendCapability,
+    ShortcutError, ShortcutRegistrationOutcome,
 };
 
 use crate::hyprland_shortcut_backend::HyprlandShortcutBackend;
@@ -141,6 +141,18 @@ impl ShortcutBackend for PlatformShortcutBackend {
         match self {
             Self::Wayland(backend) => backend.configure_portal_shortcuts(parent_window),
             _ => Err(ShortcutError::Unavailable),
+        }
+    }
+
+    fn set_event_sender(&mut self, sender: std::sync::mpsc::Sender<BackendEvent>) {
+        if let Self::Wayland(backend) = self {
+            backend.set_event_sender(sender);
+        }
+    }
+
+    fn set_effective_trigger(&mut self, trigger: Option<String>) {
+        if let Self::Wayland(backend) = self {
+            backend.set_effective_trigger(trigger);
         }
     }
 }

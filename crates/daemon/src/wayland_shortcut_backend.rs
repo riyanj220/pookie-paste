@@ -13,8 +13,8 @@ use zbus::{
 };
 
 use crate::shortcut_backend::{
-    Shortcut, ShortcutActivation, ShortcutBackend, ShortcutBackendCapability, ShortcutError,
-    ShortcutKey, ShortcutRegistrationOutcome,
+    BackendEvent, Shortcut, ShortcutActivation, ShortcutBackend, ShortcutBackendCapability,
+    ShortcutError, ShortcutKey, ShortcutRegistrationOutcome,
 };
 
 const PORTAL_DESTINATION: &str = "org.freedesktop.portal.Desktop";
@@ -96,6 +96,10 @@ pub struct WaylandShortcutBackend {
     activation_receiver: Option<Receiver<ActivationResult>>,
 
     wake_sender: Option<Sender<ActivationResult>>,
+
+    event_sender: Option<Sender<BackendEvent>>,
+
+    changed_listener_started: bool,
 
     registered: bool,
 
@@ -231,16 +235,91 @@ impl WaylandShortcutSession {
         list_shortcuts(&self.connection, &self.session_handle.as_ref()).await
     }
 
-    pub async fn configure_shortcuts(
-        &self,
-        parent_window: &str,
-    ) -> Result<Vec<BoundShortcut>, ShortcutError> {
+    pub async fn configure_shortcuts(&self, parent_window: &str) -> Result<(), ShortcutError> {
         configure_shortcuts(
             &self.connection,
             &self.session_handle.as_ref(),
             parent_window,
         )
         .await
+    }
+
+    pub async fn run_shortcuts_changed_loop(
+        &self,
+        event_sender: Sender<BackendEvent>,
+        wake_sender: Sender<ActivationResult>,
+    ) -> Result<(), ShortcutError> {
+        let proxy = match Proxy::new(
+            &self.connection,
+            PORTAL_DESTINATION,
+            PORTAL_PATH,
+            GLOBAL_SHORTCUTS_INTERFACE,
+        )
+        .await
+        {
+            Ok(proxy) => proxy,
+            Err(_) => return Err(ShortcutError::Unavailable),
+        };
+
+        let mut stream = match proxy.receive_signal("ShortcutsChanged").await {
+            Ok(stream) => stream,
+            Err(error) => {
+                debug!("failed to subscribe to GlobalShortcuts ShortcutsChanged: {error}");
+                return Err(ShortcutError::Failed(format!("{error}")));
+            }
+        };
+
+        while let Some(message) = stream.next().await {
+            let decoded: Result<ShortcutsChangedBody, _> = message.body().deserialize();
+
+            let (signal_session, raw_shortcuts) = match decoded {
+                Ok(res) => res,
+                Err(error) => {
+                    debug!("failed to decode ShortcutsChanged signal: {error}");
+                    continue;
+                }
+            };
+
+            if signal_session.as_ref() != *self.session_handle {
+                continue;
+            }
+
+            let shortcuts = decode_shortcuts_vec(raw_shortcuts);
+            let effective = shortcuts
+                .into_iter()
+                .find(|s| s.id == CLIPBOARD_HISTORY_SHORTCUT_ID)
+                .and_then(|s| s.trigger_description)
+                .filter(|t| !t.trim().is_empty());
+
+            let effective = match effective {
+                Some(eff) => Some(eff),
+                None => {
+                    if let Ok(bound) =
+                        list_shortcuts(&self.connection, &self.session_handle.as_ref()).await
+                    {
+                        bound
+                            .into_iter()
+                            .find(|s| s.id == CLIPBOARD_HISTORY_SHORTCUT_ID)
+                            .and_then(|s| s.trigger_description)
+                            .filter(|t| !t.trim().is_empty())
+                    } else {
+                        None
+                    }
+                }
+            };
+
+            if let Some(new_trigger) = effective {
+                info!(trigger = %new_trigger, "received portal ShortcutsChanged notification");
+                let _ = event_sender.send(BackendEvent::ShortcutsChanged {
+                    effective_shortcut: new_trigger,
+                });
+                let _ = wake_sender.send(Err(ShortcutError::Interrupted));
+            }
+        }
+
+        Err(ShortcutError::Failed(
+            "GlobalShortcuts ShortcutsChanged stream ended".to_string(),
+        ))
     }
 
     pub async fn wait_for_clipboard_history_activation(
@@ -397,9 +476,42 @@ impl WaylandShortcutBackend {
             session: None,
             activation_receiver: None,
             wake_sender: None,
+            event_sender: None,
+            changed_listener_started: false,
             registered: false,
             effective_trigger: None,
         })
+    }
+
+    /// Sets an event channel sender for receiving asynchronous backend events (e.g. portal shortcuts changed).
+    pub fn set_event_sender(&mut self, sender: Sender<BackendEvent>) {
+        self.event_sender = Some(sender);
+        self.ensure_changed_listener_started();
+    }
+
+    /// Updates the backend's internal effective trigger description.
+    pub fn set_effective_trigger(&mut self, trigger: Option<String>) {
+        self.effective_trigger = trigger;
+    }
+
+    fn ensure_changed_listener_started(&mut self) {
+        if self.changed_listener_started {
+            return;
+        }
+        if let (Some(session), Some(event_sender), Some(wake_sender)) =
+            (&self.session, &self.event_sender, &self.wake_sender)
+        {
+            let session_clone = session.clone();
+            let event_sender_clone = event_sender.clone();
+            let wake_sender_clone = wake_sender.clone();
+
+            self.runtime.handle().spawn(async move {
+                let _ = session_clone
+                    .run_shortcuts_changed_loop(event_sender_clone, wake_sender_clone)
+                    .await;
+            });
+            self.changed_listener_started = true;
+        }
     }
 
     /// Returns the active effective trigger string reported by the portal, if registered.
@@ -412,10 +524,11 @@ impl WaylandShortcutBackend {
         self.session.as_ref()
     }
 
-    /// Configures global shortcuts for the active session using the portal's native UI
+    /// Requests global shortcut configuration for the active session using the portal's native UI
     /// (supported on GlobalShortcuts interface version >= 2).
     ///
-    /// After user configuration, refreshes and returns the newly effective shortcut trigger.
+    /// This method is fire-and-return: once the D-Bus call requests the UI, it returns promptly
+    /// without waiting for user completion or timeouts.
     pub fn configure_shortcuts(
         &mut self,
         parent_window: Option<&str>,
@@ -425,28 +538,9 @@ impl WaylandShortcutBackend {
         })?;
 
         let parent = parent_window.unwrap_or("");
-        let updated = self.runtime.block_on(session.configure_shortcuts(parent))?;
+        self.runtime.block_on(session.configure_shortcuts(parent))?;
 
-        // Explicit reconciliation: query current bindings via ListShortcuts
-        let effective = if let Ok(bound) = self.runtime.block_on(list_shortcuts(
-            &session.connection,
-            &session.session_handle.as_ref(),
-        )) {
-            bound
-                .into_iter()
-                .find(|s| s.id == CLIPBOARD_HISTORY_SHORTCUT_ID)
-                .and_then(|s| s.trigger_description)
-                .filter(|t| !t.trim().is_empty())
-        } else {
-            updated
-                .into_iter()
-                .find(|s| s.id == CLIPBOARD_HISTORY_SHORTCUT_ID)
-                .and_then(|s| s.trigger_description)
-                .filter(|t| !t.trim().is_empty())
-        };
-
-        self.effective_trigger = effective.clone();
-        Ok(effective)
+        Ok(self.effective_trigger.clone())
     }
 
     fn close_session_after_failed_registration(&self, session: &WaylandShortcutSession) {
@@ -555,6 +649,8 @@ impl ShortcutBackend for WaylandShortcutBackend {
         self.activation_receiver = Some(activation_receiver);
         self.registered = true;
 
+        self.ensure_changed_listener_started();
+
         Ok(outcome)
     }
 
@@ -622,6 +718,14 @@ impl ShortcutBackend for WaylandShortcutBackend {
         parent_window: Option<&str>,
     ) -> Result<Option<String>, ShortcutError> {
         self.configure_shortcuts(parent_window)
+    }
+
+    fn set_event_sender(&mut self, sender: Sender<BackendEvent>) {
+        self.set_event_sender(sender);
+    }
+
+    fn set_effective_trigger(&mut self, trigger: Option<String>) {
+        self.set_effective_trigger(trigger);
     }
 }
 
@@ -1015,7 +1119,7 @@ async fn configure_shortcuts(
     connection: &Connection,
     session_handle: &ObjectPath<'_>,
     parent_window: &str,
-) -> Result<Vec<BoundShortcut>, ShortcutError> {
+) -> Result<(), ShortcutError> {
     let portal = Proxy::new(
         connection,
         PORTAL_DESTINATION,
@@ -1038,15 +1142,6 @@ async fn configure_shortcuts(
         return Err(ShortcutError::Unavailable);
     }
 
-    let mut changed_stream = portal
-        .receive_signal("ShortcutsChanged")
-        .await
-        .map_err(|error| {
-            ShortcutError::Failed(format!(
-                "failed to subscribe to GlobalShortcuts ShortcutsChanged: {error}"
-            ))
-        })?;
-
     let options: HashMap<&str, Value<'_>> = HashMap::new();
     portal
         .call::<_, _, ()>(
@@ -1056,30 +1151,7 @@ async fn configure_shortcuts(
         .await
         .map_err(|error| map_portal_method_error("GlobalShortcuts ConfigureShortcuts", error))?;
 
-    let wait_signal = async {
-        while let Some(message) = changed_stream.next().await {
-            let decoded: Result<ShortcutsChangedBody, _> = message.body().deserialize();
-
-            match decoded {
-                Ok((signal_session, raw_shortcuts)) => {
-                    if signal_session.as_ref() == *session_handle {
-                        return Ok(decode_shortcuts_vec(raw_shortcuts));
-                    }
-                }
-                Err(error) => {
-                    debug!("failed to decode ShortcutsChanged signal: {error}");
-                }
-            }
-        }
-        Err(ShortcutError::Failed(
-            "GlobalShortcuts ShortcutsChanged stream ended".to_string(),
-        ))
-    };
-
-    match tokio::time::timeout(BIND_SHORTCUTS_TIMEOUT, wait_signal).await {
-        Ok(Ok(shortcuts)) => Ok(shortcuts),
-        _ => list_shortcuts(connection, session_handle).await,
-    }
+    Ok(())
 }
 
 async fn wait_for_activation(

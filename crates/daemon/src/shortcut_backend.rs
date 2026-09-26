@@ -338,6 +338,17 @@ pub trait ShortcutBackend: Send {
     ) -> Result<Option<String>, ShortcutError> {
         Err(ShortcutError::Unavailable)
     }
+
+    /// Sets an event channel sender for receiving asynchronous backend events (e.g. portal shortcuts changed).
+    fn set_event_sender(&mut self, _sender: std::sync::mpsc::Sender<BackendEvent>) {}
+
+    /// Updates the backend's internal effective trigger description if supported.
+    fn set_effective_trigger(&mut self, _trigger: Option<String>) {}
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BackendEvent {
+    ShortcutsChanged { effective_shortcut: String },
 }
 
 #[cfg(test)]
