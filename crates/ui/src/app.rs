@@ -37,6 +37,12 @@ const FALLBACK_FOCUS_ACQUISITION_TIMEOUT: Duration = Duration::from_millis(500);
 
 const FOCUS_RETRY_INTERVAL: Duration = Duration::from_millis(16);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PendingShortcutAction {
+    SaveShortcut,
+    ConfigurePortal,
+}
+
 pub(crate) struct PookieApp {
     view_mode: ViewMode,
 
@@ -55,6 +61,10 @@ pub(crate) struct PookieApp {
     shortcut_action_receiver: Option<oneshot::Receiver<Result<ipc::ShortcutStatusInfo, String>>>,
 
     shortcut_action_in_progress: bool,
+
+    pending_shortcut_action: Option<PendingShortcutAction>,
+
+    last_shortcut_poll: Instant,
 
     shortcut_view_state: ShortcutViewState,
 
@@ -143,6 +153,10 @@ impl PookieApp {
             shortcut_action_receiver: None,
 
             shortcut_action_in_progress: false,
+
+            pending_shortcut_action: None,
+
+            last_shortcut_poll: Instant::now(),
 
             shortcut_view_state: ShortcutViewState::default(),
 
@@ -617,6 +631,27 @@ impl PookieApp {
         }
     }
 
+    fn apply_shortcut_status_update(&mut self, new_status: ipc::ShortcutStatusInfo) {
+        if let Some(ref current) = self.shortcut_status {
+            let effective_changed =
+                match (&current.effective_shortcut, &new_status.effective_shortcut) {
+                    (Some(old), Some(new)) => old != new,
+                    (None, Some(_)) => true,
+                    _ => false,
+                };
+            if effective_changed {
+                if let Some(ref new_effective) = new_status.effective_shortcut {
+                    self.shortcut_view_state.success_message =
+                        Some(format!("Shortcut updated to {new_effective}!"));
+                } else {
+                    self.shortcut_view_state.success_message =
+                        Some("Shortcut updated successfully!".to_string());
+                }
+            }
+        }
+        self.shortcut_status = Some(new_status);
+    }
+
     fn poll_shortcut_status(&mut self) {
         if let Some(receiver) = self.shortcut_receiver.as_mut() {
             match receiver.try_recv() {
@@ -624,7 +659,7 @@ impl PookieApp {
                     self.shortcut_receiver = None;
                     match result {
                         Ok(status) => {
-                            self.shortcut_status = Some(status);
+                            self.apply_shortcut_status_update(status);
                         }
                         Err(err) => {
                             tracing::warn!(error = %err, "failed to get shortcut status");
@@ -643,14 +678,25 @@ impl PookieApp {
                 Ok(result) => {
                     self.shortcut_action_receiver = None;
                     self.shortcut_action_in_progress = false;
+                    let action = self.pending_shortcut_action.take();
                     match result {
                         Ok(status) => {
                             self.shortcut_view_state.candidate = None;
                             self.shortcut_view_state.is_recording = false;
                             self.shortcut_view_state.error_message = None;
-                            self.shortcut_view_state.success_message =
-                                Some("Shortcut updated successfully!".to_string());
-                            self.shortcut_status = Some(status);
+                            match action {
+                                Some(PendingShortcutAction::SaveShortcut) => {
+                                    self.shortcut_view_state.success_message =
+                                        Some("Shortcut updated successfully!".to_string());
+                                }
+                                Some(PendingShortcutAction::ConfigurePortal) => {
+                                    // Portal configuration dialog was successfully requested.
+                                    // The shortcut value itself has not changed yet at this point.
+                                    self.shortcut_view_state.success_message = None;
+                                }
+                                None => {}
+                            }
+                            self.apply_shortcut_status_update(status);
                         }
                         Err(err) => {
                             self.shortcut_view_state.error_message = Some(err);
@@ -662,6 +708,7 @@ impl PookieApp {
                 Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
                     self.shortcut_action_receiver = None;
                     self.shortcut_action_in_progress = false;
+                    self.pending_shortcut_action = None;
                 }
             }
         }
@@ -672,6 +719,7 @@ impl PookieApp {
             return;
         }
         self.shortcut_action_in_progress = true;
+        self.pending_shortcut_action = Some(PendingShortcutAction::SaveShortcut);
         self.shortcut_view_state.error_message = None;
         self.shortcut_view_state.success_message = None;
 
@@ -695,6 +743,7 @@ impl PookieApp {
             return;
         }
         self.shortcut_action_in_progress = true;
+        self.pending_shortcut_action = Some(PendingShortcutAction::ConfigurePortal);
         self.shortcut_view_state.error_message = None;
         self.shortcut_view_state.success_message = None;
 
@@ -714,6 +763,11 @@ impl PookieApp {
     }
 
     fn start_recheck_shortcut_status(&mut self, ctx: &egui::Context) {
+        if self.shortcut_receiver.is_some() || self.shortcut_action_in_progress {
+            return;
+        }
+        self.shortcut_view_state.error_message = None;
+
         let (sender, receiver) = oneshot::channel();
         let repaint_context = ctx.clone();
 
@@ -721,6 +775,27 @@ impl PookieApp {
             let runtime =
                 tokio::runtime::Runtime::new().expect("failed to create UI Tokio runtime");
             let result = runtime.block_on(ipc_client::reload_config());
+            if sender.send(result).is_ok() {
+                repaint_context.request_repaint();
+            }
+        });
+
+        self.shortcut_receiver = Some(receiver);
+    }
+
+    fn start_poll_shortcut_status(&mut self, ctx: &egui::Context) {
+        if self.shortcut_receiver.is_some() || self.shortcut_action_in_progress {
+            return;
+        }
+        self.last_shortcut_poll = Instant::now();
+
+        let (sender, receiver) = oneshot::channel();
+        let repaint_context = ctx.clone();
+
+        std::thread::spawn(move || {
+            let runtime =
+                tokio::runtime::Runtime::new().expect("failed to create UI Tokio runtime");
+            let result = runtime.block_on(ipc_client::get_shortcut_status());
             if sender.send(result).is_ok() {
                 repaint_context.request_repaint();
             }
@@ -832,6 +907,7 @@ impl eframe::App for PookieApp {
                 self.view_mode = ViewMode::ShortcutSetup;
                 self.shortcut_view_state.error_message = None;
                 self.shortcut_view_state.success_message = None;
+                self.last_shortcut_poll = Instant::now();
             } else {
                 self.view_mode = ViewMode::History;
             }
@@ -842,6 +918,16 @@ impl eframe::App for PookieApp {
         }
 
         if self.view_mode == ViewMode::ShortcutSetup {
+            if !self.shortcut_view_state.is_recording
+                && self.shortcut_receiver.is_none()
+                && !self.shortcut_action_in_progress
+                && self.last_shortcut_poll.elapsed() >= std::time::Duration::from_millis(1500)
+            {
+                self.start_poll_shortcut_status(ui.ctx());
+            }
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(1500));
+
             let action = shortcut_view::render_shortcut_setup(
                 ui,
                 &mut self.shortcut_view_state,
