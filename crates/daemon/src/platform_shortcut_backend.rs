@@ -133,6 +133,16 @@ impl ShortcutBackend for PlatformShortcutBackend {
             _ => None,
         }
     }
+
+    fn configure_portal_shortcuts(
+        &mut self,
+        parent_window: Option<&str>,
+    ) -> Result<Option<String>, ShortcutError> {
+        match self {
+            Self::Wayland(backend) => backend.configure_portal_shortcuts(parent_window),
+            _ => Err(ShortcutError::Unavailable),
+        }
+    }
 }
 
 #[allow(dead_code)]
@@ -175,5 +185,38 @@ mod tests {
     #[test]
     fn classification_ignores_whitespace() {
         assert_eq!(classify_session_type("  x11  "), SessionType::X11,);
+    }
+
+    #[test]
+    fn platform_shortcut_backend_unavailable_returns_unavailable_for_configure_portal() {
+        let mut backend = PlatformShortcutBackend::Unavailable;
+        let result = backend.configure_portal_shortcuts(None);
+        assert!(
+            matches!(result, Err(ShortcutError::Unavailable)),
+            "Expected Unavailable, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn platform_shortcut_backend_delegates_configure_portal_to_wayland() {
+        let wayland_inner = WaylandShortcutBackend::new().expect("WaylandShortcutBackend::new");
+        let mut backend = PlatformShortcutBackend::Wayland(Box::new(wayland_inner));
+
+        // When called through the wrapper, it must delegate to the inner backend rather than
+        // falling through to the trait default (ShortcutError::Unavailable).
+        let result = backend.configure_portal_shortcuts(None);
+        assert!(
+            !matches!(result, Err(ShortcutError::Unavailable)),
+            "Wrapper must delegate configure_portal_shortcuts to inner Wayland backend instead of falling back to default Unavailable"
+        );
+        match result {
+            Err(ShortcutError::Failed(msg)) => {
+                assert!(
+                    msg.contains("has not been registered"),
+                    "Expected registration failure from inner backend, got: {msg}"
+                );
+            }
+            other => panic!("Unexpected result from inner backend: {other:?}"),
+        }
     }
 }
