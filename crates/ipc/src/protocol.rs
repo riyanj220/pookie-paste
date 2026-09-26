@@ -286,6 +286,8 @@ pub enum IpcRequest {
     ToggleUi,
 
     GetShortcutStatus,
+
+    ReloadConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -308,6 +310,8 @@ pub enum IpcResponse {
     UiToggled { launched: bool },
 
     ShortcutStatus { status: ShortcutStatusInfo },
+
+    ConfigReloaded { status: ShortcutStatusInfo },
 
     Error { message: String },
 }
@@ -385,7 +389,7 @@ pub enum ActivationOutcome {
 mod tests {
     use super::{
         ActivationOutcome, HistoryContentRef, HistoryItem, HistoryItemError, IpcFocusTarget,
-        IpcRequest, IpcResponse,
+        IpcRequest, IpcResponse, IpcShortcutCapability, IpcShortcutState, ShortcutStatusInfo,
     };
 
     #[test]
@@ -725,10 +729,29 @@ mod tests {
     }
 
     #[test]
-    fn ui_toggled_response_round_trips() {
-        let response = IpcResponse::UiToggled { launched: true };
+    fn reload_config_request_round_trips() {
+        let request = IpcRequest::ReloadConfig;
+        let encoded = serde_json::to_string(&request).expect("serialization failed");
+        assert_eq!(encoded, r#"{"type":"reload_config"}"#);
+        let decoded: IpcRequest = serde_json::from_str(&encoded).expect("deserialization failed");
+        assert_eq!(decoded, request);
+    }
+
+    #[test]
+    fn config_reloaded_response_round_trips() {
+        let response = IpcResponse::ConfigReloaded {
+            status: ShortcutStatusInfo {
+                configured_shortcut: "Super+V".to_string(),
+                backend_name: Some("X11 global shortcut".to_string()),
+                capability: Some(IpcShortcutCapability::Native),
+                effective_shortcut: Some("Super+V".to_string()),
+                state: IpcShortcutState::Active {
+                    description: "X11 root window grab for Super+V".to_string(),
+                },
+            },
+        };
         let encoded = serde_json::to_string(&response).expect("serialization failed");
-        assert_eq!(encoded, r#"{"type":"ui_toggled","launched":true}"#);
+        assert!(encoded.contains(r#""type":"config_reloaded""#));
         let decoded: IpcResponse = serde_json::from_str(&encoded).expect("deserialization failed");
         assert_eq!(decoded, response);
     }

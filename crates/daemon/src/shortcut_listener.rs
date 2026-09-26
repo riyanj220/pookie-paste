@@ -275,6 +275,53 @@ impl ShortcutListener {
         }
     }
 
+    /// Returns a lightweight, cloneable reload and control handle for this listener.
+    pub fn reload_handle(&self) -> ShortcutReloadHandle {
+        ShortcutReloadHandle {
+            command_tx: self.command_tx.clone(),
+            wake_trigger: Arc::clone(&self.wake_trigger),
+            status: Arc::clone(&self.status),
+        }
+    }
+
+    /// Rebinds the global shortcut on the background worker thread.
+    /// Preserves current runtime state if rebinding fails.
+    pub async fn reload(
+        &self,
+        new_shortcut: Shortcut,
+    ) -> Result<ShortcutStatusInfo, ShortcutError> {
+        self.reload_handle().reload(new_shortcut).await
+    }
+
+    pub fn status(&self) -> ShortcutStatusInfo {
+        self.reload_handle().status()
+    }
+
+    pub fn status_handle(&self) -> Arc<RwLock<ShortcutStatusInfo>> {
+        Arc::clone(&self.status)
+    }
+
+    fn wake(&self) {
+        self.reload_handle().wake();
+    }
+
+    pub async fn activated(&mut self) -> Option<ShortcutActivation> {
+        self.receiver.recv().await
+    }
+}
+
+/// Lightweight, cloneable handle for triggering shortcut reloads and querying status.
+///
+/// Decouples reload coordination and IPC requests from the mutable activation stream
+/// owned by `ShortcutListener`.
+#[derive(Clone)]
+pub struct ShortcutReloadHandle {
+    command_tx: std::sync::mpsc::Sender<ListenerCommand>,
+    wake_trigger: Arc<RwLock<Option<WakeTrigger>>>,
+    status: Arc<RwLock<ShortcutStatusInfo>>,
+}
+
+impl ShortcutReloadHandle {
     /// Rebinds the global shortcut on the background worker thread.
     /// Preserves current runtime state if rebinding fails.
     pub async fn reload(
@@ -299,7 +346,7 @@ impl ShortcutListener {
             .map_err(|_| ShortcutError::Failed("reload reply channel closed".to_string()))?
     }
 
-    fn wake(&self) {
+    pub fn wake(&self) {
         if let Ok(guard) = self.wake_trigger.read()
             && let Some(ref wake) = *guard
         {
@@ -326,8 +373,14 @@ impl ShortcutListener {
         Arc::clone(&self.status)
     }
 
-    pub async fn activated(&mut self) -> Option<ShortcutActivation> {
-        self.receiver.recv().await
+    #[doc(hidden)]
+    pub fn new_test_handle(status: Arc<RwLock<ShortcutStatusInfo>>) -> Self {
+        let (command_tx, _rx) = std::sync::mpsc::channel();
+        Self {
+            command_tx,
+            wake_trigger: Arc::new(RwLock::new(None)),
+            status,
+        }
     }
 }
 

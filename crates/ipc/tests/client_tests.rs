@@ -397,3 +397,12 @@ async fn refuses_to_delete_non_socket_file() {
 
     std::fs::remove_file(&path).expect("test cleanup failed");
 }
+
+#[tokio::test]
+async fn connect_fails_when_daemon_is_offline() {
+    let path = temporary_socket_path();
+    match IpcClient::connect(&path).await {
+        Err(err) => assert_eq!(err.kind(), std::io::ErrorKind::NotFound),
+        Ok(_) => panic!("connection should fail when daemon is offline"),
+    }
+}

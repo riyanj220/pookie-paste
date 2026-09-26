@@ -661,10 +661,7 @@ async fn reload_coordinator_resets_to_default_super_v_on_missing_config() {
         activation_rx: Arc::new(Mutex::new(rx)),
         should_fail_rebind: Arc::new(Mutex::new(false)),
     };
-    let listener = Arc::new(ShortcutListener::start_with_backend_and_shortcut(
-        backend,
-        Shortcut::super_v(),
-    ));
+    let listener = ShortcutListener::start_with_backend_and_shortcut(backend, Shortcut::super_v());
 
     for _ in 0..20 {
         if recorded.lock().unwrap().is_some() {
@@ -673,7 +670,7 @@ async fn reload_coordinator_resets_to_default_super_v_on_missing_config() {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
 
-    let coordinator = ReloadCoordinator::new(Arc::clone(&listener));
+    let coordinator = ReloadCoordinator::new(listener.reload_handle());
 
     // When config file doesn't exist, strict reload bootstraps canonical config and resets to default Super+V
     let status = coordinator.reload().await.expect("default reset reload");

@@ -8,6 +8,7 @@ use crate::activation_service::{ActivationResult, ClipboardActivationService};
 use crate::focus_backend::{FocusBackend, FocusError};
 use crate::ipc_mapper::{from_ipc_focus_target, to_history_item, to_ipc_focus_target};
 use crate::paste_backend::PasteBackend;
+use crate::reload_coordinator::ReloadCoordinator;
 use crate::ui_launcher::{UiLaunchOutcome, UiLauncher};
 
 pub async fn handle_request<B, P, F>(
@@ -16,6 +17,7 @@ pub async fn handle_request<B, P, F>(
     activation_service: &ClipboardActivationService<B, P, F>,
     ui_launcher: &UiLauncher,
     shortcut_status: &Arc<RwLock<ShortcutStatusInfo>>,
+    reload_coordinator: &Arc<ReloadCoordinator>,
 ) -> IpcResponse
 where
     B: ClipboardBackend,
@@ -166,6 +168,13 @@ where
 
             IpcResponse::ShortcutStatus { status }
         }
+
+        IpcRequest::ReloadConfig => match reload_coordinator.reload().await {
+            Ok(status) => IpcResponse::ConfigReloaded { status },
+            Err(error) => IpcResponse::Error {
+                message: format!("{error}"),
+            },
+        },
     }
 }
 
@@ -307,6 +316,18 @@ mod tests {
         }))
     }
 
+    fn create_test_reload_coordinator(
+        status: Arc<RwLock<ShortcutStatusInfo>>,
+    ) -> Arc<ReloadCoordinator> {
+        let handle = crate::shortcut_listener::ShortcutReloadHandle::new_test_handle(status);
+        let dummy = std::path::PathBuf::from("/nonexistent/test/pookie/config.toml");
+        Arc::new(ReloadCoordinator::with_custom_paths(
+            handle,
+            dummy.clone(),
+            dummy,
+        ))
+    }
+
     async fn handle_test_request<B, P, F>(
         request: IpcRequest,
         history_service: &ClipboardHistoryService,
@@ -319,12 +340,14 @@ mod tests {
     {
         let ui_launcher = UiLauncher::new();
         let shortcut_status = create_test_shortcut_status();
+        let reload_coordinator = create_test_reload_coordinator(Arc::clone(&shortcut_status));
         handle_request(
             request,
             history_service,
             activation_service,
             &ui_launcher,
             &shortcut_status,
+            &reload_coordinator,
         )
         .await
     }
@@ -747,12 +770,14 @@ mod tests {
         ui_launcher.set_running_for_test(true);
 
         let shortcut_status = create_test_shortcut_status();
+        let reload_coordinator = create_test_reload_coordinator(Arc::clone(&shortcut_status));
         let response = handle_request(
             IpcRequest::ToggleUi,
             service.as_ref(),
             &activation_service,
             &ui_launcher,
             &shortcut_status,
+            &reload_coordinator,
         )
         .await;
 

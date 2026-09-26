@@ -36,6 +36,7 @@ use daemon::app_paths;
 
 use daemon::clipboard_watcher;
 
+use daemon::reload_coordinator::ReloadCoordinator;
 use daemon::shortcut_config::ShortcutConfig;
 
 #[tokio::main]
@@ -139,6 +140,8 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let mut shortcut_listener = ShortcutListener::start();
+    let reload_handle = shortcut_listener.reload_handle();
+    let reload_coordinator = Arc::new(ReloadCoordinator::new(reload_handle));
 
     let mut shortcut_available = true;
 
@@ -161,6 +164,7 @@ async fn main() -> anyhow::Result<()> {
         Arc::clone(&activation_service),
         Arc::clone(&ui_launcher),
         shortcut_status,
+        reload_coordinator,
     );
 
     tokio::pin!(ipc_future);

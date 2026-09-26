@@ -12,6 +12,7 @@ pub enum CliAction {
     RunDaemon,
     ToggleUi,
     ShortcutStatus,
+    ReloadConfig,
     Help,
     Version,
 }
@@ -31,6 +32,7 @@ pub fn parse_args_from(args: impl IntoIterator<Item = impl AsRef<str>>) -> CliAc
     match first.as_str() {
         "--toggle" | "-t" => CliAction::ToggleUi,
         "--shortcut-status" => CliAction::ShortcutStatus,
+        "--reload" | "-r" => CliAction::ReloadConfig,
         "--help" | "-h" => CliAction::Help,
         "--version" | "-V" => CliAction::Version,
         unknown => {
@@ -51,6 +53,9 @@ pub fn print_help() {
     println!("OPTIONS:");
     println!(
         "    -t, --toggle             Trigger the clipboard popup (shows UI if not already open)"
+    );
+    println!(
+        "    -r, --reload             Reload configuration and shortcut in the running daemon"
     );
     println!(
         "        --shortcut-status    Print global shortcut configuration and active runtime status"
@@ -78,6 +83,7 @@ pub async fn run_client(action: CliAction) -> anyhow::Result<()> {
         }
         CliAction::ToggleUi => send_toggle_request().await,
         CliAction::ShortcutStatus => send_shortcut_status_request().await,
+        CliAction::ReloadConfig => send_reload_request().await,
     }
 }
 
@@ -159,10 +165,59 @@ pub async fn send_shortcut_status_request_to(path: &Path) -> anyhow::Result<()> 
     }
 }
 
+pub async fn send_reload_request() -> anyhow::Result<()> {
+    let path = socket_path();
+    send_reload_request_to(&path).await
+}
+
+pub async fn send_reload_request_to(path: &Path) -> anyhow::Result<()> {
+    let mut client = match IpcClient::connect(path).await {
+        Ok(client) => client,
+        Err(err) => {
+            eprintln!(
+                "Error: Pookie Paste daemon is not running (could not connect to IPC socket at {})",
+                path.display()
+            );
+            eprintln!("Details: {err}");
+            process::exit(1);
+        }
+    };
+
+    match client.send(&IpcRequest::ReloadConfig).await {
+        Ok(IpcResponse::ConfigReloaded { status }) => {
+            print!("{}", format_reload_status(&status));
+            Ok(())
+        }
+        Ok(IpcResponse::Error { message }) => {
+            eprintln!("Error: Configuration reload failed: {message}");
+            eprintln!("Current runtime shortcut and active bindings have been preserved.");
+            process::exit(1);
+        }
+        Ok(other) => {
+            eprintln!("Unexpected response from daemon: {other:?}");
+            process::exit(1);
+        }
+        Err(err) => {
+            eprintln!("Failed to send reload request to daemon: {err:?}");
+            process::exit(1);
+        }
+    }
+}
+
 pub fn format_shortcut_status(status: &ShortcutStatusInfo) -> String {
+    format_shortcut_status_with_header("Pookie Paste Global Shortcut Status", status)
+}
+
+pub fn format_reload_status(status: &ShortcutStatusInfo) -> String {
+    format_shortcut_status_with_header("Pookie Paste Configuration Reloaded", status)
+}
+
+pub fn format_shortcut_status_with_header(header: &str, status: &ShortcutStatusInfo) -> String {
     let mut out = String::new();
-    out.push_str("Pookie Paste Global Shortcut Status\n");
-    out.push_str("----------------------------------\n");
+    out.push_str(header);
+    out.push('\n');
+    out.push_str(&"-".repeat(header.len()));
+    out.push('\n');
     out.push_str(&format!(
         "Configured Shortcut : {}\n",
         status.configured_shortcut
@@ -285,6 +340,29 @@ mod tests {
             parse_args_from(["--shortcut-status"]),
             CliAction::ShortcutStatus
         );
+    }
+
+    #[test]
+    fn parses_reload_flag() {
+        assert_eq!(parse_args_from(["--reload"]), CliAction::ReloadConfig);
+        assert_eq!(parse_args_from(["-r"]), CliAction::ReloadConfig);
+    }
+
+    #[test]
+    fn formats_reload_status_header() {
+        let status = ShortcutStatusInfo {
+            configured_shortcut: "Super+V".to_string(),
+            backend_name: Some("X11 global shortcut".to_string()),
+            capability: Some(IpcShortcutCapability::Native),
+            effective_shortcut: Some("Super+V".to_string()),
+            state: IpcShortcutState::Active {
+                description: "X11 root window grab for Super+V".to_string(),
+            },
+        };
+        let formatted = format_reload_status(&status);
+        assert!(formatted.contains("Pookie Paste Configuration Reloaded"));
+        assert!(formatted.contains("-----------------------------------"));
+        assert!(formatted.contains("Configured Shortcut : Super+V"));
     }
 
     #[test]
