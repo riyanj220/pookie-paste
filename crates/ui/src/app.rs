@@ -803,6 +803,18 @@ impl PookieApp {
 
         self.shortcut_receiver = Some(receiver);
     }
+
+    fn start_copy_text(&mut self, ctx: &egui::Context, text: String) {
+        let repaint_context = ctx.clone();
+        std::thread::spawn(move || {
+            let runtime =
+                tokio::runtime::Runtime::new().expect("failed to create UI Tokio runtime");
+            if let Err(err) = runtime.block_on(ipc_client::copy_text(text)) {
+                tracing::warn!(error = %err, "failed to copy text via daemon");
+            }
+            repaint_context.request_repaint();
+        });
+    }
 }
 
 impl eframe::App for PookieApp {
@@ -950,7 +962,7 @@ impl eframe::App for PookieApp {
                     self.start_recheck_shortcut_status(ui.ctx());
                 }
                 shortcut_view::ShortcutViewAction::CopySnippet(text) => {
-                    ui.ctx().copy_text(text);
+                    self.start_copy_text(ui.ctx(), text);
                 }
             }
 

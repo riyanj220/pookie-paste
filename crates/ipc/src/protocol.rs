@@ -295,6 +295,10 @@ pub enum IpcRequest {
     },
 
     ConfigurePortalShortcut,
+
+    CopyText {
+        text: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -319,6 +323,8 @@ pub enum IpcResponse {
     ShortcutStatus { status: ShortcutStatusInfo },
 
     ConfigReloaded { status: ShortcutStatusInfo },
+
+    TextCopied,
 
     Error { message: String },
 }
@@ -782,5 +788,25 @@ mod tests {
         assert_eq!(encoded, r#"{"type":"configure_portal_shortcut"}"#);
         let decoded: IpcRequest = serde_json::from_str(&encoded).expect("deserialization failed");
         assert_eq!(decoded, request);
+    }
+
+    #[test]
+    fn copy_text_request_round_trips() {
+        let request = IpcRequest::CopyText {
+            text: "bindsym $mod+v exec pookie".to_string(),
+        };
+        let encoded = serde_json::to_string(&request).expect("serialization failed");
+        assert!(encoded.contains(r#""type":"copy_text""#));
+        let decoded: IpcRequest = serde_json::from_str(&encoded).expect("deserialization failed");
+        assert_eq!(decoded, request);
+    }
+
+    #[test]
+    fn text_copied_response_round_trips() {
+        let response = IpcResponse::TextCopied;
+        let encoded = serde_json::to_string(&response).expect("serialization failed");
+        assert_eq!(encoded, r#"{"type":"text_copied"}"#);
+        let decoded: IpcResponse = serde_json::from_str(&encoded).expect("deserialization failed");
+        assert_eq!(decoded, response);
     }
 }

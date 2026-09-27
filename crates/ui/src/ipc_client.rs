@@ -195,6 +195,23 @@ pub async fn reload_config() -> Result<ipc::ShortcutStatusInfo, String> {
     }
 }
 
+pub async fn copy_text(text: String) -> Result<(), String> {
+    let mut client = connect()
+        .await
+        .map_err(|error| format!("failed to connect to daemon: {error}"))?;
+
+    let response = client
+        .send(&IpcRequest::CopyText { text })
+        .await
+        .map_err(|error| format!("failed to copy text: {error:?}"))?;
+
+    match response {
+        IpcResponse::TextCopied => Ok(()),
+        IpcResponse::Error { message } => Err(message),
+        other => Err(format!("unexpected IPC response: {other:?}")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #[test]

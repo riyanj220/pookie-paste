@@ -136,6 +136,8 @@ struct TestIpcApp {
 
     clipboard_backend: FakeClipboardBackend,
 
+    clipboard_state: Arc<ClipboardState>,
+
     #[allow(dead_code)]
     reload_coordinator: Arc<daemon::reload_coordinator::ReloadCoordinator>,
 
@@ -250,9 +252,11 @@ impl TestIpcApp {
 
         let clipboard_backend = FakeClipboardBackend::new("");
 
+        let clipboard_state = Arc::new(ClipboardState::default());
+
         let clipboard_service = Arc::new(Mutex::new(ClipboardService::new(
             clipboard_backend.clone(),
-            Arc::new(ClipboardState::default()),
+            Arc::clone(&clipboard_state),
         )));
 
         let focus_service = FocusService::new(FakeFocusBackend { target_id });
@@ -341,6 +345,7 @@ impl TestIpcApp {
             server_task,
             history_service,
             clipboard_backend,
+            clipboard_state,
             reload_coordinator,
             _listener: listener,
         }
@@ -394,6 +399,7 @@ async fn handle_test_connection<P>(
             request,
             history_service.as_ref(),
             activation_service.as_ref(),
+            activation_service.clipboard_service().as_ref(),
             &ui_launcher,
             &reload_coordinator.status_handle(),
             &reload_coordinator,
@@ -1223,4 +1229,29 @@ async fn handles_reload_config_ipc_request_malformed_preserves_status() {
     }
 
     let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn copy_text_writes_to_platform_backend_and_marks_self_write() {
+    let app = TestIpcApp::start_with_focus_target(Some(1)).await;
+    let mut client = app.client().await;
+
+    let directive = "bindsym $mod+v exec pookie-paste".to_string();
+    let response = client
+        .send(&IpcRequest::CopyText {
+            text: directive.clone(),
+        })
+        .await
+        .expect("send CopyText request failed");
+
+    assert_eq!(response, IpcResponse::TextCopied);
+
+    // Verify backend received the directive
+    assert_eq!(app.clipboard_content(), directive);
+
+    // Verify it was marked as a self-write (so watcher skips reinserting it into history)
+    assert!(
+        app.clipboard_state
+            .is_self_write(&pookie_clipboard::ClipboardContent::Text(directive))
+    );
 }

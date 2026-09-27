@@ -158,6 +158,7 @@ async fn handle_connection_with_timeout<B, P, F>(
             request,
             history_service.as_ref(),
             activation_service.as_ref(),
+            activation_service.clipboard_service().as_ref(),
             ui_launcher.as_ref(),
             &shortcut_status,
             &reload_coordinator,

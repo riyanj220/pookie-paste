@@ -3,8 +3,10 @@ use std::sync::{Arc, RwLock};
 use history::ClipboardHistoryService;
 use ipc::{ActivationOutcome, IpcRequest, IpcResponse, IpcShortcutState, ShortcutStatusInfo};
 use pookie_clipboard::ClipboardBackend;
+use tokio::sync::Mutex;
 
 use crate::activation_service::{ActivationResult, ClipboardActivationService};
+use crate::clipboard_service::ClipboardService;
 use crate::focus_backend::{FocusBackend, FocusError};
 use crate::ipc_mapper::{from_ipc_focus_target, to_history_item, to_ipc_focus_target};
 use crate::paste_backend::PasteBackend;
@@ -16,6 +18,7 @@ pub async fn handle_request<B, P, F>(
     request: IpcRequest,
     history_service: &ClipboardHistoryService,
     activation_service: &ClipboardActivationService<B, P, F>,
+    clipboard_service: &Mutex<ClipboardService<B>>,
     ui_launcher: &UiLauncher,
     shortcut_status: &Arc<RwLock<ShortcutStatusInfo>>,
     reload_coordinator: &Arc<ReloadCoordinator>,
@@ -201,6 +204,19 @@ where
                 message: format!("{error}"),
             },
         },
+
+        IpcRequest::CopyText { text } => {
+            let mut clipboard = clipboard_service.lock().await;
+            match clipboard.write(pookie_clipboard::ClipboardContent::Text(text)) {
+                Ok(()) => IpcResponse::TextCopied,
+                Err(error) => {
+                    tracing::error!(error = %error, "failed to write text to clipboard");
+                    IpcResponse::Error {
+                        message: format!("failed to write text to clipboard: {error}"),
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -309,13 +325,26 @@ mod tests {
         ClipboardActivationService<FakeClipboardBackend, WaylandPasteBackend, FakeFocusBackend>,
         FakeClipboardBackend,
     ) {
+        let (activation_service, backend_handle, _) =
+            create_activation_service_with_state(history_service);
+        (activation_service, backend_handle)
+    }
+
+    fn create_activation_service_with_state(
+        history_service: Arc<ClipboardHistoryService>,
+    ) -> (
+        ClipboardActivationService<FakeClipboardBackend, WaylandPasteBackend, FakeFocusBackend>,
+        FakeClipboardBackend,
+        Arc<ClipboardState>,
+    ) {
         let backend = FakeClipboardBackend::new("");
 
         let backend_handle = backend.clone();
+        let state = Arc::new(ClipboardState::default());
 
         let clipboard_service = Arc::new(Mutex::new(ClipboardService::new(
             backend,
-            Arc::new(ClipboardState::default()),
+            Arc::clone(&state),
         )));
 
         let focus_service = FocusService::new(FakeFocusBackend);
@@ -327,7 +356,7 @@ mod tests {
             focus_service,
         );
 
-        (activation_service, backend_handle)
+        (activation_service, backend_handle, state)
     }
 
     fn create_test_shortcut_status() -> Arc<RwLock<ShortcutStatusInfo>> {
@@ -371,6 +400,7 @@ mod tests {
             request,
             history_service,
             activation_service,
+            activation_service.clipboard_service().as_ref(),
             &ui_launcher,
             &shortcut_status,
             &reload_coordinator,
@@ -801,6 +831,7 @@ mod tests {
             IpcRequest::ToggleUi,
             service.as_ref(),
             &activation_service,
+            activation_service.clipboard_service().as_ref(),
             &ui_launcher,
             &shortcut_status,
             &reload_coordinator,
@@ -830,5 +861,31 @@ mod tests {
             }
             other => panic!("unexpected response: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn handles_copy_text_request() {
+        let service = create_history_service().await;
+        let (activation_service, backend_handle, clipboard_state) =
+            create_activation_service_with_state(Arc::clone(&service));
+
+        let directive = "bindsym $mod+v exec pookie-paste".to_string();
+        let response = handle_test_request(
+            IpcRequest::CopyText {
+                text: directive.clone(),
+            },
+            service.as_ref(),
+            &activation_service,
+        )
+        .await;
+
+        assert_eq!(response, IpcResponse::TextCopied);
+
+        // Verify the platform backend was written with exact text
+        let written = backend_handle.read_content().expect("read backend failed");
+        assert_eq!(written, ClipboardContent::Text(directive.clone()));
+
+        // Verify it was marked as a self-write
+        assert!(clipboard_state.is_self_write(&ClipboardContent::Text(directive)));
     }
 }

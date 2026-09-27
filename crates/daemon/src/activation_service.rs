@@ -50,6 +50,10 @@ where
         }
     }
 
+    pub fn clipboard_service(&self) -> &Arc<Mutex<ClipboardService<B>>> {
+        &self.clipboard_service
+    }
+
     pub async fn activate(
         &self,
         id: &str,
