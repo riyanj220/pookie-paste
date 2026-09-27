@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use daemon::hyprland_shortcut_backend::format_hyprland_lua_binding;
 use daemon::shortcut_backend::{
-    BackendEvent, CompositorBindingStatus, Shortcut, ShortcutActivation, ShortcutBackend,
+    BackendEvent, CompositorBindingStatus, NamedKey, Shortcut, ShortcutActivation, ShortcutBackend,
     ShortcutBackendCapability, ShortcutError, ShortcutKey, ShortcutModifiers,
     ShortcutRegistrationOutcome,
 };
@@ -860,6 +860,10 @@ impl ShortcutBackend for FlexibleMockBackend {
     ) -> Result<Option<String>, ShortcutError> {
         let mut handler = self.portal_handler.lock().unwrap();
         handler(parent_window)
+    }
+
+    fn check_conflict(&mut self, _shortcut: Shortcut) -> Result<Option<String>, ShortcutError> {
+        Ok(None)
     }
 }
 
@@ -1815,4 +1819,122 @@ async fn native_backend_rebind_error_preserves_previous_shortcut_and_status() {
     // A subsequent recheck() must preserve A
     let recheck_status = listener.recheck().await.expect("recheck returns status");
     assert_eq!(recheck_status.configured_shortcut, "Super+V");
+}
+
+#[tokio::test]
+async fn check_conflict_delegates_through_platform_shortcut_backend() {
+    use daemon::platform_shortcut_backend::PlatformShortcutBackend;
+    use daemon::sway_shortcut_backend::SwayShortcutBackend;
+
+    // Build production PlatformShortcutBackend with Sway backend containing mock config
+    let sway = SwayShortcutBackend::from_offline_config(Some(
+        "bindsym Mod4+Return exec alacritty\nbindsym Mod4+v exec pookie-paste --toggle",
+    ));
+    let platform_backend = PlatformShortcutBackend::Sway(Box::new(sway));
+
+    let listener =
+        ShortcutListener::start_with_backend_and_shortcut(platform_backend, Shortcut::super_v());
+    let handle = listener.reload_handle();
+
+    // 1. Current desired shortcut is allowed
+    let res_current = handle
+        .check_conflict(Shortcut::super_v())
+        .await
+        .expect("check_conflict succeeds");
+    assert_eq!(res_current, None);
+
+    // 2. Conflicting shortcut (Mod4+Return -> exec alacritty) is reported as occupied
+    let super_enter = Shortcut::new(
+        ShortcutKey::Named(NamedKey::Enter),
+        ShortcutModifiers {
+            super_key: true,
+            ..ShortcutModifiers::NONE
+        },
+    );
+    let res_conflict = handle
+        .check_conflict(super_enter)
+        .await
+        .expect("check_conflict succeeds");
+    assert_eq!(res_conflict, Some("exec alacritty".to_string()));
+
+    // 3. Free shortcut is reported as None (available)
+    let free_shortcut = Shortcut::new(
+        ShortcutKey::Character('p'),
+        ShortcutModifiers {
+            control: true,
+            shift: true,
+            ..ShortcutModifiers::NONE
+        },
+    );
+    let res_free = handle
+        .check_conflict(free_shortcut)
+        .await
+        .expect("check_conflict succeeds");
+    assert_eq!(res_free, None);
+}
+
+#[tokio::test]
+async fn set_shortcut_compositor_managed_occupied_rejects_before_modifying_config() {
+    use daemon::platform_shortcut_backend::PlatformShortcutBackend;
+    use daemon::reload_coordinator::{ReloadCoordinator, ReloadError};
+    use daemon::sway_shortcut_backend::SwayShortcutBackend;
+
+    // Create Sway backend where Mod4+Return is bound to alacritty
+    let sway = SwayShortcutBackend::from_offline_config(Some(
+        "bindsym Mod4+Return exec alacritty\nbindsym Mod4+v exec pookie-paste --toggle",
+    ));
+    let platform_backend = PlatformShortcutBackend::Sway(Box::new(sway));
+    let listener =
+        ShortcutListener::start_with_backend_and_shortcut(platform_backend, Shortcut::super_v());
+
+    let temp_dir =
+        std::env::temp_dir().join(format!("pookie_set_comp_conflict_{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&temp_dir).unwrap();
+    let config_path = temp_dir.join("config.toml");
+    let initial_toml =
+        "# pristine comment\n[shortcut.primary]\nmodifiers = [\"SUPER\"]\nkey = \"V\"\n";
+    std::fs::write(&config_path, initial_toml).unwrap();
+
+    let coordinator = ReloadCoordinator::with_custom_paths(
+        listener.reload_handle(),
+        config_path.clone(),
+        config_path.clone(),
+    );
+
+    let super_enter = Shortcut::new(
+        ShortcutKey::Named(NamedKey::Enter),
+        ShortcutModifiers {
+            super_key: true,
+            ..ShortcutModifiers::NONE
+        },
+    );
+
+    // Attempting to save occupied candidate must return Conflict error
+    let err = coordinator
+        .set_shortcut(super_enter)
+        .await
+        .expect_err("occupied candidate must be rejected");
+
+    match err {
+        ReloadError::Shortcut(ShortcutError::Conflict(msg)) => {
+            assert!(
+                msg.contains("exec alacritty"),
+                "error message must mention conflicting command, got '{msg}'"
+            );
+        }
+        other => panic!("expected ReloadError::Shortcut(Conflict), got {other:?}"),
+    }
+
+    // config.toml must be completely UNTOUCHED
+    let file_content = std::fs::read_to_string(&config_path).unwrap();
+    assert_eq!(
+        file_content, initial_toml,
+        "config.toml must remain untouched on conflict"
+    );
+
+    // Runtime listener status must remain unchanged
+    let current_status = coordinator.status();
+    assert_eq!(current_status.configured_shortcut, "Super+V");
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
 }

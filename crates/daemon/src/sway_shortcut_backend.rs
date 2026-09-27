@@ -205,6 +205,48 @@ impl ShortcutBackend for SwayShortcutBackend {
         self.registered_shortcut = None;
         Ok(())
     }
+
+    fn check_conflict(&mut self, shortcut: Shortcut) -> Result<Option<String>, ShortcutError> {
+        // If this candidate matches the currently registered Pookie shortcut, treat as allowed
+        if self.registered_shortcut == Some(shortcut) {
+            return Ok(None);
+        }
+
+        // 1. Try authoritative Sway IPC query if socket is available
+        if let Some(ref sock_path) = self.socket_path {
+            match query_sway_config(sock_path) {
+                Ok(active_config) => {
+                    let diagnosis = diagnose_sway_config(&active_config, shortcut);
+                    return match diagnosis {
+                        SwayBindingDiagnosis::Conflict { command } => Ok(Some(command)),
+                        SwayBindingDiagnosis::MatchedPookie | SwayBindingDiagnosis::NotFound => {
+                            Ok(None)
+                        }
+                    };
+                }
+                Err(err) => {
+                    return Err(ShortcutError::Failed(format!(
+                        "Failed to query active Sway configuration: {err}"
+                    )));
+                }
+            }
+        }
+
+        // 2. Test-only explicit mock content (when no live socket is configured)
+        if let FallbackSource::Explicit(Some(ref file_content)) = self.fallback_source {
+            let diagnosis = diagnose_sway_config(file_content, shortcut);
+            return match diagnosis {
+                SwayBindingDiagnosis::Conflict { command } => Ok(Some(command)),
+                SwayBindingDiagnosis::MatchedPookie | SwayBindingDiagnosis::NotFound => Ok(None),
+            };
+        }
+
+        // Live Sway IPC socket is unavailable: fail closed
+        Err(ShortcutError::Failed(
+            "Could not verify whether this shortcut is available in Sway (Sway IPC socket unavailable). Try again."
+                .to_string(),
+        ))
+    }
 }
 
 /// Formats the canonical Sway `bindsym` directive for a given shortcut.
@@ -329,6 +371,8 @@ pub fn diagnose_sway_config(config_text: &str, shortcut: Shortcut) -> SwayBindin
         }
     }
 
+    let mut saw_pookie = false;
+
     // Second pass: scan `bindsym` lines
     for raw_line in config_text.lines() {
         let line = strip_comments(raw_line).trim();
@@ -362,14 +406,18 @@ pub fn diagnose_sway_config(config_text: &str, shortcut: Shortcut) -> SwayBindin
 
         if matches_key_combination(key_combo, &variables, shortcut) {
             if is_pookie_command(&command) {
-                return SwayBindingDiagnosis::MatchedPookie;
+                saw_pookie = true;
             } else {
                 return SwayBindingDiagnosis::Conflict { command };
             }
         }
     }
 
-    SwayBindingDiagnosis::NotFound
+    if saw_pookie {
+        SwayBindingDiagnosis::MatchedPookie
+    } else {
+        SwayBindingDiagnosis::NotFound
+    }
 }
 
 /// Checks if a key combination string in Sway syntax matches the target `Shortcut`.

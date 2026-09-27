@@ -475,3 +475,149 @@ fn offline_hyprland_backend_deterministic_isolation() {
         other => panic!("expected CompositorManaged outcome, got: {other:?}"),
     }
 }
+
+#[test]
+fn hyprland_check_conflict_normal_existing_binding_rejected() {
+    let raw_json = r#"[
+        {
+            "modmask": 64,
+            "key": "Q",
+            "dispatcher": "killactive",
+            "arg": "",
+            "submap": ""
+        }
+    ]"#;
+    let mut backend = HyprlandShortcutBackend::with_mock_ipc(raw_json);
+    let super_q = Shortcut::new(
+        ShortcutKey::Character('q'),
+        ShortcutModifiers {
+            super_key: true,
+            ..ShortcutModifiers::NONE
+        },
+    );
+
+    let res = backend
+        .check_conflict(super_q)
+        .expect("check_conflict succeeds");
+    assert_eq!(res, Some("killactive".to_string()));
+}
+
+#[test]
+fn hyprland_check_conflict_opaque_lua_rejected_for_different_candidate() {
+    let raw_json = r#"[
+        {
+            "modmask": 64,
+            "key": "V",
+            "dispatcher": "__lua",
+            "arg": "42",
+            "submap": ""
+        }
+    ]"#;
+    let mut backend = HyprlandShortcutBackend::with_mock_ipc(raw_json);
+    // Current registered shortcut is Ctrl+Shift+P, candidate is Super+V
+    let ctrl_shift_p = Shortcut::new(
+        ShortcutKey::Character('p'),
+        ShortcutModifiers {
+            control: true,
+            shift: true,
+            ..ShortcutModifiers::NONE
+        },
+    );
+    backend.register(ctrl_shift_p).expect("register succeeds");
+
+    let res = backend
+        .check_conflict(Shortcut::super_v())
+        .expect("check_conflict succeeds");
+    assert_eq!(res, Some("Hyprland Lua binding (42)".to_string()));
+}
+
+#[test]
+fn hyprland_check_conflict_free_binding_allowed() {
+    let raw_json = r#"[
+        {
+            "modmask": 64,
+            "key": "Return",
+            "dispatcher": "exec",
+            "arg": "alacritty",
+            "submap": ""
+        }
+    ]"#;
+    let mut backend = HyprlandShortcutBackend::with_mock_ipc(raw_json);
+    let ctrl_shift_p = Shortcut::new(
+        ShortcutKey::Character('p'),
+        ShortcutModifiers {
+            control: true,
+            shift: true,
+            ..ShortcutModifiers::NONE
+        },
+    );
+
+    let res = backend
+        .check_conflict(ctrl_shift_p)
+        .expect("check_conflict succeeds");
+    assert_eq!(res, None);
+}
+
+#[test]
+fn hyprland_check_conflict_current_desired_shortcut_allowed() {
+    let raw_json = r#"[
+        {
+            "modmask": 64,
+            "key": "V",
+            "dispatcher": "__lua",
+            "arg": "99",
+            "submap": ""
+        }
+    ]"#;
+    let mut backend = HyprlandShortcutBackend::with_mock_ipc(raw_json);
+    backend
+        .register(Shortcut::super_v())
+        .expect("register succeeds");
+
+    let res = backend
+        .check_conflict(Shortcut::super_v())
+        .expect("check_conflict succeeds");
+    assert_eq!(res, None);
+}
+
+#[test]
+fn hyprland_check_conflict_multiple_matching_binds_with_foreign_binding_occupied() {
+    let raw_json = r#"[
+        {
+            "modmask": 64,
+            "key": "V",
+            "dispatcher": "exec",
+            "arg": "pookie-paste --toggle",
+            "submap": ""
+        },
+        {
+            "modmask": 64,
+            "key": "V",
+            "dispatcher": "killactive",
+            "arg": "",
+            "submap": ""
+        }
+    ]"#;
+    let mut backend = HyprlandShortcutBackend::with_mock_ipc(raw_json);
+    // Unset or different registered shortcut
+    let res = backend
+        .check_conflict(Shortcut::super_v())
+        .expect("check_conflict succeeds");
+    assert_eq!(res, Some("killactive".to_string()));
+}
+
+#[test]
+fn hyprland_check_conflict_ipc_failure_does_not_become_available() {
+    let mut backend = HyprlandShortcutBackend::from_socket(Some(std::path::PathBuf::from(
+        "/nonexistent/hyprland.sock",
+    )));
+    let candidate = Shortcut::super_v();
+
+    let err = backend
+        .check_conflict(candidate)
+        .expect_err("IPC query to nonexistent socket must fail");
+    assert!(
+        matches!(err, ShortcutError::Failed(_)),
+        "query error must fail closed as ShortcutError::Failed, got {err:?}"
+    );
+}

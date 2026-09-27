@@ -366,3 +366,83 @@ fn sway_rebind_rechecks_and_updates_status_when_config_changes() {
         other => panic!("expected CompositorManaged, got {:?}", other),
     }
 }
+
+#[test]
+fn sway_check_conflict_occupied_candidate_rejected() {
+    let mut backend = SwayShortcutBackend::from_offline_config(Some(
+        "bindsym Mod4+Return exec alacritty\nbindsym Mod4+d exec rofi",
+    ));
+    let super_enter = Shortcut::new(
+        ShortcutKey::Named(NamedKey::Enter),
+        ShortcutModifiers {
+            super_key: true,
+            ..ShortcutModifiers::NONE
+        },
+    );
+
+    let result = backend
+        .check_conflict(super_enter)
+        .expect("check_conflict succeeds");
+    assert_eq!(result, Some("exec alacritty".to_string()));
+}
+
+#[test]
+fn sway_check_conflict_free_candidate_allowed() {
+    let mut backend =
+        SwayShortcutBackend::from_offline_config(Some("bindsym Mod4+Return exec alacritty"));
+    let ctrl_shift_p = Shortcut::new(
+        ShortcutKey::Character('p'),
+        ShortcutModifiers {
+            control: true,
+            shift: true,
+            ..ShortcutModifiers::NONE
+        },
+    );
+
+    let result = backend
+        .check_conflict(ctrl_shift_p)
+        .expect("check_conflict succeeds");
+    assert_eq!(result, None);
+}
+
+#[test]
+fn sway_check_conflict_pookie_current_shortcut_allowed() {
+    let mut backend =
+        SwayShortcutBackend::from_offline_config(Some("bindsym Mod4+v exec pookie-paste --toggle"));
+    backend
+        .register(Shortcut::super_v())
+        .expect("register succeeds");
+
+    let result = backend
+        .check_conflict(Shortcut::super_v())
+        .expect("check_conflict succeeds");
+    assert_eq!(result, None);
+}
+
+#[test]
+fn sway_check_conflict_query_failure_does_not_become_available() {
+    let mut backend = SwayShortcutBackend::from_socket(Some(std::path::PathBuf::from(
+        "/nonexistent/sway-ipc.sock",
+    )));
+    let candidate = Shortcut::super_v();
+
+    let err = backend
+        .check_conflict(candidate)
+        .expect_err("IPC query to nonexistent socket must fail");
+    assert!(
+        matches!(err, ShortcutError::Failed(_)),
+        "query error must fail closed as ShortcutError::Failed, got {err:?}"
+    );
+}
+
+#[test]
+fn sway_check_conflict_multiple_matching_binds_with_foreign_binding_occupied() {
+    let mut backend = SwayShortcutBackend::from_offline_config(Some(
+        "bindsym Mod4+v exec pookie-paste --toggle\nbindsym Mod4+v exec alacritty",
+    ));
+
+    let result = backend
+        .check_conflict(Shortcut::super_v())
+        .expect("check_conflict succeeds");
+    assert_eq!(result, Some("exec alacritty".to_string()));
+}

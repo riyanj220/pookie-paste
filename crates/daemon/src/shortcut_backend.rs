@@ -344,6 +344,19 @@ pub trait ShortcutBackend: Send {
 
     /// Updates the backend's internal effective trigger description if supported.
     fn set_effective_trigger(&mut self, _trigger: Option<String>) {}
+
+    /// Checks whether a candidate shortcut conflicts with an existing compositor or application binding.
+    ///
+    /// Returns:
+    /// - `Ok(None)` if the shortcut is verified to be free or matches Pookie's own binding.
+    /// - `Ok(Some(command))` if the shortcut is already occupied by another binding (with details).
+    /// - `Err(ShortcutError)` if the check could not be performed (e.g. IPC unreachable).
+    ///
+    /// Fail-closed default: returns `Err(ShortcutError::Unavailable)` to ensure backends
+    /// never falsely report availability without an authoritative check.
+    fn check_conflict(&mut self, _shortcut: Shortcut) -> Result<Option<String>, ShortcutError> {
+        Err(ShortcutError::Unavailable)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

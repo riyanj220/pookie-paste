@@ -19,6 +19,7 @@ impl std::fmt::Display for ReloadError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Config(e) => write!(f, "configuration error: {e}"),
+            Self::Shortcut(ShortcutError::Conflict(msg)) => write!(f, "{msg}"),
             Self::Shortcut(e) => write!(f, "shortcut reload failed: {e}"),
         }
     }
@@ -180,8 +181,28 @@ impl ReloadCoordinator {
                         .map_err(|e| ReloadError::Config(ShortcutConfigError::Io(e.to_string())))?,
                 };
 
+                // Perform read-only occupancy preflight inside SetShortcut before config.toml is touched.
+                // If candidate is already the currently configured desired shortcut, allow as an allowed no-op.
+                if current_status.configured_shortcut != new_shortcut.to_string() {
+                    match self.reload_handle.check_conflict(new_shortcut).await {
+                        Ok(Some(command)) => {
+                            let msg = if command.trim().is_empty() {
+                                "This shortcut is already in use. Try another combination."
+                                    .to_string()
+                            } else {
+                                format!(
+                                    "This shortcut is already in use by '{command}'. Try another combination."
+                                )
+                            };
+                            return Err(ReloadError::Shortcut(ShortcutError::Conflict(msg)));
+                        }
+                        Ok(None) => {}
+                        Err(err) => return Err(ReloadError::Shortcut(err)),
+                    }
+                }
+
                 // For compositor-managed (Sway, Hyprland):
-                // User is persisting their desired shortcut. Prepare and commit to config.toml,
+                // Candidate is free or matches current. Prepare and commit to config.toml,
                 // then re-probe compositor to update the status snippet.
                 let temp_path =
                     ShortcutConfig::prepare_new_config_file(&target_path, new_shortcut)?;

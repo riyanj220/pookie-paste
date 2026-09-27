@@ -155,6 +155,16 @@ impl ShortcutBackend for PlatformShortcutBackend {
             backend.set_effective_trigger(trigger);
         }
     }
+
+    fn check_conflict(&mut self, shortcut: Shortcut) -> Result<Option<String>, ShortcutError> {
+        match self {
+            Self::Sway(backend) => backend.check_conflict(shortcut),
+            Self::Hyprland(backend) => backend.check_conflict(shortcut),
+            Self::X11(_) => Err(ShortcutError::Unavailable),
+            Self::Wayland(_) => Err(ShortcutError::Unavailable),
+            Self::Unavailable => Err(ShortcutError::Unavailable),
+        }
+    }
 }
 
 #[allow(dead_code)]

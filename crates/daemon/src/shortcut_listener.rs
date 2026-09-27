@@ -4,7 +4,7 @@ use ipc::{
     IpcCompositorBindingStatus, IpcShortcutCapability, IpcShortcutState, ShortcutStatusInfo,
 };
 use tokio::sync::mpsc;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::platform_shortcut_backend::PlatformShortcutBackend;
 use crate::shortcut_backend::{
@@ -24,6 +24,10 @@ pub enum ListenerCommand {
     ConfigurePortal {
         parent_window: Option<String>,
         reply_tx: tokio::sync::oneshot::Sender<Result<ShortcutStatusInfo, ShortcutError>>,
+    },
+    CheckConflict {
+        shortcut: Shortcut,
+        reply_tx: tokio::sync::oneshot::Sender<Result<Option<String>, ShortcutError>>,
     },
     Shutdown,
 }
@@ -290,6 +294,15 @@ impl ShortcutListener {
         self.reload_handle().configure_portal(parent_window).await
     }
 
+    /// Checks whether a candidate shortcut conflicts with an existing compositor binding.
+    /// Does not mutate current runtime shortcut, active status, or configuration files.
+    pub async fn check_conflict(
+        &self,
+        candidate: Shortcut,
+    ) -> Result<Option<String>, ShortcutError> {
+        self.reload_handle().check_conflict(candidate).await
+    }
+
     pub fn status(&self) -> ShortcutStatusInfo {
         self.reload_handle().status()
     }
@@ -382,6 +395,30 @@ impl ShortcutReloadHandle {
         reply_rx
             .await
             .map_err(|_| ShortcutError::Failed("portal reply channel closed".to_string()))?
+    }
+
+    /// Checks whether a candidate shortcut conflicts with an existing compositor binding.
+    /// Does not mutate current runtime shortcut, active status, or configuration files.
+    pub async fn check_conflict(
+        &self,
+        candidate: Shortcut,
+    ) -> Result<Option<String>, ShortcutError> {
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+
+        self.command_tx
+            .send(ListenerCommand::CheckConflict {
+                shortcut: candidate,
+                reply_tx,
+            })
+            .map_err(|_| {
+                ShortcutError::Failed("shortcut listener worker is not running".to_string())
+            })?;
+
+        self.wake();
+
+        reply_rx
+            .await
+            .map_err(|_| ShortcutError::Failed("check_conflict reply channel closed".to_string()))?
     }
 
     pub fn wake(&self) {
@@ -573,6 +610,14 @@ fn process_listener_command<B: ShortcutBackend>(
             let _ = reply_tx.send(res);
             true
         }
+        ListenerCommand::CheckConflict {
+            shortcut: target,
+            reply_tx,
+        } => {
+            let res = backend.check_conflict(target);
+            let _ = reply_tx.send(res);
+            true
+        }
         ListenerCommand::Shutdown => false,
     }
 }
@@ -585,7 +630,7 @@ fn handle_recheck<B: ShortcutBackend>(
     if backend.capability() == ShortcutBackendCapability::CompositorManaged {
         match backend.rebind(shortcut) {
             Ok(outcome) => {
-                info!("global shortcut rechecked: {}", outcome.description());
+                debug!("global shortcut rechecked: {}", outcome.description());
                 apply_outcome_to_status(backend, status, shortcut, &outcome);
                 status
                     .read()

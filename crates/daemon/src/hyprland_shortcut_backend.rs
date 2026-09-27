@@ -270,6 +270,67 @@ impl ShortcutBackend for HyprlandShortcutBackend {
         self.registered_shortcut = None;
         Ok(())
     }
+
+    fn check_conflict(&mut self, shortcut: Shortcut) -> Result<Option<String>, ShortcutError> {
+        // If this candidate matches the currently registered Pookie shortcut, treat as allowed
+        if self.registered_shortcut == Some(shortcut) {
+            return Ok(None);
+        }
+
+        // 1. Try authoritative Hyprland IPC query (live socket or mock response)
+        match &self.ipc_source {
+            IpcSource::LiveSocket(Some(sock_path)) => match query_hyprland_binds(sock_path) {
+                Ok(raw_binds_json) => {
+                    let diagnosis = diagnose_hyprland_ipc_binds(&raw_binds_json, shortcut);
+                    return match diagnosis {
+                        HyprlandBindingDiagnosis::Conflict { command } => Ok(Some(command)),
+                        HyprlandBindingDiagnosis::OccupiedOpaque { callback_id } => {
+                            Ok(Some(format!("Hyprland Lua binding ({callback_id})")))
+                        }
+                        HyprlandBindingDiagnosis::VerifiedPookie
+                        | HyprlandBindingDiagnosis::NotFound => Ok(None),
+                    };
+                }
+                Err(err) => {
+                    return Err(ShortcutError::Failed(format!(
+                        "Failed to query active Hyprland bindings: {err}"
+                    )));
+                }
+            },
+            IpcSource::MockResponse(raw_binds_json) => {
+                let diagnosis = diagnose_hyprland_ipc_binds(raw_binds_json, shortcut);
+                return match diagnosis {
+                    HyprlandBindingDiagnosis::Conflict { command } => Ok(Some(command)),
+                    HyprlandBindingDiagnosis::OccupiedOpaque { callback_id } => {
+                        Ok(Some(format!("Hyprland Lua binding ({callback_id})")))
+                    }
+                    HyprlandBindingDiagnosis::VerifiedPookie
+                    | HyprlandBindingDiagnosis::NotFound => Ok(None),
+                };
+            }
+            _ => {}
+        }
+
+        // 2. Test-only explicit mock fallback (when no live socket is configured)
+        if let FallbackSource::Explicit(Some(ref file_content)) = self.fallback_source {
+            let diagnosis = diagnose_hyprland_config_text(file_content, shortcut);
+            return match diagnosis {
+                HyprlandBindingDiagnosis::Conflict { command } => Ok(Some(command)),
+                HyprlandBindingDiagnosis::OccupiedOpaque { callback_id } => {
+                    Ok(Some(format!("Hyprland Lua binding ({callback_id})")))
+                }
+                HyprlandBindingDiagnosis::VerifiedPookie | HyprlandBindingDiagnosis::NotFound => {
+                    Ok(None)
+                }
+            };
+        }
+
+        // Live Hyprland IPC is unavailable: fail closed
+        Err(ShortcutError::Failed(
+            "Could not verify whether this shortcut is available in Hyprland (live Hyprland IPC unavailable). Try again."
+                .to_string(),
+        ))
+    }
 }
 
 /// Formats the modern Hyprland Lua binding directive (Hyprland 0.56+) for a given shortcut.
