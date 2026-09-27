@@ -774,7 +774,7 @@ impl PookieApp {
         std::thread::spawn(move || {
             let runtime =
                 tokio::runtime::Runtime::new().expect("failed to create UI Tokio runtime");
-            let result = runtime.block_on(ipc_client::reload_config());
+            let result = runtime.block_on(ipc_client::recheck_shortcut_status());
             if sender.send(result).is_ok() {
                 repaint_context.request_repaint();
             }
@@ -792,10 +792,29 @@ impl PookieApp {
         let (sender, receiver) = oneshot::channel();
         let repaint_context = ctx.clone();
 
+        let needs_active_recheck = match &self.shortcut_status {
+            Some(status) => {
+                status.capability == Some(ipc::IpcShortcutCapability::CompositorManaged)
+                    && matches!(
+                        status.state,
+                        ipc::IpcShortcutState::CompositorManaged {
+                            binding_status: ipc::IpcCompositorBindingStatus::Unconfigured
+                                | ipc::IpcCompositorBindingStatus::Conflict,
+                            ..
+                        }
+                    )
+            }
+            None => false,
+        };
+
         std::thread::spawn(move || {
             let runtime =
                 tokio::runtime::Runtime::new().expect("failed to create UI Tokio runtime");
-            let result = runtime.block_on(ipc_client::get_shortcut_status());
+            let result = if needs_active_recheck {
+                runtime.block_on(ipc_client::recheck_shortcut_status())
+            } else {
+                runtime.block_on(ipc_client::get_shortcut_status())
+            };
             if sender.send(result).is_ok() {
                 repaint_context.request_repaint();
             }

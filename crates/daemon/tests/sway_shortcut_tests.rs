@@ -340,3 +340,29 @@ fn offline_sway_backend_conflicting_super_v_binding_yields_unverified_with_confl
         }
     }
 }
+
+#[test]
+fn sway_rebind_rechecks_and_updates_status_when_config_changes() {
+    let mut backend = SwayShortcutBackend::from_offline_config(Some("bindsym Mod4+d exec rofi"));
+    let outcome1 = backend
+        .register(Shortcut::super_v())
+        .expect("initial register succeeds");
+    match outcome1 {
+        ShortcutRegistrationOutcome::CompositorManaged { status, .. } => {
+            assert_eq!(status, CompositorBindingStatus::Unconfigured);
+        }
+        other => panic!("expected CompositorManaged, got {:?}", other),
+    }
+
+    // Now update fallback config to include Pookie
+    backend.set_fallback_config(Some("bindsym Mod4+v exec pookie-paste --toggle"));
+    let outcome2 = backend
+        .rebind(Shortcut::super_v())
+        .expect("rebind succeeds");
+    match outcome2 {
+        ShortcutRegistrationOutcome::CompositorManaged { status, .. } => {
+            assert_eq!(status, CompositorBindingStatus::BoundUnverified);
+        }
+        other => panic!("expected CompositorManaged, got {:?}", other),
+    }
+}

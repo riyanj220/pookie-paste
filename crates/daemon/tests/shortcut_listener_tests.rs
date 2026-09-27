@@ -3,8 +3,9 @@ use std::time::Duration;
 
 use daemon::hyprland_shortcut_backend::format_hyprland_lua_binding;
 use daemon::shortcut_backend::{
-    BackendEvent, Shortcut, ShortcutActivation, ShortcutBackend, ShortcutBackendCapability,
-    ShortcutError, ShortcutKey, ShortcutModifiers, ShortcutRegistrationOutcome,
+    BackendEvent, CompositorBindingStatus, Shortcut, ShortcutActivation, ShortcutBackend,
+    ShortcutBackendCapability, ShortcutError, ShortcutKey, ShortcutModifiers,
+    ShortcutRegistrationOutcome,
 };
 use daemon::shortcut_config::ShortcutConfig;
 use daemon::shortcut_listener::ShortcutListener;
@@ -818,9 +819,19 @@ impl ShortcutBackend for FlexibleMockBackend {
         let (tx, rx) = std::sync::mpsc::channel();
         self.wake_sender = Some(tx);
         self.activation_rx = Some(rx);
-        Ok(ShortcutRegistrationOutcome::Active {
-            description: format!("registered {shortcut}"),
-        })
+        match self.capability {
+            ShortcutBackendCapability::CompositorManaged => {
+                Ok(ShortcutRegistrationOutcome::CompositorManaged {
+                    binding_snippet: format!("bindsym Mod4+{} exec pookie-paste", shortcut.key),
+                    status: CompositorBindingStatus::Unconfigured,
+                    conflict: None,
+                    diagnostic: None,
+                })
+            }
+            _ => Ok(ShortcutRegistrationOutcome::Active {
+                description: format!("registered {shortcut}"),
+            }),
+        }
     }
 
     fn wait_for_activation(&mut self) -> Result<ShortcutActivation, ShortcutError> {
@@ -1556,4 +1567,252 @@ fn expected_ipc_peer_disconnect_is_classified_as_client_disconnect() {
     assert!(is_expected_disconnect(&err_reset));
     assert!(is_expected_disconnect(&err_aborted));
     assert!(!is_expected_disconnect(&err_other));
+}
+
+#[tokio::test]
+async fn listener_recheck_updates_compositor_managed_status_info() {
+    use daemon::shortcut_backend::CompositorBindingStatus;
+
+    let recorded = Arc::new(Mutex::new(None));
+    let has_binding = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let has_binding_clone = Arc::clone(&has_binding);
+
+    let backend = FlexibleMockBackend {
+        capability: ShortcutBackendCapability::CompositorManaged,
+        registered: Arc::clone(&recorded),
+        rebind_handler: Arc::new(Mutex::new(Box::new(move |shortcut| {
+            let status = if has_binding_clone.load(std::sync::atomic::Ordering::SeqCst) {
+                CompositorBindingStatus::Verified
+            } else {
+                CompositorBindingStatus::Unconfigured
+            };
+            Ok(ShortcutRegistrationOutcome::CompositorManaged {
+                binding_snippet: format!("bindsym Mod4+{} exec pookie-paste", shortcut.key),
+                status,
+                conflict: None,
+                diagnostic: None,
+            })
+        }))),
+        portal_handler: Arc::new(Mutex::new(Box::new(|_| Err(ShortcutError::Unavailable)))),
+        wake_sender: None,
+        activation_rx: None,
+    };
+    let listener = ShortcutListener::start_with_backend_and_shortcut(backend, Shortcut::super_v());
+
+    for _ in 0..20 {
+        if recorded.lock().unwrap().is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    // Initial status is Unconfigured
+    let status1 = listener.status();
+    match status1.state {
+        ipc::IpcShortcutState::CompositorManaged { binding_status, .. } => {
+            assert_eq!(
+                binding_status,
+                ipc::IpcCompositorBindingStatus::Unconfigured
+            );
+        }
+        other => panic!("expected CompositorManaged, got {:?}", other),
+    }
+
+    // Simulate external config update and reload
+    has_binding.store(true, std::sync::atomic::Ordering::SeqCst);
+
+    // Call recheck without reloading config
+    let status2 = listener.recheck().await.expect("recheck succeeds");
+    match status2.state {
+        ipc::IpcShortcutState::CompositorManaged { binding_status, .. } => {
+            assert_eq!(binding_status, ipc::IpcCompositorBindingStatus::Verified);
+        }
+        other => panic!("expected CompositorManaged, got {:?}", other),
+    }
+}
+
+#[tokio::test]
+async fn rebind_updates_current_shortcut_for_subsequent_recheck_even_when_unconfigured() {
+    use daemon::shortcut_backend::CompositorBindingStatus;
+
+    let recorded_shortcuts = Arc::new(Mutex::new(Vec::new()));
+    let recorded_clone = Arc::clone(&recorded_shortcuts);
+
+    let backend = FlexibleMockBackend {
+        capability: ShortcutBackendCapability::CompositorManaged,
+        registered: Arc::new(Mutex::new(None)),
+        rebind_handler: Arc::new(Mutex::new(Box::new(move |shortcut| {
+            recorded_clone.lock().unwrap().push(shortcut);
+            Ok(ShortcutRegistrationOutcome::CompositorManaged {
+                binding_snippet: format!("bindsym Mod4+{} exec pookie-paste", shortcut.key),
+                status: CompositorBindingStatus::Unconfigured,
+                conflict: None,
+                diagnostic: None,
+            })
+        }))),
+        portal_handler: Arc::new(Mutex::new(Box::new(|_| Err(ShortcutError::Unavailable)))),
+        wake_sender: None,
+        activation_rx: None,
+    };
+
+    let initial_shortcut = Shortcut::super_v();
+    let listener = ShortcutListener::start_with_backend_and_shortcut(backend, initial_shortcut);
+
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    // Change desired shortcut to Ctrl+Shift+P
+    let new_target = Shortcut::new(
+        ShortcutKey::Character('P'),
+        ShortcutModifiers {
+            control: true,
+            shift: true,
+            ..ShortcutModifiers::NONE
+        },
+    );
+
+    let rebind_status = listener.reload(new_target).await.expect("reload succeeds");
+    assert_eq!(rebind_status.configured_shortcut, "Ctrl+Shift+P");
+
+    // Clear recorded list and trigger recheck
+    recorded_shortcuts.lock().unwrap().clear();
+    let _ = listener.recheck().await.expect("recheck succeeds");
+
+    // Verify recheck queried the NEW desired shortcut (Ctrl+Shift+P), NOT Super+V!
+    let queried = recorded_shortcuts.lock().unwrap().clone();
+    assert_eq!(queried.len(), 1);
+    assert_eq!(queried[0], new_target);
+}
+
+#[tokio::test]
+async fn compositor_managed_rebind_error_updates_current_shortcut_for_subsequent_recheck() {
+    use daemon::shortcut_backend::CompositorBindingStatus;
+
+    let queried_shortcuts = Arc::new(Mutex::new(Vec::new()));
+    let queried_clone = Arc::clone(&queried_shortcuts);
+    let should_fail = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let should_fail_clone = Arc::clone(&should_fail);
+
+    let backend = FlexibleMockBackend {
+        capability: ShortcutBackendCapability::CompositorManaged,
+        registered: Arc::new(Mutex::new(None)),
+        rebind_handler: Arc::new(Mutex::new(Box::new(move |shortcut| {
+            queried_clone.lock().unwrap().push(shortcut);
+            if should_fail_clone.load(std::sync::atomic::Ordering::SeqCst) {
+                Err(ShortcutError::Failed("Sway IPC socket error".to_string()))
+            } else {
+                Ok(ShortcutRegistrationOutcome::CompositorManaged {
+                    binding_snippet: format!("bindsym Mod4+{} exec pookie-paste", shortcut.key),
+                    status: CompositorBindingStatus::Verified,
+                    conflict: None,
+                    diagnostic: None,
+                })
+            }
+        }))),
+        portal_handler: Arc::new(Mutex::new(Box::new(|_| Err(ShortcutError::Unavailable)))),
+        wake_sender: None,
+        activation_rx: None,
+    };
+
+    let initial_shortcut = Shortcut::super_v();
+    let listener = ShortcutListener::start_with_backend_and_shortcut(backend, initial_shortcut);
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    // Change desired shortcut from Super+V (A) to Ctrl+Shift+P (B)
+    let new_target = Shortcut::new(
+        ShortcutKey::Character('P'),
+        ShortcutModifiers {
+            control: true,
+            shift: true,
+            ..ShortcutModifiers::NONE
+        },
+    );
+
+    // Initial rebind returns an actual Err because Sway IPC fails
+    let rebind_res = listener.reload(new_target).await;
+    assert!(
+        rebind_res.is_err(),
+        "backend rebind returns an actual error"
+    );
+
+    // The listener status should reflect the new desired shortcut B and the error state
+    let status_after_err = listener.status();
+    assert_eq!(status_after_err.configured_shortcut, "Ctrl+Shift+P");
+    match status_after_err.state {
+        ipc::IpcShortcutState::Failed { error } => {
+            assert!(error.contains("Sway IPC socket error"));
+        }
+        other => panic!("expected Failed state, got {:?}", other),
+    }
+
+    // Now Sway IPC recovers
+    should_fail.store(false, std::sync::atomic::Ordering::SeqCst);
+    queried_shortcuts.lock().unwrap().clear();
+
+    // Later recheck() is called (e.g. from Check Again or ToggleUi)
+    let recheck_status = listener
+        .recheck()
+        .await
+        .expect("recheck succeeds once IPC recovers");
+    assert_eq!(recheck_status.configured_shortcut, "Ctrl+Shift+P");
+    match recheck_status.state {
+        ipc::IpcShortcutState::CompositorManaged { binding_status, .. } => {
+            assert_eq!(binding_status, ipc::IpcCompositorBindingStatus::Verified);
+        }
+        other => panic!("expected CompositorManaged Verified, got {:?}", other),
+    }
+
+    // Verify recheck inspected B (Ctrl+Shift+P), NOT A (Super+V)
+    let queried = queried_shortcuts.lock().unwrap().clone();
+    assert_eq!(queried.len(), 1);
+    assert_eq!(queried[0], new_target);
+}
+
+#[tokio::test]
+async fn native_backend_rebind_error_preserves_previous_shortcut_and_status() {
+    let queried_shortcuts = Arc::new(Mutex::new(Vec::new()));
+    let queried_clone = Arc::clone(&queried_shortcuts);
+
+    let backend = FlexibleMockBackend {
+        capability: ShortcutBackendCapability::Native,
+        registered: Arc::new(Mutex::new(None)),
+        rebind_handler: Arc::new(Mutex::new(Box::new(move |shortcut| {
+            queried_clone.lock().unwrap().push(shortcut);
+            Err(ShortcutError::Conflict("X11 grab conflict".to_string()))
+        }))),
+        portal_handler: Arc::new(Mutex::new(Box::new(|_| Err(ShortcutError::Unavailable)))),
+        wake_sender: None,
+        activation_rx: None,
+    };
+
+    let initial_shortcut = Shortcut::super_v();
+    let listener = ShortcutListener::start_with_backend_and_shortcut(backend, initial_shortcut);
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    let initial_status = listener.status();
+    assert_eq!(initial_status.configured_shortcut, "Super+V");
+
+    // Attempt to change shortcut from Super+V (A) to Ctrl+Shift+P (B)
+    let new_target = Shortcut::new(
+        ShortcutKey::Character('P'),
+        ShortcutModifiers {
+            control: true,
+            shift: true,
+            ..ShortcutModifiers::NONE
+        },
+    );
+
+    let rebind_res = listener.reload(new_target).await;
+    assert!(rebind_res.is_err(), "native rebind fails due to conflict");
+
+    // For Native, listener MUST preserve previous shortcut A and its active status
+    let status_after_fail = listener.status();
+    assert_eq!(status_after_fail.configured_shortcut, "Super+V");
+    match status_after_fail.state {
+        ipc::IpcShortcutState::Active { .. } => {}
+        other => panic!("expected Active state preserved, got {:?}", other),
+    }
+
+    // A subsequent recheck() must preserve A
+    let recheck_status = listener.recheck().await.expect("recheck returns status");
+    assert_eq!(recheck_status.configured_shortcut, "Super+V");
 }

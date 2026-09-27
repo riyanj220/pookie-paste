@@ -1255,3 +1255,22 @@ async fn copy_text_writes_to_platform_backend_and_marks_self_write() {
             .is_self_write(&pookie_clipboard::ClipboardContent::Text(directive))
     );
 }
+
+#[tokio::test]
+async fn recheck_shortcut_status_ipc_round_trip() {
+    let app = TestIpcApp::start_with_focus_target(Some(1)).await;
+    let mut client = app.client().await;
+
+    let response = client
+        .send(&IpcRequest::RecheckShortcutStatus)
+        .await
+        .expect("send RecheckShortcutStatus request failed");
+
+    match response {
+        IpcResponse::ShortcutStatus { status } => {
+            assert_eq!(status.configured_shortcut, "Super+V");
+            assert!(matches!(status.state, ipc::IpcShortcutState::Active { .. }));
+        }
+        other => panic!("expected ShortcutStatus response, got: {other:?}"),
+    }
+}

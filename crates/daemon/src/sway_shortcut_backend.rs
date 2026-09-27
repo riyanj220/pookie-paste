@@ -70,8 +70,13 @@ impl SwayShortcutBackend {
 
     /// Sets or overrides the fallback config source (for deterministic testing with or without IPC).
     pub fn with_fallback_config(mut self, config: Option<&str>) -> Self {
-        self.fallback_source = FallbackSource::Explicit(config.map(str::to_string));
+        self.set_fallback_config(config);
         self
+    }
+
+    /// Dynamically updates the fallback configuration content (useful for simulating configuration changes in tests).
+    pub fn set_fallback_config(&mut self, config: Option<&str>) {
+        self.fallback_source = FallbackSource::Explicit(config.map(str::to_string));
     }
 
     pub fn socket_path(&self) -> Option<&Path> {

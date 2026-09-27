@@ -1,7 +1,10 @@
 use std::sync::{Arc, RwLock};
 
 use history::ClipboardHistoryService;
-use ipc::{ActivationOutcome, IpcRequest, IpcResponse, IpcShortcutState, ShortcutStatusInfo};
+use ipc::{
+    ActivationOutcome, IpcCompositorBindingStatus, IpcRequest, IpcResponse, IpcShortcutCapability,
+    IpcShortcutState, ShortcutStatusInfo,
+};
 use pookie_clipboard::ClipboardBackend;
 use tokio::sync::Mutex;
 
@@ -148,13 +151,39 @@ where
             }
         },
 
-        IpcRequest::ToggleUi => match ui_launcher.launch() {
-            Ok(UiLaunchOutcome::Launched) => IpcResponse::UiToggled { launched: true },
-            Ok(UiLaunchOutcome::AlreadyRunning) => IpcResponse::UiToggled { launched: false },
-            Err(error) => IpcResponse::Error {
-                message: format!("failed to launch UI: {error:?}"),
-            },
-        },
+        IpcRequest::ToggleUi => {
+            let needs_recheck = match shortcut_status.read() {
+                Ok(guard) => {
+                    guard.capability == Some(IpcShortcutCapability::CompositorManaged)
+                        && matches!(
+                            guard.state,
+                            IpcShortcutState::CompositorManaged {
+                                binding_status: IpcCompositorBindingStatus::Unconfigured
+                                    | IpcCompositorBindingStatus::Conflict,
+                                ..
+                            }
+                        )
+                }
+                Err(_) => false,
+            };
+
+            if needs_recheck {
+                // Attempt fast compositor status recheck, fail-open (launch UI regardless of outcome)
+                let _ = tokio::time::timeout(
+                    std::time::Duration::from_millis(50),
+                    reload_coordinator.recheck(),
+                )
+                .await;
+            }
+
+            match ui_launcher.launch() {
+                Ok(UiLaunchOutcome::Launched) => IpcResponse::UiToggled { launched: true },
+                Ok(UiLaunchOutcome::AlreadyRunning) => IpcResponse::UiToggled { launched: false },
+                Err(error) => IpcResponse::Error {
+                    message: format!("failed to launch UI: {error:?}"),
+                },
+            }
+        }
 
         IpcRequest::GetShortcutStatus => {
             let status = shortcut_status
@@ -172,6 +201,13 @@ where
 
             IpcResponse::ShortcutStatus { status }
         }
+
+        IpcRequest::RecheckShortcutStatus => match reload_coordinator.recheck().await {
+            Ok(status) => IpcResponse::ShortcutStatus { status },
+            Err(error) => IpcResponse::Error {
+                message: format!("{error}"),
+            },
+        },
 
         IpcRequest::ReloadConfig => match reload_coordinator.reload().await {
             Ok(status) => IpcResponse::ConfigReloaded { status },

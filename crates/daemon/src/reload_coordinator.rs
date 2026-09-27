@@ -89,6 +89,14 @@ impl ReloadCoordinator {
         Ok(status)
     }
 
+    /// Re-evaluates the currently desired shortcut against the running compositor
+    /// without re-reading or altering configuration files on disk.
+    pub async fn recheck(&self) -> Result<ShortcutStatusInfo, ReloadError> {
+        let _guard = self.reload_gate.lock().await;
+        let status = self.reload_handle.recheck().await?;
+        Ok(status)
+    }
+
     /// Atomically sets and persists a new shortcut with capability-specific transaction semantics.
     pub async fn set_shortcut(
         &self,

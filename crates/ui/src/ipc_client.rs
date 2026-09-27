@@ -177,6 +177,7 @@ pub async fn configure_portal_shortcut() -> Result<ipc::ShortcutStatusInfo, Stri
     }
 }
 
+#[allow(dead_code)]
 pub async fn reload_config() -> Result<ipc::ShortcutStatusInfo, String> {
     let mut client = connect()
         .await
@@ -189,6 +190,23 @@ pub async fn reload_config() -> Result<ipc::ShortcutStatusInfo, String> {
 
     match response {
         IpcResponse::ConfigReloaded { status } => Ok(status),
+        IpcResponse::ShortcutStatus { status } => Ok(status),
+        IpcResponse::Error { message } => Err(message),
+        other => Err(format!("unexpected IPC response: {other:?}")),
+    }
+}
+
+pub async fn recheck_shortcut_status() -> Result<ipc::ShortcutStatusInfo, String> {
+    let mut client = connect()
+        .await
+        .map_err(|error| format!("failed to connect to daemon: {error}"))?;
+
+    let response = client
+        .send(&IpcRequest::RecheckShortcutStatus)
+        .await
+        .map_err(|error| format!("failed to recheck shortcut status: {error:?}"))?;
+
+    match response {
         IpcResponse::ShortcutStatus { status } => Ok(status),
         IpcResponse::Error { message } => Err(message),
         other => Err(format!("unexpected IPC response: {other:?}")),

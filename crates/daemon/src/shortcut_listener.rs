@@ -18,6 +18,9 @@ pub enum ListenerCommand {
         shortcut: Shortcut,
         reply_tx: tokio::sync::oneshot::Sender<Result<ShortcutStatusInfo, ShortcutError>>,
     },
+    RecheckStatus {
+        reply_tx: tokio::sync::oneshot::Sender<Result<ShortcutStatusInfo, ShortcutError>>,
+    },
     ConfigurePortal {
         parent_window: Option<String>,
         reply_tx: tokio::sync::oneshot::Sender<Result<ShortcutStatusInfo, ShortcutError>>,
@@ -120,6 +123,8 @@ impl ShortcutListener {
         std::thread::spawn(move || {
             info!("shortcut backend: {}", backend.name());
 
+            let mut current_shortcut = shortcut;
+
             match backend.register(shortcut) {
                 Ok(outcome) => {
                     info!("global shortcut registered: {}", outcome.description());
@@ -148,6 +153,7 @@ impl ShortcutListener {
                         &mut backend,
                         &thread_status,
                         &thread_wake_trigger,
+                        &mut current_shortcut,
                     ) {
                         break;
                     }
@@ -163,6 +169,7 @@ impl ShortcutListener {
                         &mut backend,
                         &thread_status,
                         &thread_wake_trigger,
+                        &mut current_shortcut,
                     ) {
                         return;
                     }
@@ -200,6 +207,7 @@ impl ShortcutListener {
                                 &mut backend,
                                 &thread_status,
                                 &thread_wake_trigger,
+                                &mut current_shortcut,
                             ) {
                                 return;
                             }
@@ -233,6 +241,7 @@ impl ShortcutListener {
                                 &mut backend,
                                 &thread_status,
                                 &thread_wake_trigger,
+                                &mut current_shortcut,
                             ) {
                                 return;
                             }
@@ -266,6 +275,12 @@ impl ShortcutListener {
         new_shortcut: Shortcut,
     ) -> Result<ShortcutStatusInfo, ShortcutError> {
         self.reload_handle().reload(new_shortcut).await
+    }
+
+    /// Authoritatively re-evaluates the currently configured desired shortcut
+    /// against active compositor state without reloading or mutating configuration files.
+    pub async fn recheck(&self) -> Result<ShortcutStatusInfo, ShortcutError> {
+        self.reload_handle().recheck().await
     }
 
     pub async fn configure_portal(
@@ -326,6 +341,24 @@ impl ShortcutReloadHandle {
         reply_rx
             .await
             .map_err(|_| ShortcutError::Failed("reload reply channel closed".to_string()))?
+    }
+
+    /// Authoritatively re-evaluates the currently configured desired shortcut
+    /// against active compositor state without reloading or mutating configuration files.
+    pub async fn recheck(&self) -> Result<ShortcutStatusInfo, ShortcutError> {
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+
+        self.command_tx
+            .send(ListenerCommand::RecheckStatus { reply_tx })
+            .map_err(|_| {
+                ShortcutError::Failed("shortcut listener worker is not running".to_string())
+            })?;
+
+        self.wake();
+
+        reply_rx
+            .await
+            .map_err(|_| ShortcutError::Failed("recheck reply channel closed".to_string()))?
     }
 
     /// Triggers portal shortcut configuration on the background worker thread (e.g. KDE Plasma).
@@ -513,6 +546,7 @@ fn process_listener_command<B: ShortcutBackend>(
     backend: &mut B,
     thread_status: &Arc<RwLock<ShortcutStatusInfo>>,
     thread_wake_trigger: &Arc<RwLock<Option<WakeTrigger>>>,
+    current_shortcut: &mut Shortcut,
 ) -> bool {
     match cmd {
         ListenerCommand::Rebind {
@@ -520,6 +554,14 @@ fn process_listener_command<B: ShortcutBackend>(
             reply_tx,
         } => {
             let res = handle_rebind(backend, thread_status, thread_wake_trigger, target);
+            if res.is_ok() || backend.capability() == ShortcutBackendCapability::CompositorManaged {
+                *current_shortcut = target;
+            }
+            let _ = reply_tx.send(res);
+            true
+        }
+        ListenerCommand::RecheckStatus { reply_tx } => {
+            let res = handle_recheck(backend, thread_status, *current_shortcut);
             let _ = reply_tx.send(res);
             true
         }
@@ -532,6 +574,35 @@ fn process_listener_command<B: ShortcutBackend>(
             true
         }
         ListenerCommand::Shutdown => false,
+    }
+}
+
+fn handle_recheck<B: ShortcutBackend>(
+    backend: &mut B,
+    status: &Arc<RwLock<ShortcutStatusInfo>>,
+    shortcut: Shortcut,
+) -> Result<ShortcutStatusInfo, ShortcutError> {
+    if backend.capability() == ShortcutBackendCapability::CompositorManaged {
+        match backend.rebind(shortcut) {
+            Ok(outcome) => {
+                info!("global shortcut rechecked: {}", outcome.description());
+                apply_outcome_to_status(backend, status, shortcut, &outcome);
+                status
+                    .read()
+                    .map(|s| s.clone())
+                    .map_err(|_| ShortcutError::Failed("status lock poisoned".to_string()))
+            }
+            Err(err) => {
+                warn!(error = ?err, "failed to recheck compositor shortcut");
+                apply_error_to_status(status, shortcut, &err);
+                Err(err)
+            }
+        }
+    } else {
+        status
+            .read()
+            .map(|s| s.clone())
+            .map_err(|_| ShortcutError::Failed("status lock poisoned".to_string()))
     }
 }
 
@@ -590,9 +661,21 @@ fn handle_rebind<B: ShortcutBackend>(
                 .map_err(|_| ShortcutError::Failed("status lock poisoned".to_string()))
         }
         Err(err) => {
-            warn!(error = ?err, "failed to rebind global shortcut; preserving active shortcut");
-            // Important: we do NOT mutate status.configured_shortcut or active state on failure.
-            // The running shortcut and its status are preserved!
+            if backend.capability() == ShortcutBackendCapability::CompositorManaged {
+                warn!(
+                    error = ?err,
+                    %shortcut,
+                    "failed to inspect compositor during rebind; updated desired shortcut and marked error in status"
+                );
+                apply_error_to_status(status, shortcut, &err);
+            } else {
+                warn!(
+                    error = ?err,
+                    "failed to rebind global shortcut; preserving active shortcut"
+                );
+                // Important: for Native backends we do NOT mutate status.configured_shortcut
+                // or active state on failure. The running shortcut and its status are preserved!
+            }
             Err(err)
         }
     }

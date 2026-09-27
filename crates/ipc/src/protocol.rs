@@ -287,6 +287,8 @@ pub enum IpcRequest {
 
     GetShortcutStatus,
 
+    RecheckShortcutStatus,
+
     ReloadConfig,
 
     SetShortcut {
@@ -797,6 +799,15 @@ mod tests {
         };
         let encoded = serde_json::to_string(&request).expect("serialization failed");
         assert!(encoded.contains(r#""type":"copy_text""#));
+        let decoded: IpcRequest = serde_json::from_str(&encoded).expect("deserialization failed");
+        assert_eq!(decoded, request);
+    }
+
+    #[test]
+    fn recheck_shortcut_status_request_round_trips() {
+        let request = IpcRequest::RecheckShortcutStatus;
+        let encoded = serde_json::to_string(&request).expect("serialization failed");
+        assert_eq!(encoded, r#"{"type":"recheck_shortcut_status"}"#);
         let decoded: IpcRequest = serde_json::from_str(&encoded).expect("deserialization failed");
         assert_eq!(decoded, request);
     }
