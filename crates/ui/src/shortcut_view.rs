@@ -93,32 +93,49 @@ pub fn render_attention_banner(
         egui::Color32::from_rgb(146, 64, 14)
     };
 
-    egui::Frame::new()
-        .fill(bg_color)
-        .stroke(egui::Stroke::new(1.0, border_color))
-        .corner_radius(ui_style::ROW_CORNER_RADIUS)
-        .inner_margin(egui::Margin::symmetric(8, 6))
-        .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(
-                    egui::RichText::new(text)
-                        .size(ui_style::BODY_TEXT_SIZE - 1.0)
-                        .color(text_color)
-                        .strong(),
-                );
+    ui.horizontal(|ui| {
+        ui.add_space(ui_style::LIST_HORIZONTAL_MARGIN);
 
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let config_btn = egui::Button::new(
-                        egui::RichText::new("Configure")
-                            .size(ui_style::BODY_TEXT_SIZE - 2.0)
-                            .color(palette.text_primary),
-                    );
-                    if ui.add(config_btn).clicked() {
-                        clicked = true;
-                    }
-                });
-            });
-        });
+        let remaining_width = (ui.available_width() - ui_style::LIST_HORIZONTAL_MARGIN).max(1.0);
+
+        ui.allocate_ui_with_layout(
+            egui::vec2(remaining_width, 0.0),
+            egui::Layout::top_down(egui::Align::Min),
+            |ui| {
+                ui.set_width(remaining_width);
+
+                egui::Frame::new()
+                    .fill(bg_color)
+                    .stroke(egui::Stroke::new(1.0, border_color))
+                    .corner_radius(ui_style::ROW_CORNER_RADIUS)
+                    .inner_margin(egui::Margin::symmetric(8, 6))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                egui::RichText::new(text)
+                                    .size(ui_style::BODY_TEXT_SIZE - 1.0)
+                                    .color(text_color)
+                                    .strong(),
+                            );
+
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    let config_btn = egui::Button::new(
+                                        egui::RichText::new("Configure")
+                                            .size(ui_style::BODY_TEXT_SIZE - 2.0)
+                                            .color(palette.text_primary),
+                                    );
+                                    if ui.add(config_btn).clicked() {
+                                        clicked = true;
+                                    }
+                                },
+                            );
+                        });
+                    });
+            },
+        );
+    });
 
     ui.add_space(4.0);
     clicked
@@ -405,9 +422,19 @@ fn render_sway_section(
     palette: UiPalette,
     action: &mut ShortcutViewAction,
 ) {
-    // 1  Shortcut
-    render_step_label(ui, "1", "Shortcut", palette);
-    ui.add_space(4.0);
+    let is_verified = matches!(
+        &status.state,
+        IpcShortcutState::CompositorManaged {
+            binding_status: IpcCompositorBindingStatus::Verified,
+            ..
+        }
+    );
+
+    if !is_verified {
+        // 1  Shortcut
+        render_step_label(ui, "1", "Shortcut", palette);
+        ui.add_space(4.0);
+    }
 
     if state.is_recording {
         render_compact_recorder(ui, state, palette);
@@ -425,23 +452,25 @@ fn render_sway_section(
         state.success_message = None;
     }
 
-    ui.add_space(14.0);
+    if !is_verified {
+        ui.add_space(14.0);
 
-    // 2  Add binding
-    render_step_label(ui, "2", "Add binding", palette);
-    ui.add_space(4.0);
+        // 2  Add binding
+        render_step_label(ui, "2", "Add binding", palette);
+        ui.add_space(4.0);
 
-    if let IpcShortcutState::CompositorManaged { snippet, .. } = &status.state {
-        render_snippet_surface(ui, state, snippet, status, palette, action);
+        if let IpcShortcutState::CompositorManaged { snippet, .. } = &status.state {
+            render_snippet_surface(ui, state, snippet, status, palette, action);
+        }
+
+        ui.add_space(14.0);
+
+        // 3  Apply
+        render_step_label(ui, "3", "Apply", palette);
+        ui.add_space(4.0);
+
+        render_sway_apply_step(ui, status, palette, action);
     }
-
-    ui.add_space(14.0);
-
-    // 3  Apply
-    render_step_label(ui, "3", "Apply", palette);
-    ui.add_space(4.0);
-
-    render_sway_apply_step(ui, status, palette, action);
 }
 
 fn render_hyprland_section(
@@ -451,9 +480,20 @@ fn render_hyprland_section(
     palette: UiPalette,
     action: &mut ShortcutViewAction,
 ) {
-    // 1  Shortcut
-    render_step_label(ui, "1", "Shortcut", palette);
-    ui.add_space(4.0);
+    let is_configured = matches!(
+        &status.state,
+        IpcShortcutState::CompositorManaged {
+            binding_status: IpcCompositorBindingStatus::Verified
+                | IpcCompositorBindingStatus::BoundUnverified,
+            ..
+        }
+    );
+
+    if !is_configured {
+        // 1  Shortcut
+        render_step_label(ui, "1", "Shortcut", palette);
+        ui.add_space(4.0);
+    }
 
     if state.is_recording {
         render_compact_recorder(ui, state, palette);
@@ -471,65 +511,64 @@ fn render_hyprland_section(
         state.success_message = None;
     }
 
-    ui.add_space(14.0);
+    if !is_configured {
+        ui.add_space(14.0);
 
-    // 2  Add binding
-    render_step_label(ui, "2", "Add binding", palette);
-    ui.add_space(4.0);
+        // 2  Add binding
+        render_step_label(ui, "2", "Add binding", palette);
+        ui.add_space(4.0);
 
-    if let IpcShortcutState::CompositorManaged {
-        snippet,
-        binding_status,
-        conflict,
-        ..
-    } = &status.state
-    {
-        render_snippet_surface(ui, state, snippet, status, palette, action);
+        if let IpcShortcutState::CompositorManaged {
+            snippet,
+            binding_status,
+            conflict,
+            ..
+        } = &status.state
+        {
+            render_snippet_surface(ui, state, snippet, status, palette, action);
 
-        // Actionable check only when unconfigured
-        if *binding_status == IpcCompositorBindingStatus::Unconfigured {
-            ui.add_space(6.0);
-            ui.horizontal(|ui| {
-                ui.label(
-                    egui::RichText::new("Binding not active yet")
-                        .size(ui_style::BODY_TEXT_SIZE - 1.0)
-                        .color(palette.text_secondary),
-                );
-
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let check_btn = egui::Button::new(
-                        egui::RichText::new("Check")
-                            .size(ui_style::BODY_TEXT_SIZE - 2.0)
-                            .color(palette.accent),
+            // Actionable check only when unconfigured
+            if *binding_status == IpcCompositorBindingStatus::Unconfigured {
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new("Binding not active yet")
+                            .size(ui_style::BODY_TEXT_SIZE - 1.0)
+                            .color(palette.text_secondary),
                     );
-                    if ui
-                        .add(check_btn)
-                        .on_hover_cursor(egui::CursorIcon::PointingHand)
-                        .clicked()
-                    {
-                        *action = ShortcutViewAction::RecheckStatus;
-                    }
+
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let check_btn = egui::Button::new(
+                            egui::RichText::new("Check")
+                                .size(ui_style::BODY_TEXT_SIZE - 2.0)
+                                .color(palette.accent),
+                        );
+                        if ui
+                            .add(check_btn)
+                            .on_hover_cursor(egui::CursorIcon::PointingHand)
+                            .clicked()
+                        {
+                            *action = ShortcutViewAction::RecheckStatus;
+                        }
+                    });
                 });
-            });
-        }
+            }
 
-        // Actionable conflict notice if conflict exists
-        if let Some(conf) = conflict {
-            ui.add_space(4.0);
-            let warn_color = if ui.visuals().dark_mode {
-                egui::Color32::from_rgb(251, 191, 36)
-            } else {
-                egui::Color32::from_rgb(217, 119, 6)
-            };
-            ui.label(
-                egui::RichText::new(format!("Notice: {conf}"))
-                    .size(ui_style::BODY_TEXT_SIZE - 2.0)
-                    .color(warn_color),
-            );
+            // Actionable conflict notice if conflict exists
+            if let Some(conf) = conflict {
+                ui.add_space(4.0);
+                let warn_color = if ui.visuals().dark_mode {
+                    egui::Color32::from_rgb(251, 191, 36)
+                } else {
+                    egui::Color32::from_rgb(217, 119, 6)
+                };
+                ui.label(
+                    egui::RichText::new(format!("Notice: {conf}"))
+                        .size(ui_style::BODY_TEXT_SIZE - 2.0)
+                        .color(warn_color),
+                );
+            }
         }
-
-        // Note: For Verified and BoundUnverified, both are visually happy states.
-        // Technical __lua diagnostics and warning badges are hidden.
     }
 }
 
