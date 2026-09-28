@@ -63,12 +63,12 @@ pub fn render_attention_banner(
         IpcShortcutState::CompositorManaged {
             binding_status: IpcCompositorBindingStatus::Unconfigured,
             ..
-        } => Some("⚠️ Shortcut not bound in compositor"),
+        } => Some("Shortcut not bound in compositor"),
         IpcShortcutState::CompositorManaged {
             binding_status: IpcCompositorBindingStatus::Conflict,
             ..
-        } => Some("⚠️ Shortcut conflict detected in compositor"),
-        IpcShortcutState::Unavailable { .. } => Some("⚠️ Global shortcut is currently unavailable"),
+        } => Some("Shortcut conflict detected in compositor"),
+        IpcShortcutState::Unavailable { .. } => Some("Global shortcut is currently unavailable"),
         _ => None,
     };
 
@@ -111,6 +111,18 @@ pub fn render_attention_banner(
                     .inner_margin(egui::Margin::symmetric(8, 6))
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
+                            let (icon_rect, _) = ui
+                                .allocate_exact_size(egui::vec2(13.0, 13.0), egui::Sense::hover());
+                            let icon_center =
+                                egui::pos2(icon_rect.center().x, icon_rect.center().y - 1.0);
+                            ui.painter().text(
+                                icon_center,
+                                egui::Align2::CENTER_CENTER,
+                                "⚠️",
+                                egui::FontId::proportional(ui_style::BODY_TEXT_SIZE - 1.0),
+                                text_color,
+                            );
+
                             ui.label(
                                 egui::RichText::new(text)
                                     .size(ui_style::BODY_TEXT_SIZE - 1.0)
@@ -126,7 +138,11 @@ pub fn render_attention_banner(
                                             .size(ui_style::BODY_TEXT_SIZE - 2.0)
                                             .color(palette.text_primary),
                                     );
-                                    if ui.add(config_btn).clicked() {
+                                    if ui
+                                        .add(config_btn)
+                                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                                        .clicked()
+                                    {
                                         clicked = true;
                                     }
                                 },
