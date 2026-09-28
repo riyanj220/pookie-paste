@@ -131,374 +131,502 @@ pub fn render_shortcut_setup(
 ) -> ShortcutViewAction {
     let mut action = ShortcutViewAction::None;
 
-    ui.add_space(ui_style::WINDOW_PADDING);
-
-    // Navigation row: Back button
-    ui.horizontal(|ui| {
-        let back_btn = egui::Button::new(
-            egui::RichText::new("← Back to History")
-                .size(ui_style::BODY_TEXT_SIZE - 1.0)
-                .color(palette.accent),
-        )
-        .frame(false);
-
-        if ui
-            .add(back_btn)
-            .on_hover_cursor(egui::CursorIcon::PointingHand)
-            .clicked()
-        {
-            action = ShortcutViewAction::SwitchToHistory;
-        }
-    });
-
-    ui.add_space(8.0);
-
-    let Some(status) = status else {
-        ui.label(
-            egui::RichText::new("Connecting to daemon...")
-                .size(ui_style::BODY_TEXT_SIZE)
-                .color(palette.text_secondary),
-        );
-        return action;
-    };
-
-    // Card: Current Status & Backend
     egui::Frame::new()
-        .fill(palette.row_background)
-        .stroke(egui::Stroke::new(1.0, palette.border))
-        .corner_radius(ui_style::ROW_CORNER_RADIUS)
-        .inner_margin(egui::Margin::same(10))
+        .inner_margin(egui::Margin::symmetric(10, 0))
         .show(ui, |ui| {
-            ui.horizontal(|ui| {
+            ui.add_space(6.0);
+
+            // Unified back navigation row
+            if crate::controls::render_back_button(ui, palette) {
+                action = ShortcutViewAction::SwitchToHistory;
+            }
+
+            ui.add_space(10.0);
+
+            let Some(status) = status else {
                 ui.label(
-                    egui::RichText::new("Backend:")
-                        .size(ui_style::BODY_TEXT_SIZE - 1.0)
+                    egui::RichText::new("Connecting to daemon…")
+                        .size(ui_style::BODY_TEXT_SIZE)
                         .color(palette.text_secondary),
                 );
+                return;
+            };
 
-                let backend_label = match (status.capability, status.backend_name.as_deref()) {
-                    (Some(IpcShortcutCapability::Native), Some(name)) => name.to_string(),
-                    (Some(IpcShortcutCapability::Native), None) => "Native (X11)".to_string(),
-                    (Some(IpcShortcutCapability::CompositorManaged), Some(name)) => {
-                        format!("Compositor ({name})")
+            // Main interaction section based on capability
+            match status.capability {
+                Some(IpcShortcutCapability::Native) => {
+                    render_native_section(ui, state, status, palette, &mut action);
+                }
+
+                Some(IpcShortcutCapability::Portal) => {
+                    render_portal_section(ui, status, palette, &mut action);
+                }
+
+                Some(IpcShortcutCapability::CompositorManaged) => {
+                    let kind = detect_compositor(status);
+                    match kind {
+                        CompositorKind::Sway => {
+                            render_sway_section(ui, state, status, palette, &mut action);
+                        }
+                        CompositorKind::Hyprland => {
+                            render_hyprland_section(ui, state, status, palette, &mut action);
+                        }
+                        CompositorKind::Other => {
+                            render_generic_compositor_section(
+                                ui,
+                                state,
+                                status,
+                                palette,
+                                &mut action,
+                            );
+                        }
                     }
-                    (Some(IpcShortcutCapability::CompositorManaged), None) => {
-                        "Compositor Managed".to_string()
-                    }
-                    (Some(IpcShortcutCapability::Portal), _) => "Desktop Portal (KDE)".to_string(),
-                    (Some(IpcShortcutCapability::Unsupported), _) => "Unsupported".to_string(),
-                    (None, _) => "Detecting...".to_string(),
-                };
+                }
 
-                ui.label(
-                    egui::RichText::new(backend_label)
-                        .size(ui_style::BODY_TEXT_SIZE - 1.0)
-                        .color(palette.text_primary)
-                        .strong(),
-                );
-            });
-
-            ui.add_space(4.0);
-
-            ui.horizontal(|ui| {
-                ui.label(
-                    egui::RichText::new("Status:")
-                        .size(ui_style::BODY_TEXT_SIZE - 1.0)
-                        .color(palette.text_secondary),
-                );
-
-                let (status_text, status_color) = match &status.state {
-                    IpcShortcutState::Active { .. } => (
-                        "Active",
-                        if ui.visuals().dark_mode {
-                            egui::Color32::from_rgb(74, 222, 128)
-                        } else {
-                            egui::Color32::from_rgb(22, 163, 74)
-                        },
-                    ),
-                    IpcShortcutState::CompositorManaged {
-                        binding_status: IpcCompositorBindingStatus::Verified,
-                        ..
-                    } => (
-                        "Active (Verified)",
-                        if ui.visuals().dark_mode {
-                            egui::Color32::from_rgb(74, 222, 128)
-                        } else {
-                            egui::Color32::from_rgb(22, 163, 74)
-                        },
-                    ),
-                    IpcShortcutState::CompositorManaged {
-                        binding_status: IpcCompositorBindingStatus::BoundUnverified,
-                        ..
-                    } => ("Bound (Unverified)", palette.accent),
-                    IpcShortcutState::CompositorManaged {
-                        binding_status: IpcCompositorBindingStatus::Unconfigured,
-                        ..
-                    } => (
-                        "Setup required",
-                        if ui.visuals().dark_mode {
-                            egui::Color32::from_rgb(251, 191, 36)
-                        } else {
-                            egui::Color32::from_rgb(217, 119, 6)
-                        },
-                    ),
-                    IpcShortcutState::CompositorManaged {
-                        binding_status: IpcCompositorBindingStatus::Conflict,
-                        ..
-                    } => (
-                        "Shortcut conflict",
-                        if ui.visuals().dark_mode {
-                            egui::Color32::from_rgb(248, 113, 113)
-                        } else {
-                            egui::Color32::from_rgb(220, 38, 38)
-                        },
-                    ),
-                    IpcShortcutState::Initializing => ("Initializing...", palette.text_secondary),
-                    IpcShortcutState::Conflict { .. } => (
-                        "Shortcut conflict",
-                        if ui.visuals().dark_mode {
-                            egui::Color32::from_rgb(248, 113, 113)
-                        } else {
-                            egui::Color32::from_rgb(220, 38, 38)
-                        },
-                    ),
-                    IpcShortcutState::Failed { .. } => (
-                        "Failed",
-                        if ui.visuals().dark_mode {
-                            egui::Color32::from_rgb(248, 113, 113)
-                        } else {
-                            egui::Color32::from_rgb(220, 38, 38)
-                        },
-                    ),
-                    IpcShortcutState::Unavailable { .. } => (
-                        "Unavailable",
-                        if ui.visuals().dark_mode {
-                            egui::Color32::from_rgb(248, 113, 113)
-                        } else {
-                            egui::Color32::from_rgb(220, 38, 38)
-                        },
-                    ),
-                };
-
-                ui.label(
-                    egui::RichText::new(status_text)
-                        .size(ui_style::BODY_TEXT_SIZE - 1.0)
-                        .color(status_color)
-                        .strong(),
-                );
-            });
-
-            if let Some(effective) = &status.effective_shortcut
-                && effective != &status.configured_shortcut
-            {
-                ui.add_space(4.0);
-                ui.horizontal(|ui| {
+                Some(IpcShortcutCapability::Unsupported) | None => {
                     ui.label(
-                        egui::RichText::new("Portal effective:")
-                            .size(ui_style::BODY_TEXT_SIZE - 2.0)
-                            .color(palette.text_secondary),
+                        egui::RichText::new(
+                            "Global shortcuts are not supported in this desktop environment.",
+                        )
+                        .size(ui_style::BODY_TEXT_SIZE)
+                        .color(palette.text_secondary),
                     );
+                }
+            }
+
+            // Actionable feedback messages
+            if let Some(err) = &state.error_message {
+                ui.add_space(8.0);
+                let err_color = if ui.visuals().dark_mode {
+                    egui::Color32::from_rgb(248, 113, 113)
+                } else {
+                    egui::Color32::from_rgb(220, 38, 38)
+                };
+                ui.horizontal(|ui| {
+                    let (icon_rect, _) =
+                        ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
+                    crate::controls::render_warning_icon(ui, icon_rect.center(), err_color);
+                    ui.add_space(2.0);
                     ui.label(
-                        egui::RichText::new(effective)
-                            .size(ui_style::BODY_TEXT_SIZE - 2.0)
-                            .color(palette.accent)
-                            .strong(),
+                        egui::RichText::new(err)
+                            .size(ui_style::BODY_TEXT_SIZE - 1.0)
+                            .color(err_color),
+                    );
+                });
+            }
+
+            if let Some(ok) = &state.success_message {
+                ui.add_space(8.0);
+                let ok_color = if ui.visuals().dark_mode {
+                    egui::Color32::from_rgb(74, 222, 128)
+                } else {
+                    egui::Color32::from_rgb(22, 163, 74)
+                };
+                ui.horizontal(|ui| {
+                    let (icon_rect, _) =
+                        ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
+                    crate::controls::render_check_icon(ui, icon_rect.center(), ok_color);
+                    ui.add_space(2.0);
+                    ui.label(
+                        egui::RichText::new(ok)
+                            .size(ui_style::BODY_TEXT_SIZE - 1.0)
+                            .color(ok_color),
                     );
                 });
             }
         });
 
-    ui.add_space(10.0);
-
-    // Main interaction section based on capability
-    match status.capability {
-        Some(IpcShortcutCapability::Native) | Some(IpcShortcutCapability::CompositorManaged) => {
-            render_key_recorder_section(ui, state, status, palette, &mut action);
-
-            // If CompositorManaged, verbatim render the directive snippet card
-            if let IpcShortcutState::CompositorManaged {
-                snippet,
-                conflict,
-                diagnostic,
-                ..
-            } = &status.state
-            {
-                ui.add_space(10.0);
-                render_compositor_snippet_card(
-                    ui,
-                    state,
-                    snippet,
-                    conflict.as_deref(),
-                    diagnostic.as_deref(),
-                    palette,
-                    &mut action,
-                );
-            }
-        }
-
-        Some(IpcShortcutCapability::Portal) => {
-            render_portal_section(ui, status, palette, &mut action);
-        }
-
-        Some(IpcShortcutCapability::Unsupported) | None => {
-            ui.label(
-                egui::RichText::new(
-                    "Global shortcuts are not supported in this desktop environment.",
-                )
-                .size(ui_style::BODY_TEXT_SIZE)
-                .color(palette.text_secondary),
-            );
-        }
-    }
-
-    // Feedback messages
-    if let Some(err) = &state.error_message {
-        ui.add_space(8.0);
-        let err_color = if ui.visuals().dark_mode {
-            egui::Color32::from_rgb(248, 113, 113)
-        } else {
-            egui::Color32::from_rgb(220, 38, 38)
-        };
-        ui.label(
-            egui::RichText::new(format!("⚠️ {err}"))
-                .size(ui_style::BODY_TEXT_SIZE - 1.0)
-                .color(err_color),
-        );
-    }
-
-    if let Some(ok) = &state.success_message {
-        ui.add_space(8.0);
-        let ok_color = if ui.visuals().dark_mode {
-            egui::Color32::from_rgb(74, 222, 128)
-        } else {
-            egui::Color32::from_rgb(22, 163, 74)
-        };
-        ui.label(
-            egui::RichText::new(format!("✓ {ok}"))
-                .size(ui_style::BODY_TEXT_SIZE - 1.0)
-                .color(ok_color),
-        );
-    }
-
     action
 }
 
-fn render_key_recorder_section(
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CompositorKind {
+    Sway,
+    Hyprland,
+    Other,
+}
+
+fn detect_compositor(status: &ShortcutStatusInfo) -> CompositorKind {
+    let name_lower = status
+        .backend_name
+        .as_deref()
+        .map(|s| s.to_lowercase())
+        .unwrap_or_default();
+
+    if name_lower.contains("sway") {
+        CompositorKind::Sway
+    } else if name_lower.contains("hyprland") {
+        CompositorKind::Hyprland
+    } else if let IpcShortcutState::CompositorManaged { snippet, .. } = &status.state {
+        if snippet.starts_with("bindsym") {
+            CompositorKind::Sway
+        } else if snippet.starts_with("bind") || snippet.contains("hypr") {
+            CompositorKind::Hyprland
+        } else {
+            CompositorKind::Other
+        }
+    } else {
+        CompositorKind::Other
+    }
+}
+
+fn render_native_section(
     ui: &mut egui::Ui,
     state: &mut ShortcutViewState,
     status: &ShortcutStatusInfo,
     palette: UiPalette,
     action: &mut ShortcutViewAction,
 ) {
-    ui.label(
-        egui::RichText::new("Shortcut Keybinding")
-            .size(ui_style::BODY_TEXT_SIZE)
-            .color(palette.text_primary)
-            .strong(),
-    );
+    if state.is_recording {
+        render_compact_recorder(ui, state, palette);
+    } else if let Some(candidate) = state.candidate.clone() {
+        render_candidate_card(ui, state, &candidate, palette, action);
+    } else if render_current_shortcut_row(
+        ui,
+        "Current shortcut",
+        &status.configured_shortcut,
+        palette,
+    ) {
+        state.is_recording = true;
+        state.candidate = None;
+        state.error_message = None;
+        state.success_message = None;
+    }
+}
 
+fn render_portal_section(
+    ui: &mut egui::Ui,
+    status: &ShortcutStatusInfo,
+    palette: UiPalette,
+    action: &mut ShortcutViewAction,
+) {
+    let display_shortcut = status
+        .effective_shortcut
+        .as_deref()
+        .unwrap_or(&status.configured_shortcut);
+
+    if render_current_shortcut_row(ui, "Current shortcut", display_shortcut, palette) {
+        *action = ShortcutViewAction::ConfigurePortal;
+    }
+}
+
+fn render_sway_section(
+    ui: &mut egui::Ui,
+    state: &mut ShortcutViewState,
+    status: &ShortcutStatusInfo,
+    palette: UiPalette,
+    action: &mut ShortcutViewAction,
+) {
+    // 1  Shortcut
+    render_step_label(ui, "1", "Shortcut", palette);
     ui.add_space(4.0);
 
     if state.is_recording {
-        // Active recording UI
-        let border_color = palette.accent;
-        egui::Frame::new()
-            .fill(palette.row_selected)
-            .stroke(egui::Stroke::new(1.5, border_color))
-            .corner_radius(ui_style::ROW_CORNER_RADIUS)
-            .inner_margin(egui::Margin::same(10))
-            .show(ui, |ui| {
-                ui.vertical_centered(|ui| {
-                    ui.label(
-                        egui::RichText::new("Press your shortcut key combination…")
-                            .size(ui_style::BODY_TEXT_SIZE)
-                            .color(palette.accent)
-                            .strong(),
-                    );
-                    ui.add_space(2.0);
-                    ui.label(
-                        egui::RichText::new(
-                            "(Hold Super, Ctrl, Alt, or Shift + Key. Press Esc to cancel)",
-                        )
+        render_compact_recorder(ui, state, palette);
+    } else if let Some(candidate) = state.candidate.clone() {
+        render_candidate_card(ui, state, &candidate, palette, action);
+    } else if render_current_shortcut_row(
+        ui,
+        "Current shortcut",
+        &status.configured_shortcut,
+        palette,
+    ) {
+        state.is_recording = true;
+        state.candidate = None;
+        state.error_message = None;
+        state.success_message = None;
+    }
+
+    ui.add_space(14.0);
+
+    // 2  Add binding
+    render_step_label(ui, "2", "Add binding", palette);
+    ui.add_space(4.0);
+
+    if let IpcShortcutState::CompositorManaged { snippet, .. } = &status.state {
+        render_snippet_surface(ui, state, snippet, palette, action);
+    }
+
+    ui.add_space(14.0);
+
+    // 3  Apply
+    render_step_label(ui, "3", "Apply", palette);
+    ui.add_space(4.0);
+
+    render_sway_apply_step(ui, status, palette, action);
+}
+
+fn render_hyprland_section(
+    ui: &mut egui::Ui,
+    state: &mut ShortcutViewState,
+    status: &ShortcutStatusInfo,
+    palette: UiPalette,
+    action: &mut ShortcutViewAction,
+) {
+    // 1  Shortcut
+    render_step_label(ui, "1", "Shortcut", palette);
+    ui.add_space(4.0);
+
+    if state.is_recording {
+        render_compact_recorder(ui, state, palette);
+    } else if let Some(candidate) = state.candidate.clone() {
+        render_candidate_card(ui, state, &candidate, palette, action);
+    } else if render_current_shortcut_row(
+        ui,
+        "Current shortcut",
+        &status.configured_shortcut,
+        palette,
+    ) {
+        state.is_recording = true;
+        state.candidate = None;
+        state.error_message = None;
+        state.success_message = None;
+    }
+
+    ui.add_space(14.0);
+
+    // 2  Add binding
+    render_step_label(ui, "2", "Add binding", palette);
+    ui.add_space(4.0);
+
+    if let IpcShortcutState::CompositorManaged {
+        snippet,
+        binding_status,
+        conflict,
+        ..
+    } = &status.state
+    {
+        render_snippet_surface(ui, state, snippet, palette, action);
+
+        // Actionable check/notice only when unconfigured
+        if *binding_status == IpcCompositorBindingStatus::Unconfigured {
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                let check_btn = egui::Button::new(
+                    egui::RichText::new("Check Again")
+                        .size(ui_style::BODY_TEXT_SIZE - 1.0)
+                        .color(palette.accent),
+                );
+                if ui
+                    .add(check_btn)
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                    .clicked()
+                {
+                    *action = ShortcutViewAction::RecheckStatus;
+                }
+
+                ui.add_space(8.0);
+                ui.label(
+                    egui::RichText::new("Not yet active")
                         .size(ui_style::BODY_TEXT_SIZE - 2.0)
                         .color(palette.text_secondary),
+                );
+            });
+        }
+
+        // Actionable conflict notice if conflict exists
+        if let Some(conf) = conflict {
+            ui.add_space(4.0);
+            let warn_color = if ui.visuals().dark_mode {
+                egui::Color32::from_rgb(251, 191, 36)
+            } else {
+                egui::Color32::from_rgb(217, 119, 6)
+            };
+            ui.label(
+                egui::RichText::new(format!("Notice: {conf}"))
+                    .size(ui_style::BODY_TEXT_SIZE - 2.0)
+                    .color(warn_color),
+            );
+        }
+
+        // Note: For Verified and BoundUnverified, both are visually happy states.
+        // Technical __lua diagnostics and warning badges are hidden.
+    }
+}
+
+fn render_generic_compositor_section(
+    ui: &mut egui::Ui,
+    state: &mut ShortcutViewState,
+    status: &ShortcutStatusInfo,
+    palette: UiPalette,
+    action: &mut ShortcutViewAction,
+) {
+    render_sway_section(ui, state, status, palette, action);
+}
+
+fn render_step_label(ui: &mut egui::Ui, num: &str, title: &str, palette: UiPalette) {
+    ui.horizontal(|ui| {
+        ui.label(
+            egui::RichText::new(num)
+                .size(ui_style::BODY_TEXT_SIZE - 1.0)
+                .color(palette.text_secondary)
+                .strong(),
+        );
+        ui.label(
+            egui::RichText::new(title)
+                .size(ui_style::BODY_TEXT_SIZE)
+                .color(palette.text_primary)
+                .strong(),
+        );
+    });
+}
+
+fn render_current_shortcut_row(
+    ui: &mut egui::Ui,
+    label: &str,
+    shortcut: &str,
+    palette: UiPalette,
+) -> bool {
+    let mut change_clicked = false;
+
+    egui::Frame::new()
+        .fill(palette.row_background)
+        .stroke(egui::Stroke::new(1.0, palette.border))
+        .corner_radius(ui_style::ROW_CORNER_RADIUS)
+        .inner_margin(egui::Margin::symmetric(10, 8))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.vertical(|ui| {
+                    ui.label(
+                        egui::RichText::new(label)
+                            .size(ui_style::BODY_TEXT_SIZE - 2.0)
+                            .color(palette.text_secondary),
+                    );
+                    ui.label(
+                        egui::RichText::new(shortcut)
+                            .size(ui_style::BODY_TEXT_SIZE + 1.0)
+                            .color(palette.text_primary)
+                            .strong(),
                     );
                 });
-            });
 
-        // Input capture loop for local-only key recording
-        ui.input(|input| {
-            if input.key_pressed(egui::Key::Escape) {
-                state.is_recording = false;
-                state.candidate = None;
-                return;
-            }
-
-            let active_modifiers =
-                extract_active_modifiers(&input.modifiers, |k| input.key_down(k));
-
-            if !active_modifiers.is_empty() {
-                let outcome = process_recording_events(&input.events, &active_modifiers);
-                match outcome {
-                    RecordingEventOutcome::Captured { modifiers, key } => {
-                        tracing::debug!(
-                            ?modifiers,
-                            %key,
-                            "captured shortcut key candidate via event stream"
-                        );
-                        state.candidate = Some(KeyCandidate { modifiers, key });
-                        state.is_recording = false;
-                        state.error_message = None;
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let change_btn = egui::Button::new(
+                        egui::RichText::new("Change")
+                            .size(ui_style::BODY_TEXT_SIZE - 1.0)
+                            .color(palette.accent),
+                    );
+                    if ui
+                        .add(change_btn)
+                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                        .clicked()
+                    {
+                        change_clicked = true;
                     }
-                    RecordingEventOutcome::Cancel => {
+                });
+            });
+        });
+
+    change_clicked
+}
+
+fn render_compact_recorder(ui: &mut egui::Ui, state: &mut ShortcutViewState, palette: UiPalette) {
+    egui::Frame::new()
+        .fill(palette.row_background)
+        .stroke(egui::Stroke::new(1.0, palette.border))
+        .corner_radius(ui_style::ROW_CORNER_RADIUS)
+        .inner_margin(egui::Margin::symmetric(10, 8))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.vertical(|ui| {
+                    ui.label(
+                        egui::RichText::new("Press shortcut combination…")
+                            .size(ui_style::BODY_TEXT_SIZE)
+                            .color(palette.text_primary)
+                            .strong(),
+                    );
+                    ui.label(
+                        egui::RichText::new("Esc to cancel")
+                            .size(ui_style::BODY_TEXT_SIZE - 2.0)
+                            .color(palette.text_secondary),
+                    );
+                });
+
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let cancel_btn = egui::Button::new(
+                        egui::RichText::new("Cancel")
+                            .size(ui_style::BODY_TEXT_SIZE - 1.0)
+                            .color(palette.text_secondary),
+                    );
+                    if ui
+                        .add(cancel_btn)
+                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                        .clicked()
+                    {
                         state.is_recording = false;
                         state.candidate = None;
                     }
-                    RecordingEventOutcome::None => {
-                        // Fallback for cases where logical key_pressed was registered
-                        if let Some(key_str) = capture_pressed_key(input) {
-                            tracing::debug!(
-                                ?active_modifiers,
-                                %key_str,
-                                "captured shortcut key candidate via key_pressed fallback"
-                            );
-                            state.candidate = Some(KeyCandidate {
-                                modifiers: active_modifiers,
-                                key: key_str,
-                            });
-                            state.is_recording = false;
-                            state.error_message = None;
-                        }
+                });
+            });
+        });
+
+    // Input capture loop for local-only key recording
+    ui.input(|input| {
+        if input.key_pressed(egui::Key::Escape) {
+            state.is_recording = false;
+            state.candidate = None;
+            return;
+        }
+
+        let active_modifiers = extract_active_modifiers(&input.modifiers, |k| input.key_down(k));
+
+        if !active_modifiers.is_empty() {
+            let outcome = process_recording_events(&input.events, &active_modifiers);
+            match outcome {
+                RecordingEventOutcome::Captured { modifiers, key } => {
+                    tracing::debug!(
+                        ?modifiers,
+                        %key,
+                        "captured shortcut key candidate via event stream"
+                    );
+                    state.candidate = Some(KeyCandidate { modifiers, key });
+                    state.is_recording = false;
+                    state.error_message = None;
+                }
+                RecordingEventOutcome::Cancel => {
+                    state.is_recording = false;
+                    state.candidate = None;
+                }
+                RecordingEventOutcome::None => {
+                    if let Some(key_str) = capture_pressed_key(input) {
+                        tracing::debug!(
+                            ?active_modifiers,
+                            %key_str,
+                            "captured shortcut key candidate via key_pressed fallback"
+                        );
+                        state.candidate = Some(KeyCandidate {
+                            modifiers: active_modifiers,
+                            key: key_str,
+                        });
+                        state.is_recording = false;
+                        state.error_message = None;
                     }
                 }
             }
-        });
-
-        ui.add_space(6.0);
-        if ui
-            .button(
-                egui::RichText::new("Cancel Recording")
-                    .size(ui_style::BODY_TEXT_SIZE - 1.0)
-                    .color(palette.text_secondary),
-            )
-            .clicked()
-        {
-            state.is_recording = false;
-            state.candidate = None;
         }
-    } else if let Some(candidate) = state.candidate.clone() {
-        // Candidate recorded, waiting for explicit save
-        let display = candidate.display_string();
-        egui::Frame::new()
-            .fill(palette.row_background)
-            .stroke(egui::Stroke::new(1.0, palette.border))
-            .corner_radius(ui_style::ROW_CORNER_RADIUS)
-            .inner_margin(egui::Margin::same(10))
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
+    });
+}
+
+fn render_candidate_card(
+    ui: &mut egui::Ui,
+    state: &mut ShortcutViewState,
+    candidate: &KeyCandidate,
+    palette: UiPalette,
+    action: &mut ShortcutViewAction,
+) {
+    let display = candidate.display_string();
+
+    egui::Frame::new()
+        .fill(palette.row_background)
+        .stroke(egui::Stroke::new(1.0, palette.border))
+        .corner_radius(ui_style::ROW_CORNER_RADIUS)
+        .inner_margin(egui::Margin::symmetric(10, 8))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.vertical(|ui| {
                     ui.label(
-                        egui::RichText::new("New Shortcut:")
-                            .size(ui_style::BODY_TEXT_SIZE)
+                        egui::RichText::new("New shortcut")
+                            .size(ui_style::BODY_TEXT_SIZE - 2.0)
                             .color(palette.text_secondary),
                     );
                     ui.label(
@@ -509,150 +637,147 @@ fn render_key_recorder_section(
                     );
                 });
 
-                ui.add_space(8.0);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let discard_btn = egui::Button::new(
+                        egui::RichText::new("Discard")
+                            .size(ui_style::BODY_TEXT_SIZE - 1.0)
+                            .color(palette.text_secondary),
+                    );
+                    if ui
+                        .add(discard_btn)
+                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                        .clicked()
+                    {
+                        state.candidate = None;
+                        state.error_message = None;
+                    }
 
-                ui.horizontal(|ui| {
                     let save_btn = egui::Button::new(
-                        egui::RichText::new("Save Shortcut")
+                        egui::RichText::new("Save")
                             .size(ui_style::BODY_TEXT_SIZE - 1.0)
                             .color(palette.text_primary),
                     );
-                    if ui.add(save_btn).clicked() {
+                    if ui
+                        .add(save_btn)
+                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                        .clicked()
+                    {
                         *action = ShortcutViewAction::SaveShortcut {
                             modifiers: candidate.modifiers.clone(),
                             key: candidate.key.clone(),
                         };
                     }
-
-                    let cancel_btn = egui::Button::new(
-                        egui::RichText::new("Discard")
-                            .size(ui_style::BODY_TEXT_SIZE - 1.0)
-                            .color(palette.text_secondary),
-                    );
-                    if ui.add(cancel_btn).clicked() {
-                        state.candidate = None;
-                        state.error_message = None;
-                    }
                 });
             });
-    } else {
-        // Idle display of current shortcut
-        egui::Frame::new()
-            .fill(palette.row_background)
-            .stroke(egui::Stroke::new(1.0, palette.border))
-            .corner_radius(ui_style::ROW_CORNER_RADIUS)
-            .inner_margin(egui::Margin::same(10))
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label(
-                        egui::RichText::new("Configured:")
-                            .size(ui_style::BODY_TEXT_SIZE)
-                            .color(palette.text_secondary),
-                    );
-                    ui.label(
-                        egui::RichText::new(&status.configured_shortcut)
-                            .size(ui_style::BODY_TEXT_SIZE)
-                            .color(palette.text_primary)
-                            .strong(),
-                    );
-
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let change_btn = egui::Button::new(
-                            egui::RichText::new("Change…")
-                                .size(ui_style::BODY_TEXT_SIZE - 1.0)
-                                .color(palette.accent),
-                        );
-                        if ui.add(change_btn).clicked() {
-                            state.is_recording = true;
-                            state.candidate = None;
-                            state.error_message = None;
-                            state.success_message = None;
-                        }
-                    });
-                });
-            });
-    }
+        });
 }
 
-fn render_compositor_snippet_card(
+fn render_snippet_surface(
     ui: &mut egui::Ui,
     state: &mut ShortcutViewState,
     snippet: &str,
-    conflict: Option<&str>,
-    diagnostic: Option<&str>,
     palette: UiPalette,
     action: &mut ShortcutViewAction,
 ) {
-    ui.label(
-        egui::RichText::new("Compositor Configuration Directive")
-            .size(ui_style::BODY_TEXT_SIZE)
-            .color(palette.text_primary)
-            .strong(),
-    );
+    let snippet_bg = if ui.visuals().dark_mode {
+        egui::Color32::from_rgb(22, 22, 22)
+    } else {
+        egui::Color32::from_rgb(240, 240, 240)
+    };
 
-    ui.add_space(2.0);
-    ui.label(
-        egui::RichText::new("Add this line to your compositor configuration file:")
-            .size(ui_style::BODY_TEXT_SIZE - 2.0)
-            .color(palette.text_secondary),
-    );
-
-    ui.add_space(4.0);
-
-    // Monospace directive snippet
     egui::Frame::new()
-        .fill(if ui.visuals().dark_mode {
-            egui::Color32::from_rgb(18, 18, 18)
-        } else {
-            egui::Color32::from_rgb(238, 238, 238)
-        })
+        .fill(snippet_bg)
         .stroke(egui::Stroke::new(1.0, palette.border))
         .corner_radius(ui_style::ROW_CORNER_RADIUS)
-        .inner_margin(egui::Margin::same(8))
+        .inner_margin(egui::Margin::symmetric(8, 6))
         .show(ui, |ui| {
-            ui.add(
-                egui::Label::new(
-                    egui::RichText::new(snippet)
-                        .monospace()
-                        .size(ui_style::BODY_TEXT_SIZE - 1.0)
-                        .color(palette.text_primary),
-                )
-                .wrap(),
-            );
-        });
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(snippet)
+                            .monospace()
+                            .size(ui_style::BODY_TEXT_SIZE - 2.0)
+                            .color(palette.text_primary),
+                    )
+                    .wrap(),
+                );
 
-    ui.add_space(6.0);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let copy_label = if state.copied_feedback {
+                        "Copied!"
+                    } else {
+                        "Copy"
+                    };
+                    let copy_btn = egui::Button::new(
+                        egui::RichText::new(copy_label)
+                            .size(ui_style::BODY_TEXT_SIZE - 2.0)
+                            .color(palette.text_primary),
+                    );
+                    if ui
+                        .add(copy_btn)
+                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                        .clicked()
+                    {
+                        ui.ctx().copy_text(snippet.to_string());
+                        state.copied_feedback = true;
+                        *action = ShortcutViewAction::CopySnippet(snippet.to_string());
+                    }
+                });
+            });
+        });
+}
+
+fn render_sway_apply_step(
+    ui: &mut egui::Ui,
+    status: &ShortcutStatusInfo,
+    palette: UiPalette,
+    action: &mut ShortcutViewAction,
+) {
+    let binding_status = match &status.state {
+        IpcShortcutState::CompositorManaged { binding_status, .. } => Some(binding_status),
+        _ => None,
+    };
 
     ui.horizontal(|ui| {
-        let copy_label = if state.copied_feedback {
-            "✓ Copied!"
-        } else {
-            "Copy Directive"
-        };
-        let copy_btn = egui::Button::new(
-            egui::RichText::new(copy_label)
-                .size(ui_style::BODY_TEXT_SIZE - 1.0)
-                .color(palette.text_primary),
-        );
-        if ui.add(copy_btn).clicked() {
-            ui.ctx().copy_text(snippet.to_string());
-            state.copied_feedback = true;
-            *action = ShortcutViewAction::CopySnippet(snippet.to_string());
-        }
-
-        ui.add_space(6.0);
-
         let check_btn = egui::Button::new(
             egui::RichText::new("Check Again")
                 .size(ui_style::BODY_TEXT_SIZE - 1.0)
                 .color(palette.accent),
         );
-        if ui.add(check_btn).clicked() {
+        if ui
+            .add(check_btn)
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .clicked()
+        {
             *action = ShortcutViewAction::RecheckStatus;
+        }
+
+        ui.add_space(8.0);
+
+        match binding_status {
+            Some(IpcCompositorBindingStatus::Verified) => {
+                ui.label(
+                    egui::RichText::new("Active")
+                        .size(ui_style::BODY_TEXT_SIZE - 2.0)
+                        .color(palette.text_secondary),
+                );
+            }
+            Some(IpcCompositorBindingStatus::Unconfigured) => {
+                ui.label(
+                    egui::RichText::new("Not yet active")
+                        .size(ui_style::BODY_TEXT_SIZE - 2.0)
+                        .color(palette.text_secondary),
+                );
+            }
+            _ => {}
         }
     });
 
-    if let Some(conf) = conflict {
+    if let IpcShortcutState::CompositorManaged {
+        conflict: Some(conf),
+        ..
+    } = &status.state
+    {
         ui.add_space(4.0);
         let warn_color = if ui.visuals().dark_mode {
             egui::Color32::from_rgb(251, 191, 36)
@@ -664,73 +789,6 @@ fn render_compositor_snippet_card(
                 .size(ui_style::BODY_TEXT_SIZE - 2.0)
                 .color(warn_color),
         );
-    } else if let Some(diag) = diagnostic {
-        ui.add_space(4.0);
-        ui.label(
-            egui::RichText::new(diag)
-                .size(ui_style::BODY_TEXT_SIZE - 2.0)
-                .color(palette.text_secondary),
-        );
-    }
-}
-
-fn render_portal_section(
-    ui: &mut egui::Ui,
-    status: &ShortcutStatusInfo,
-    palette: UiPalette,
-    action: &mut ShortcutViewAction,
-) {
-    ui.label(
-        egui::RichText::new("KDE Plasma Desktop Portal")
-            .size(ui_style::BODY_TEXT_SIZE)
-            .color(palette.text_primary)
-            .strong(),
-    );
-
-    ui.add_space(4.0);
-
-    egui::Frame::new()
-        .fill(palette.row_background)
-        .stroke(egui::Stroke::new(1.0, palette.border))
-        .corner_radius(ui_style::ROW_CORNER_RADIUS)
-        .inner_margin(egui::Margin::same(10))
-        .show(ui, |ui| {
-            ui.label(
-                egui::RichText::new(
-                    "Global shortcuts in KDE Plasma are managed securely by the desktop portal. Configure the shortcut in the native KDE dialog below:",
-                )
-                .size(ui_style::BODY_TEXT_SIZE - 1.0)
-                .color(palette.text_secondary),
-            );
-
-            ui.add_space(8.0);
-
-            let portal_btn = egui::Button::new(
-                egui::RichText::new("Configure in KDE Settings")
-                    .size(ui_style::BODY_TEXT_SIZE)
-                    .color(palette.accent)
-                    .strong(),
-            );
-            if ui.add(portal_btn).clicked() {
-                *action = ShortcutViewAction::ConfigurePortal;
-            }
-        });
-
-    if let Some(effective) = &status.effective_shortcut {
-        ui.add_space(6.0);
-        ui.horizontal(|ui| {
-            ui.label(
-                egui::RichText::new("Currently effective in KDE:")
-                    .size(ui_style::BODY_TEXT_SIZE - 1.0)
-                    .color(palette.text_secondary),
-            );
-            ui.label(
-                egui::RichText::new(effective)
-                    .size(ui_style::BODY_TEXT_SIZE - 1.0)
-                    .color(palette.text_primary)
-                    .strong(),
-            );
-        });
     }
 }
 

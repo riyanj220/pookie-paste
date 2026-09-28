@@ -130,3 +130,66 @@ pub(crate) fn render_menu_item(
 
     response
 }
+
+pub(crate) fn render_chevron_left_icon(ui: &egui::Ui, center: egui::Pos2, color: egui::Color32) {
+    let stroke = egui::Stroke::new(1.6, color);
+    let p_top = egui::pos2(center.x + 2.5, center.y - 4.5);
+    let p_mid = egui::pos2(center.x - 2.5, center.y);
+    let p_bot = egui::pos2(center.x + 2.5, center.y + 4.5);
+    ui.painter().line_segment([p_top, p_mid], stroke);
+    ui.painter().line_segment([p_mid, p_bot], stroke);
+}
+
+pub(crate) fn render_back_button(ui: &mut egui::Ui, palette: ui_style::UiPalette) -> bool {
+    let height = 26.0;
+    let desired_size = egui::vec2(ui.available_width(), height);
+    let (rect, response) = ui.allocate_exact_size(desired_size, egui::Sense::click());
+    let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
+
+    let is_hovered = response.hovered();
+    if is_hovered {
+        ui.painter()
+            .rect_filled(rect, ui_style::ROW_CORNER_RADIUS, palette.row_hover);
+    }
+
+    let text_color = if is_hovered {
+        palette.text_primary
+    } else {
+        palette.accent
+    };
+
+    let chevron_center = egui::pos2(rect.left() + 6.0, rect.center().y);
+    render_chevron_left_icon(ui, chevron_center, text_color);
+
+    ui.painter().text(
+        egui::pos2(rect.left() + 16.0, rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        "Back to History",
+        egui::FontId::proportional(ui_style::BODY_TEXT_SIZE - 1.0),
+        text_color,
+    );
+
+    response.clicked()
+}
+
+pub(crate) fn render_check_icon(ui: &egui::Ui, center: egui::Pos2, color: egui::Color32) {
+    let stroke = egui::Stroke::new(1.6, color);
+    let p_start = egui::pos2(center.x - 3.5, center.y + 0.2);
+    let p_mid = egui::pos2(center.x - 0.8, center.y + 3.0);
+    let p_end = egui::pos2(center.x + 4.2, center.y - 3.2);
+    ui.painter().line_segment([p_start, p_mid], stroke);
+    ui.painter().line_segment([p_mid, p_end], stroke);
+}
+
+pub(crate) fn render_warning_icon(ui: &egui::Ui, center: egui::Pos2, color: egui::Color32) {
+    let stroke = egui::Stroke::new(1.6, color);
+    ui.painter().line_segment(
+        [
+            egui::pos2(center.x, center.y - 4.0),
+            egui::pos2(center.x, center.y + 0.5),
+        ],
+        stroke,
+    );
+    ui.painter()
+        .circle_filled(egui::pos2(center.x, center.y + 3.5), 1.0, color);
+}
