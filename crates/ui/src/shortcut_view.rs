@@ -216,23 +216,36 @@ pub fn render_shortcut_setup(
             }
 
             if let Some(ok) = &state.success_message {
-                ui.add_space(8.0);
-                let ok_color = if ui.visuals().dark_mode {
-                    egui::Color32::from_rgb(74, 222, 128)
-                } else {
-                    egui::Color32::from_rgb(22, 163, 74)
+                let suppress_compositor_success = match status.capability {
+                    Some(IpcShortcutCapability::CompositorManaged) => matches!(
+                        &status.state,
+                        IpcShortcutState::CompositorManaged {
+                            binding_status: IpcCompositorBindingStatus::Unconfigured,
+                            ..
+                        }
+                    ),
+                    _ => false,
                 };
-                ui.horizontal(|ui| {
-                    let (icon_rect, _) =
-                        ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
-                    crate::controls::render_check_icon(ui, icon_rect.center(), ok_color);
-                    ui.add_space(2.0);
-                    ui.label(
-                        egui::RichText::new(ok)
-                            .size(ui_style::BODY_TEXT_SIZE - 1.0)
-                            .color(ok_color),
-                    );
-                });
+
+                if !suppress_compositor_success {
+                    ui.add_space(8.0);
+                    let ok_color = if ui.visuals().dark_mode {
+                        egui::Color32::from_rgb(74, 222, 128)
+                    } else {
+                        egui::Color32::from_rgb(22, 163, 74)
+                    };
+                    ui.horizontal(|ui| {
+                        let (icon_rect, _) =
+                            ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
+                        crate::controls::render_check_icon(ui, icon_rect.center(), ok_color);
+                        ui.add_space(2.0);
+                        ui.label(
+                            egui::RichText::new(ok)
+                                .size(ui_style::BODY_TEXT_SIZE - 1.0)
+                                .color(ok_color),
+                        );
+                    });
+                }
             }
         });
 
@@ -398,29 +411,30 @@ fn render_hyprland_section(
     {
         render_snippet_surface(ui, state, snippet, palette, action);
 
-        // Actionable check/notice only when unconfigured
+        // Actionable check only when unconfigured
         if *binding_status == IpcCompositorBindingStatus::Unconfigured {
             ui.add_space(6.0);
             ui.horizontal(|ui| {
-                let check_btn = egui::Button::new(
-                    egui::RichText::new("Check Again")
-                        .size(ui_style::BODY_TEXT_SIZE - 1.0)
-                        .color(palette.accent),
-                );
-                if ui
-                    .add(check_btn)
-                    .on_hover_cursor(egui::CursorIcon::PointingHand)
-                    .clicked()
-                {
-                    *action = ShortcutViewAction::RecheckStatus;
-                }
-
-                ui.add_space(8.0);
                 ui.label(
-                    egui::RichText::new("Not yet active")
-                        .size(ui_style::BODY_TEXT_SIZE - 2.0)
+                    egui::RichText::new("Binding not active yet")
+                        .size(ui_style::BODY_TEXT_SIZE - 1.0)
                         .color(palette.text_secondary),
                 );
+
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let check_btn = egui::Button::new(
+                        egui::RichText::new("Check")
+                            .size(ui_style::BODY_TEXT_SIZE - 2.0)
+                            .color(palette.accent),
+                    );
+                    if ui
+                        .add(check_btn)
+                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                        .clicked()
+                    {
+                        *action = ShortcutViewAction::RecheckStatus;
+                    }
+                });
             });
         }
 
@@ -485,6 +499,7 @@ fn render_current_shortcut_row(
         .corner_radius(ui_style::ROW_CORNER_RADIUS)
         .inner_margin(egui::Margin::symmetric(10, 8))
         .show(ui, |ui| {
+            ui.set_min_height(36.0);
             ui.horizontal(|ui| {
                 ui.vertical(|ui| {
                     ui.label(
@@ -527,18 +542,19 @@ fn render_compact_recorder(ui: &mut egui::Ui, state: &mut ShortcutViewState, pal
         .corner_radius(ui_style::ROW_CORNER_RADIUS)
         .inner_margin(egui::Margin::symmetric(10, 8))
         .show(ui, |ui| {
+            ui.set_min_height(36.0);
             ui.horizontal(|ui| {
                 ui.vertical(|ui| {
                     ui.label(
-                        egui::RichText::new("Press shortcut combination…")
+                        egui::RichText::new("Recording…")
+                            .size(ui_style::BODY_TEXT_SIZE - 2.0)
+                            .color(palette.text_secondary),
+                    );
+                    ui.label(
+                        egui::RichText::new("Press keys (Esc to cancel)")
                             .size(ui_style::BODY_TEXT_SIZE)
                             .color(palette.text_primary)
                             .strong(),
-                    );
-                    ui.label(
-                        egui::RichText::new("Esc to cancel")
-                            .size(ui_style::BODY_TEXT_SIZE - 2.0)
-                            .color(palette.text_secondary),
                     );
                 });
 
@@ -622,6 +638,7 @@ fn render_candidate_card(
         .corner_radius(ui_style::ROW_CORNER_RADIUS)
         .inner_margin(egui::Margin::symmetric(10, 8))
         .show(ui, |ui| {
+            ui.set_min_height(36.0);
             ui.horizontal(|ui| {
                 ui.vertical(|ui| {
                     ui.label(
@@ -689,42 +706,43 @@ fn render_snippet_surface(
         .fill(snippet_bg)
         .stroke(egui::Stroke::new(1.0, palette.border))
         .corner_radius(ui_style::ROW_CORNER_RADIUS)
-        .inner_margin(egui::Margin::symmetric(8, 6))
+        .inner_margin(egui::Margin::symmetric(10, 8))
         .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.add(
-                    egui::Label::new(
-                        egui::RichText::new(snippet)
-                            .monospace()
-                            .size(ui_style::BODY_TEXT_SIZE - 2.0)
-                            .color(palette.text_primary),
-                    )
-                    .wrap(),
-                );
-
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let copy_label = if state.copied_feedback {
-                        "Copied!"
-                    } else {
-                        "Copy"
-                    };
-                    let copy_btn = egui::Button::new(
-                        egui::RichText::new(copy_label)
-                            .size(ui_style::BODY_TEXT_SIZE - 2.0)
-                            .color(palette.text_primary),
-                    );
-                    if ui
-                        .add(copy_btn)
-                        .on_hover_cursor(egui::CursorIcon::PointingHand)
-                        .clicked()
-                    {
-                        ui.ctx().copy_text(snippet.to_string());
-                        state.copied_feedback = true;
-                        *action = ShortcutViewAction::CopySnippet(snippet.to_string());
-                    }
-                });
-            });
+            ui.set_width(ui.available_width());
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(snippet)
+                        .monospace()
+                        .size(ui_style::BODY_TEXT_SIZE - 2.0)
+                        .color(palette.text_primary),
+                )
+                .wrap(),
+            );
         });
+
+    ui.add_space(4.0);
+
+    ui.horizontal(|ui| {
+        let copy_label = if state.copied_feedback {
+            "Copied!"
+        } else {
+            "Copy"
+        };
+        let copy_btn = egui::Button::new(
+            egui::RichText::new(copy_label)
+                .size(ui_style::BODY_TEXT_SIZE - 2.0)
+                .color(palette.text_primary),
+        );
+        if ui
+            .add(copy_btn)
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .clicked()
+        {
+            ui.ctx().copy_text(snippet.to_string());
+            state.copied_feedback = true;
+            *action = ShortcutViewAction::CopySnippet(snippet.to_string());
+        }
+    });
 }
 
 fn render_sway_apply_step(
@@ -738,40 +756,45 @@ fn render_sway_apply_step(
         _ => None,
     };
 
-    ui.horizontal(|ui| {
-        let check_btn = egui::Button::new(
-            egui::RichText::new("Check Again")
-                .size(ui_style::BODY_TEXT_SIZE - 1.0)
-                .color(palette.accent),
-        );
-        if ui
-            .add(check_btn)
-            .on_hover_cursor(egui::CursorIcon::PointingHand)
-            .clicked()
-        {
-            *action = ShortcutViewAction::RecheckStatus;
+    match binding_status {
+        Some(IpcCompositorBindingStatus::Verified) => {
+            let active_color = if ui.visuals().dark_mode {
+                egui::Color32::from_rgb(134, 239, 172)
+            } else {
+                egui::Color32::from_rgb(22, 163, 74)
+            };
+            ui.label(
+                egui::RichText::new("Active")
+                    .size(ui_style::BODY_TEXT_SIZE - 1.0)
+                    .color(active_color),
+            );
         }
-
-        ui.add_space(8.0);
-
-        match binding_status {
-            Some(IpcCompositorBindingStatus::Verified) => {
+        Some(IpcCompositorBindingStatus::Unconfigured) => {
+            ui.horizontal(|ui| {
                 ui.label(
-                    egui::RichText::new("Active")
-                        .size(ui_style::BODY_TEXT_SIZE - 2.0)
+                    egui::RichText::new("Binding not active yet")
+                        .size(ui_style::BODY_TEXT_SIZE - 1.0)
                         .color(palette.text_secondary),
                 );
-            }
-            Some(IpcCompositorBindingStatus::Unconfigured) => {
-                ui.label(
-                    egui::RichText::new("Not yet active")
-                        .size(ui_style::BODY_TEXT_SIZE - 2.0)
-                        .color(palette.text_secondary),
-                );
-            }
-            _ => {}
+
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let check_btn = egui::Button::new(
+                        egui::RichText::new("Check")
+                            .size(ui_style::BODY_TEXT_SIZE - 2.0)
+                            .color(palette.accent),
+                    );
+                    if ui
+                        .add(check_btn)
+                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                        .clicked()
+                    {
+                        *action = ShortcutViewAction::RecheckStatus;
+                    }
+                });
+            });
         }
-    });
+        _ => {}
+    }
 
     if let IpcShortcutState::CompositorManaged {
         conflict: Some(conf),

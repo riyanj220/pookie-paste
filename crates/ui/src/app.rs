@@ -687,7 +687,7 @@ impl PookieApp {
                             match action {
                                 Some(PendingShortcutAction::SaveShortcut) => {
                                     self.shortcut_view_state.success_message =
-                                        Some("Shortcut updated successfully!".to_string());
+                                        Some("Shortcut updated.".to_string());
                                 }
                                 Some(PendingShortcutAction::ConfigurePortal) => {
                                     // Portal configuration dialog was successfully requested.
