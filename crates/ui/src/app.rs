@@ -837,15 +837,20 @@ impl PookieApp {
 
     fn start_open_config(&mut self) {
         match shortcut_view::resolve_compositor_config_path(self.shortcut_status.as_ref()) {
-            Ok(path) => match std::process::Command::new("xdg-open").arg(&path).spawn() {
-                Ok(_) => {
-                    self.shortcut_view_state.error_message = None;
+            Ok(path) => {
+                let display_path = shortcut_view::format_config_path_for_display(&path);
+                match std::process::Command::new("xdg-open").arg(&path).spawn() {
+                    Ok(_) => {
+                        self.shortcut_view_state.error_message = None;
+                    }
+                    Err(err) => {
+                        tracing::warn!(error = %err, path = %path.display(), "failed to open compositor config");
+                        self.shortcut_view_state.error_message = Some(format!(
+                            "Could not open config automatically.\n{display_path}"
+                        ));
+                    }
                 }
-                Err(err) => {
-                    self.shortcut_view_state.error_message =
-                        Some(format!("Failed to open config with xdg-open: {err}"));
-                }
-            },
+            }
             Err(err) => {
                 self.shortcut_view_state.error_message = Some(err);
             }

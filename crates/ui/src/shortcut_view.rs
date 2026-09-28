@@ -348,6 +348,16 @@ pub(crate) fn resolve_compositor_config_path(
     }
 }
 
+pub(crate) fn format_config_path_for_display(path: &std::path::Path) -> String {
+    if let Ok(home) = std::env::var("HOME")
+        && let Ok(stripped) = path.strip_prefix(std::path::Path::new(&home))
+    {
+        return format!("~/{}", stripped.display());
+    }
+
+    path.display().to_string()
+}
+
 fn render_native_section(
     ui: &mut egui::Ui,
     state: &mut ShortcutViewState,
@@ -422,7 +432,7 @@ fn render_sway_section(
     ui.add_space(4.0);
 
     if let IpcShortcutState::CompositorManaged { snippet, .. } = &status.state {
-        render_snippet_surface(ui, state, snippet, palette, action);
+        render_snippet_surface(ui, state, snippet, status, palette, action);
     }
 
     ui.add_space(14.0);
@@ -474,7 +484,7 @@ fn render_hyprland_section(
         ..
     } = &status.state
     {
-        render_snippet_surface(ui, state, snippet, palette, action);
+        render_snippet_surface(ui, state, snippet, status, palette, action);
 
         // Actionable check only when unconfigured
         if *binding_status == IpcCompositorBindingStatus::Unconfigured {
@@ -758,6 +768,7 @@ fn render_snippet_surface(
     ui: &mut egui::Ui,
     state: &mut ShortcutViewState,
     snippet: &str,
+    status: &ShortcutStatusInfo,
     palette: UiPalette,
     action: &mut ShortcutViewAction,
 ) {
@@ -810,6 +821,11 @@ fn render_snippet_surface(
 
         ui.add_space(6.0);
 
+        let config_path_tooltip = match resolve_compositor_config_path(Some(status)) {
+            Ok(ref path) => format_config_path_for_display(path),
+            Err(_) => "Config path unavailable".to_string(),
+        };
+
         let open_btn = egui::Button::new(
             egui::RichText::new("Open Config")
                 .size(ui_style::BODY_TEXT_SIZE - 2.0)
@@ -818,6 +834,7 @@ fn render_snippet_surface(
         if ui
             .add(open_btn)
             .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .on_hover_text(config_path_tooltip)
             .clicked()
         {
             *action = ShortcutViewAction::OpenConfig;
@@ -1307,5 +1324,24 @@ mod tests {
 
         let outcome = process_recording_events(&events, &active_mods);
         assert_eq!(outcome, RecordingEventOutcome::None);
+    }
+
+    #[test]
+    fn format_config_path_for_display_replaces_home_prefix() {
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/home/user".to_string());
+        let path = std::path::PathBuf::from(&home).join(".config/sway/config");
+        let formatted = format_config_path_for_display(&path);
+        assert_eq!(formatted, "~/.config/sway/config");
+    }
+
+    #[test]
+    fn format_config_path_for_display_preserves_non_home_path() {
+        let path = std::path::PathBuf::from("/etc/sway/config");
+        let formatted = format_config_path_for_display(&path);
+        if std::env::var("HOME").map(|h| h == "/etc").unwrap_or(false) {
+            assert_eq!(formatted, "~/sway/config");
+        } else {
+            assert_eq!(formatted, "/etc/sway/config");
+        }
     }
 }
