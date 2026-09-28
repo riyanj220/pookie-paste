@@ -834,6 +834,48 @@ impl PookieApp {
             repaint_context.request_repaint();
         });
     }
+
+    fn start_open_config(&mut self) {
+        match shortcut_view::resolve_compositor_config_path(self.shortcut_status.as_ref()) {
+            Ok(path) => match std::process::Command::new("xdg-open").arg(&path).spawn() {
+                Ok(_) => {
+                    self.shortcut_view_state.error_message = None;
+                }
+                Err(err) => {
+                    self.shortcut_view_state.error_message =
+                        Some(format!("Failed to open config with xdg-open: {err}"));
+                }
+            },
+            Err(err) => {
+                self.shortcut_view_state.error_message = Some(err);
+            }
+        }
+    }
+
+    fn start_reload_sway(&mut self, ctx: &egui::Context) {
+        match std::process::Command::new("swaymsg").arg("reload").output() {
+            Ok(output) if output.status.success() => {
+                self.shortcut_view_state.error_message = None;
+                self.start_recheck_shortcut_status(ctx);
+            }
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                let msg = if stderr.trim().is_empty() {
+                    format!(
+                        "swaymsg reload failed with exit code {:?}",
+                        output.status.code()
+                    )
+                } else {
+                    format!("swaymsg reload failed: {}", stderr.trim())
+                };
+                self.shortcut_view_state.error_message = Some(msg);
+            }
+            Err(err) => {
+                self.shortcut_view_state.error_message =
+                    Some(format!("Failed to execute swaymsg: {err}"));
+            }
+        }
+    }
 }
 
 impl eframe::App for PookieApp {
@@ -982,6 +1024,12 @@ impl eframe::App for PookieApp {
                 }
                 shortcut_view::ShortcutViewAction::CopySnippet(text) => {
                     self.start_copy_text(ui.ctx(), text);
+                }
+                shortcut_view::ShortcutViewAction::OpenConfig => {
+                    self.start_open_config();
+                }
+                shortcut_view::ShortcutViewAction::ReloadSway => {
+                    self.start_reload_sway(ui.ctx());
                 }
             }
 

@@ -44,6 +44,8 @@ pub enum ShortcutViewAction {
     ConfigurePortal,
     RecheckStatus,
     CopySnippet(String),
+    OpenConfig,
+    ReloadSway,
 }
 
 /// Renders a non-blocking attention banner above the clipboard history
@@ -253,13 +255,13 @@ pub fn render_shortcut_setup(
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CompositorKind {
+pub(crate) enum CompositorKind {
     Sway,
     Hyprland,
     Other,
 }
 
-fn detect_compositor(status: &ShortcutStatusInfo) -> CompositorKind {
+pub(crate) fn detect_compositor(status: &ShortcutStatusInfo) -> CompositorKind {
     let name_lower = status
         .backend_name
         .as_deref()
@@ -280,6 +282,69 @@ fn detect_compositor(status: &ShortcutStatusInfo) -> CompositorKind {
         }
     } else {
         CompositorKind::Other
+    }
+}
+
+pub(crate) fn resolve_compositor_config_path(
+    status: Option<&ShortcutStatusInfo>,
+) -> Result<std::path::PathBuf, String> {
+    let kind = status
+        .map(detect_compositor)
+        .unwrap_or(CompositorKind::Other);
+
+    match kind {
+        CompositorKind::Sway => {
+            let candidates = [
+                std::env::var("XDG_CONFIG_HOME")
+                    .ok()
+                    .map(|c| std::path::PathBuf::from(c).join("sway/config")),
+                std::env::var("HOME")
+                    .ok()
+                    .map(|h| std::path::PathBuf::from(h).join(".config/sway/config")),
+                Some(std::path::PathBuf::from("/etc/sway/config")),
+            ];
+
+            for candidate in candidates.into_iter().flatten() {
+                if candidate.is_file() {
+                    return Ok(candidate);
+                }
+            }
+
+            Err("Sway config file could not be located in ~/.config/sway/config or /etc/sway/config".to_string())
+        }
+        CompositorKind::Hyprland => {
+            let xdg_config = std::env::var("XDG_CONFIG_HOME")
+                .ok()
+                .map(std::path::PathBuf::from)
+                .or_else(|| {
+                    std::env::var("HOME")
+                        .ok()
+                        .map(|h| std::path::PathBuf::from(h).join(".config"))
+                });
+
+            let mut candidates = Vec::new();
+
+            if let Some(ref config_root) = xdg_config {
+                candidates.push(config_root.join("hypr/hyprland.lua"));
+                candidates.push(config_root.join("hypr/hyprland.conf"));
+            }
+
+            candidates.push(std::path::PathBuf::from("/etc/hypr/hyprland.conf"));
+
+            for candidate in candidates {
+                if candidate.is_file() {
+                    return Ok(candidate);
+                }
+            }
+
+            Err(
+                "Hyprland config file could not be located in ~/.config/hypr/ or /etc/hypr/"
+                    .to_string(),
+            )
+        }
+        CompositorKind::Other => {
+            Err("Compositor configuration file could not be located".to_string())
+        }
     }
 }
 
@@ -720,7 +785,7 @@ fn render_snippet_surface(
             );
         });
 
-    ui.add_space(4.0);
+    ui.add_space(6.0);
 
     ui.horizontal(|ui| {
         let copy_label = if state.copied_feedback {
@@ -741,6 +806,21 @@ fn render_snippet_surface(
             ui.ctx().copy_text(snippet.to_string());
             state.copied_feedback = true;
             *action = ShortcutViewAction::CopySnippet(snippet.to_string());
+        }
+
+        ui.add_space(6.0);
+
+        let open_btn = egui::Button::new(
+            egui::RichText::new("Open Config")
+                .size(ui_style::BODY_TEXT_SIZE - 2.0)
+                .color(palette.text_secondary),
+        );
+        if ui
+            .add(open_btn)
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .clicked()
+        {
+            *action = ShortcutViewAction::OpenConfig;
         }
     });
 }
@@ -778,17 +858,17 @@ fn render_sway_apply_step(
                 );
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let check_btn = egui::Button::new(
-                        egui::RichText::new("Check")
+                    let reload_btn = egui::Button::new(
+                        egui::RichText::new("Reload Sway")
                             .size(ui_style::BODY_TEXT_SIZE - 2.0)
                             .color(palette.accent),
                     );
                     if ui
-                        .add(check_btn)
+                        .add(reload_btn)
                         .on_hover_cursor(egui::CursorIcon::PointingHand)
                         .clicked()
                     {
-                        *action = ShortcutViewAction::RecheckStatus;
+                        *action = ShortcutViewAction::ReloadSway;
                     }
                 });
             });
