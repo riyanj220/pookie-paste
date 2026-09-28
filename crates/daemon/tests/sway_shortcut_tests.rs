@@ -446,3 +446,36 @@ fn sway_check_conflict_multiple_matching_binds_with_foreign_binding_occupied() {
         .expect("check_conflict succeeds");
     assert_eq!(result, Some("exec alacritty".to_string()));
 }
+
+#[test]
+fn sway_recheck_detects_external_removal_and_transitions_to_unconfigured() {
+    let initial_config = "bindsym Mod4+v exec pookie-paste --toggle";
+    let mut backend = SwayShortcutBackend::from_offline_config(Some(initial_config));
+
+    // Initially registered and bound
+    let outcome = backend
+        .register(Shortcut::super_v())
+        .expect("register succeeds");
+    assert!(matches!(
+        outcome,
+        ShortcutRegistrationOutcome::CompositorManaged {
+            status: CompositorBindingStatus::BoundUnverified,
+            ..
+        }
+    ));
+
+    // Simulate external removal in sway config
+    backend.set_fallback_config(Some("# binding removed"));
+
+    // Recheck / rebind reflects removed state as Unconfigured
+    let rechecked = backend
+        .rebind(Shortcut::super_v())
+        .expect("rebind succeeds");
+    assert!(matches!(
+        rechecked,
+        ShortcutRegistrationOutcome::CompositorManaged {
+            status: CompositorBindingStatus::Unconfigured,
+            ..
+        }
+    ));
+}

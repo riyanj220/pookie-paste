@@ -2,8 +2,8 @@ use std::sync::{Arc, RwLock};
 
 use history::ClipboardHistoryService;
 use ipc::{
-    ActivationOutcome, IpcCompositorBindingStatus, IpcRequest, IpcResponse, IpcShortcutCapability,
-    IpcShortcutState, ShortcutStatusInfo,
+    ActivationOutcome, IpcRequest, IpcResponse, IpcShortcutCapability, IpcShortcutState,
+    ShortcutStatusInfo,
 };
 use pookie_clipboard::ClipboardBackend;
 use tokio::sync::Mutex;
@@ -152,22 +152,12 @@ where
         },
 
         IpcRequest::ToggleUi => {
-            let needs_recheck = match shortcut_status.read() {
-                Ok(guard) => {
-                    guard.capability == Some(IpcShortcutCapability::CompositorManaged)
-                        && matches!(
-                            guard.state,
-                            IpcShortcutState::CompositorManaged {
-                                binding_status: IpcCompositorBindingStatus::Unconfigured
-                                    | IpcCompositorBindingStatus::Conflict,
-                                ..
-                            }
-                        )
-                }
+            let is_compositor_managed = match shortcut_status.read() {
+                Ok(guard) => guard.capability == Some(IpcShortcutCapability::CompositorManaged),
                 Err(_) => false,
             };
 
-            if needs_recheck {
+            if is_compositor_managed {
                 // Attempt fast compositor status recheck, fail-open (launch UI regardless of outcome)
                 let _ = tokio::time::timeout(
                     std::time::Duration::from_millis(50),

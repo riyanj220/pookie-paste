@@ -621,3 +621,43 @@ fn hyprland_check_conflict_ipc_failure_does_not_become_available() {
         "query error must fail closed as ShortcutError::Failed, got {err:?}"
     );
 }
+
+#[test]
+fn hyprland_recheck_detects_external_removal_and_transitions_to_unconfigured() {
+    let raw_json_active = r#"[
+        {
+            "modmask": 64,
+            "key": "v",
+            "dispatcher": "exec",
+            "arg": "pookie-paste --toggle"
+        }
+    ]"#;
+    let mut backend = HyprlandShortcutBackend::with_mock_ipc(raw_json_active);
+
+    // Initially registered and verified
+    let outcome = backend
+        .register(Shortcut::super_v())
+        .expect("register succeeds");
+    assert!(matches!(
+        outcome,
+        ShortcutRegistrationOutcome::CompositorManaged {
+            status: CompositorBindingStatus::Verified,
+            ..
+        }
+    ));
+
+    // Simulate external removal in hyprland binds
+    backend.set_mock_ipc("[]");
+
+    // Recheck / rebind reflects removed state as Unconfigured
+    let rechecked = backend
+        .rebind(Shortcut::super_v())
+        .expect("rebind succeeds");
+    assert!(matches!(
+        rechecked,
+        ShortcutRegistrationOutcome::CompositorManaged {
+            status: CompositorBindingStatus::Unconfigured,
+            ..
+        }
+    ));
+}

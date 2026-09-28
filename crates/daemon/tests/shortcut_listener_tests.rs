@@ -1772,6 +1772,91 @@ async fn compositor_managed_rebind_error_updates_current_shortcut_for_subsequent
 }
 
 #[tokio::test]
+async fn recheck_transitions_cached_verified_to_unconfigured_when_binding_removed() {
+    use daemon::shortcut_backend::CompositorBindingStatus;
+
+    let binding_active = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let binding_active_clone = Arc::clone(&binding_active);
+
+    let backend = FlexibleMockBackend {
+        capability: ShortcutBackendCapability::CompositorManaged,
+        registered: Arc::new(Mutex::new(None)),
+        rebind_handler: Arc::new(Mutex::new(Box::new(move |shortcut| {
+            if binding_active_clone.load(std::sync::atomic::Ordering::SeqCst) {
+                Ok(ShortcutRegistrationOutcome::CompositorManaged {
+                    binding_snippet: format!("bindsym Mod4+{} exec pookie-paste", shortcut.key),
+                    status: CompositorBindingStatus::Verified,
+                    conflict: None,
+                    diagnostic: None,
+                })
+            } else {
+                Ok(ShortcutRegistrationOutcome::CompositorManaged {
+                    binding_snippet: format!("bindsym Mod4+{} exec pookie-paste", shortcut.key),
+                    status: CompositorBindingStatus::Unconfigured,
+                    conflict: None,
+                    diagnostic: None,
+                })
+            }
+        }))),
+        portal_handler: Arc::new(Mutex::new(Box::new(|_| Err(ShortcutError::Unavailable)))),
+        wake_sender: None,
+        activation_rx: None,
+    };
+
+    let initial_shortcut = Shortcut::super_v();
+    let listener = ShortcutListener::start_with_backend_and_shortcut(backend, initial_shortcut);
+
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    // Perform initial recheck to establish the initial Verified state
+    let status1 = listener.recheck().await.expect("initial recheck succeeds");
+    assert_eq!(status1.configured_shortcut, "Super+V");
+    match status1.state {
+        ipc::IpcShortcutState::CompositorManaged { binding_status, .. } => {
+            assert_eq!(binding_status, ipc::IpcCompositorBindingStatus::Verified);
+        }
+        other => panic!("expected CompositorManaged Verified, got {:?}", other),
+    }
+
+    // External compositor configuration changes: binding is removed
+    binding_active.store(false, std::sync::atomic::Ordering::SeqCst);
+
+    // Prior to recheck, cached status is still Verified
+    assert_eq!(
+        listener.status().state,
+        ipc::IpcShortcutState::CompositorManaged {
+            binding_status: ipc::IpcCompositorBindingStatus::Verified,
+            snippet: "bindsym Mod4+V exec pookie-paste".to_string(),
+            conflict: None,
+            diagnostic: None,
+        }
+    );
+
+    // Authoritative recheck is performed (e.g. from --shortcut-status or ToggleUi)
+    let rechecked = listener.recheck().await.expect("recheck succeeds");
+    match rechecked.state {
+        ipc::IpcShortcutState::CompositorManaged { binding_status, .. } => {
+            assert_eq!(
+                binding_status,
+                ipc::IpcCompositorBindingStatus::Unconfigured
+            );
+        }
+        other => panic!("expected CompositorManaged Unconfigured, got {:?}", other),
+    }
+
+    // Cached status is now authoritatively updated to Unconfigured
+    assert_eq!(
+        listener.status().state,
+        ipc::IpcShortcutState::CompositorManaged {
+            binding_status: ipc::IpcCompositorBindingStatus::Unconfigured,
+            snippet: "bindsym Mod4+V exec pookie-paste".to_string(),
+            conflict: None,
+            diagnostic: None,
+        }
+    );
+}
+
+#[tokio::test]
 async fn native_backend_rebind_error_preserves_previous_shortcut_and_status() {
     let queried_shortcuts = Arc::new(Mutex::new(Vec::new()));
     let queried_clone = Arc::clone(&queried_shortcuts);

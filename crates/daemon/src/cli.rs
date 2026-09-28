@@ -145,7 +145,7 @@ pub async fn send_shortcut_status_request_to(path: &Path) -> anyhow::Result<()> 
         }
     };
 
-    match client.send(&IpcRequest::GetShortcutStatus).await {
+    match client.send(&IpcRequest::RecheckShortcutStatus).await {
         Ok(IpcResponse::ShortcutStatus { status }) => {
             print!("{}", format_shortcut_status(&status));
             Ok(())
