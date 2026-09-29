@@ -1,18 +1,30 @@
+use std::sync::{Arc, RwLock};
+
 use history::ClipboardHistoryService;
-use ipc::{ActivationOutcome, IpcRequest, IpcResponse};
+use ipc::{
+    ActivationOutcome, IpcRequest, IpcResponse, IpcShortcutCapability, IpcShortcutState,
+    ShortcutStatusInfo,
+};
 use pookie_clipboard::ClipboardBackend;
+use tokio::sync::Mutex;
 
 use crate::activation_service::{ActivationResult, ClipboardActivationService};
+use crate::clipboard_service::ClipboardService;
 use crate::focus_backend::{FocusBackend, FocusError};
 use crate::ipc_mapper::{from_ipc_focus_target, to_history_item, to_ipc_focus_target};
 use crate::paste_backend::PasteBackend;
+use crate::reload_coordinator::ReloadCoordinator;
+use crate::shortcut_config::{KeyBindingConfig, ModifiersConfig};
 use crate::ui_launcher::{UiLaunchOutcome, UiLauncher};
 
 pub async fn handle_request<B, P, F>(
     request: IpcRequest,
     history_service: &ClipboardHistoryService,
     activation_service: &ClipboardActivationService<B, P, F>,
+    clipboard_service: &Mutex<ClipboardService<B>>,
     ui_launcher: &UiLauncher,
+    shortcut_status: &Arc<RwLock<ShortcutStatusInfo>>,
+    reload_coordinator: &Arc<ReloadCoordinator>,
 ) -> IpcResponse
 where
     B: ClipboardBackend,
@@ -139,13 +151,98 @@ where
             }
         },
 
-        IpcRequest::ToggleUi => match ui_launcher.launch() {
-            Ok(UiLaunchOutcome::Launched) => IpcResponse::UiToggled { launched: true },
-            Ok(UiLaunchOutcome::AlreadyRunning) => IpcResponse::UiToggled { launched: false },
+        IpcRequest::ToggleUi => {
+            let is_compositor_managed = match shortcut_status.read() {
+                Ok(guard) => guard.capability == Some(IpcShortcutCapability::CompositorManaged),
+                Err(_) => false,
+            };
+
+            if is_compositor_managed {
+                // Attempt fast compositor status recheck, fail-open (launch UI regardless of outcome)
+                let _ = tokio::time::timeout(
+                    std::time::Duration::from_millis(50),
+                    reload_coordinator.recheck(),
+                )
+                .await;
+            }
+
+            match ui_launcher.launch() {
+                Ok(UiLaunchOutcome::Launched) => IpcResponse::UiToggled { launched: true },
+                Ok(UiLaunchOutcome::AlreadyRunning) => IpcResponse::UiToggled { launched: false },
+                Err(error) => IpcResponse::Error {
+                    message: format!("failed to launch UI: {error:?}"),
+                },
+            }
+        }
+
+        IpcRequest::GetShortcutStatus => {
+            let status = shortcut_status
+                .read()
+                .map(|s| s.clone())
+                .unwrap_or_else(|_| ShortcutStatusInfo {
+                    configured_shortcut: String::new(),
+                    backend_name: None,
+                    capability: None,
+                    effective_shortcut: None,
+                    state: IpcShortcutState::Unavailable {
+                        reason: "shortcut status lock poisoned".to_string(),
+                    },
+                });
+
+            IpcResponse::ShortcutStatus { status }
+        }
+
+        IpcRequest::RecheckShortcutStatus => match reload_coordinator.recheck().await {
+            Ok(status) => IpcResponse::ShortcutStatus { status },
             Err(error) => IpcResponse::Error {
-                message: format!("failed to launch UI: {error:?}"),
+                message: format!("{error}"),
             },
         },
+
+        IpcRequest::ReloadConfig => match reload_coordinator.reload().await {
+            Ok(status) => IpcResponse::ConfigReloaded { status },
+            Err(error) => IpcResponse::Error {
+                message: format!("{error}"),
+            },
+        },
+
+        IpcRequest::SetShortcut { modifiers, key } => {
+            let key_binding = KeyBindingConfig {
+                modifiers: ModifiersConfig::Multiple(modifiers),
+                key,
+            };
+            match key_binding.to_shortcut() {
+                Ok(shortcut) => match reload_coordinator.set_shortcut(shortcut).await {
+                    Ok(status) => IpcResponse::ShortcutStatus { status },
+                    Err(error) => IpcResponse::Error {
+                        message: format!("{error}"),
+                    },
+                },
+                Err(error) => IpcResponse::Error {
+                    message: format!("{error}"),
+                },
+            }
+        }
+
+        IpcRequest::ConfigurePortalShortcut => match reload_coordinator.configure_portal().await {
+            Ok(status) => IpcResponse::ShortcutStatus { status },
+            Err(error) => IpcResponse::Error {
+                message: format!("{error}"),
+            },
+        },
+
+        IpcRequest::CopyText { text } => {
+            let mut clipboard = clipboard_service.lock().await;
+            match clipboard.write(pookie_clipboard::ClipboardContent::Text(text)) {
+                Ok(()) => IpcResponse::TextCopied,
+                Err(error) => {
+                    tracing::error!(error = %error, "failed to write text to clipboard");
+                    IpcResponse::Error {
+                        message: format!("failed to write text to clipboard: {error}"),
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -254,13 +351,26 @@ mod tests {
         ClipboardActivationService<FakeClipboardBackend, WaylandPasteBackend, FakeFocusBackend>,
         FakeClipboardBackend,
     ) {
+        let (activation_service, backend_handle, _) =
+            create_activation_service_with_state(history_service);
+        (activation_service, backend_handle)
+    }
+
+    fn create_activation_service_with_state(
+        history_service: Arc<ClipboardHistoryService>,
+    ) -> (
+        ClipboardActivationService<FakeClipboardBackend, WaylandPasteBackend, FakeFocusBackend>,
+        FakeClipboardBackend,
+        Arc<ClipboardState>,
+    ) {
         let backend = FakeClipboardBackend::new("");
 
         let backend_handle = backend.clone();
+        let state = Arc::new(ClipboardState::default());
 
         let clipboard_service = Arc::new(Mutex::new(ClipboardService::new(
             backend,
-            Arc::new(ClipboardState::default()),
+            Arc::clone(&state),
         )));
 
         let focus_service = FocusService::new(FakeFocusBackend);
@@ -272,7 +382,31 @@ mod tests {
             focus_service,
         );
 
-        (activation_service, backend_handle)
+        (activation_service, backend_handle, state)
+    }
+
+    fn create_test_shortcut_status() -> Arc<RwLock<ShortcutStatusInfo>> {
+        Arc::new(RwLock::new(ShortcutStatusInfo {
+            configured_shortcut: "Super+V".to_string(),
+            backend_name: Some("test-backend".to_string()),
+            capability: Some(ipc::IpcShortcutCapability::Native),
+            effective_shortcut: Some("Super+V".to_string()),
+            state: IpcShortcutState::Active {
+                description: "test active".to_string(),
+            },
+        }))
+    }
+
+    fn create_test_reload_coordinator(
+        status: Arc<RwLock<ShortcutStatusInfo>>,
+    ) -> Arc<ReloadCoordinator> {
+        let handle = crate::shortcut_listener::ShortcutReloadHandle::new_test_handle(status);
+        let dummy = std::path::PathBuf::from("/nonexistent/test/pookie/config.toml");
+        Arc::new(ReloadCoordinator::with_custom_paths(
+            handle,
+            dummy.clone(),
+            dummy,
+        ))
     }
 
     async fn handle_test_request<B, P, F>(
@@ -286,7 +420,18 @@ mod tests {
         F: FocusBackend,
     {
         let ui_launcher = UiLauncher::new();
-        handle_request(request, history_service, activation_service, &ui_launcher).await
+        let shortcut_status = create_test_shortcut_status();
+        let reload_coordinator = create_test_reload_coordinator(Arc::clone(&shortcut_status));
+        handle_request(
+            request,
+            history_service,
+            activation_service,
+            activation_service.clipboard_service().as_ref(),
+            &ui_launcher,
+            &shortcut_status,
+            &reload_coordinator,
+        )
+        .await
     }
 
     #[tokio::test]
@@ -706,14 +851,67 @@ mod tests {
         let ui_launcher = UiLauncher::new();
         ui_launcher.set_running_for_test(true);
 
+        let shortcut_status = create_test_shortcut_status();
+        let reload_coordinator = create_test_reload_coordinator(Arc::clone(&shortcut_status));
         let response = handle_request(
             IpcRequest::ToggleUi,
             service.as_ref(),
             &activation_service,
+            activation_service.clipboard_service().as_ref(),
             &ui_launcher,
+            &shortcut_status,
+            &reload_coordinator,
         )
         .await;
 
         assert_eq!(response, IpcResponse::UiToggled { launched: false });
+    }
+
+    #[tokio::test]
+    async fn handles_get_shortcut_status_request() {
+        let service = create_history_service().await;
+        let (activation_service, _backend_handle) = create_activation_service(Arc::clone(&service));
+
+        let response = handle_test_request(
+            IpcRequest::GetShortcutStatus,
+            service.as_ref(),
+            &activation_service,
+        )
+        .await;
+
+        match response {
+            IpcResponse::ShortcutStatus { status } => {
+                assert_eq!(status.configured_shortcut, "Super+V");
+                assert_eq!(status.backend_name.as_deref(), Some("test-backend"));
+                assert!(matches!(status.state, IpcShortcutState::Active { .. }));
+            }
+            other => panic!("unexpected response: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn handles_copy_text_request() {
+        let service = create_history_service().await;
+        let (activation_service, backend_handle, clipboard_state) =
+            create_activation_service_with_state(Arc::clone(&service));
+
+        let directive = "bindsym $mod+v exec pookie-paste".to_string();
+        let response = handle_test_request(
+            IpcRequest::CopyText {
+                text: directive.clone(),
+            },
+            service.as_ref(),
+            &activation_service,
+        )
+        .await;
+
+        assert_eq!(response, IpcResponse::TextCopied);
+
+        // Verify the platform backend was written with exact text
+        let written = backend_handle.read_content().expect("read backend failed");
+        assert_eq!(written, ClipboardContent::Text(directive.clone()));
+
+        // Verify it was marked as a self-write
+        assert!(clipboard_state.is_self_write(&ClipboardContent::Text(directive)));
     }
 }

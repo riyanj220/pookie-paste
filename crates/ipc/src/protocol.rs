@@ -284,6 +284,23 @@ pub enum IpcRequest {
     ClearHistory,
 
     ToggleUi,
+
+    GetShortcutStatus,
+
+    RecheckShortcutStatus,
+
+    ReloadConfig,
+
+    SetShortcut {
+        modifiers: Vec<String>,
+        key: String,
+    },
+
+    ConfigurePortalShortcut,
+
+    CopyText {
+        text: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -305,7 +322,68 @@ pub enum IpcResponse {
 
     UiToggled { launched: bool },
 
+    ShortcutStatus { status: ShortcutStatusInfo },
+
+    ConfigReloaded { status: ShortcutStatusInfo },
+
+    TextCopied,
+
     Error { message: String },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IpcShortcutCapability {
+    Native,
+    Portal,
+    CompositorManaged,
+    Unsupported,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IpcCompositorBindingStatus {
+    /// Binding exists in active compositor and target is verified as Pookie.
+    Verified,
+    /// Binding definitely exists, but its target cannot be verified (e.g. Hyprland __lua callback).
+    BoundUnverified,
+    /// No binding exists for the configured shortcut.
+    Unconfigured,
+    /// Binding exists and is known to target something else.
+    Conflict,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum IpcShortcutState {
+    Initializing,
+    Active {
+        description: String,
+    },
+    CompositorManaged {
+        binding_status: IpcCompositorBindingStatus,
+        snippet: String,
+        conflict: Option<String>,
+        diagnostic: Option<String>,
+    },
+    Conflict {
+        details: String,
+    },
+    Unavailable {
+        reason: String,
+    },
+    Failed {
+        error: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShortcutStatusInfo {
+    pub configured_shortcut: String,
+    pub backend_name: Option<String>,
+    pub capability: Option<IpcShortcutCapability>,
+    pub effective_shortcut: Option<String>,
+    pub state: IpcShortcutState,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -326,7 +404,7 @@ pub enum ActivationOutcome {
 mod tests {
     use super::{
         ActivationOutcome, HistoryContentRef, HistoryItem, HistoryItemError, IpcFocusTarget,
-        IpcRequest, IpcResponse,
+        IpcRequest, IpcResponse, IpcShortcutCapability, IpcShortcutState, ShortcutStatusInfo,
     };
 
     #[test]
@@ -666,10 +744,79 @@ mod tests {
     }
 
     #[test]
-    fn ui_toggled_response_round_trips() {
-        let response = IpcResponse::UiToggled { launched: true };
+    fn reload_config_request_round_trips() {
+        let request = IpcRequest::ReloadConfig;
+        let encoded = serde_json::to_string(&request).expect("serialization failed");
+        assert_eq!(encoded, r#"{"type":"reload_config"}"#);
+        let decoded: IpcRequest = serde_json::from_str(&encoded).expect("deserialization failed");
+        assert_eq!(decoded, request);
+    }
+
+    #[test]
+    fn config_reloaded_response_round_trips() {
+        let response = IpcResponse::ConfigReloaded {
+            status: ShortcutStatusInfo {
+                configured_shortcut: "Super+V".to_string(),
+                backend_name: Some("X11 global shortcut".to_string()),
+                capability: Some(IpcShortcutCapability::Native),
+                effective_shortcut: Some("Super+V".to_string()),
+                state: IpcShortcutState::Active {
+                    description: "X11 root window grab for Super+V".to_string(),
+                },
+            },
+        };
         let encoded = serde_json::to_string(&response).expect("serialization failed");
-        assert_eq!(encoded, r#"{"type":"ui_toggled","launched":true}"#);
+        assert!(encoded.contains(r#""type":"config_reloaded""#));
+        let decoded: IpcResponse = serde_json::from_str(&encoded).expect("deserialization failed");
+        assert_eq!(decoded, response);
+    }
+
+    #[test]
+    fn set_shortcut_request_round_trips() {
+        let request = IpcRequest::SetShortcut {
+            modifiers: vec!["Ctrl".to_string(), "Shift".to_string()],
+            key: "P".to_string(),
+        };
+        let encoded = serde_json::to_string(&request).expect("serialization failed");
+        assert!(encoded.contains(r#""type":"set_shortcut""#));
+        let decoded: IpcRequest = serde_json::from_str(&encoded).expect("deserialization failed");
+        assert_eq!(decoded, request);
+    }
+
+    #[test]
+    fn configure_portal_shortcut_request_round_trips() {
+        let request = IpcRequest::ConfigurePortalShortcut;
+        let encoded = serde_json::to_string(&request).expect("serialization failed");
+        assert_eq!(encoded, r#"{"type":"configure_portal_shortcut"}"#);
+        let decoded: IpcRequest = serde_json::from_str(&encoded).expect("deserialization failed");
+        assert_eq!(decoded, request);
+    }
+
+    #[test]
+    fn copy_text_request_round_trips() {
+        let request = IpcRequest::CopyText {
+            text: "bindsym $mod+v exec pookie".to_string(),
+        };
+        let encoded = serde_json::to_string(&request).expect("serialization failed");
+        assert!(encoded.contains(r#""type":"copy_text""#));
+        let decoded: IpcRequest = serde_json::from_str(&encoded).expect("deserialization failed");
+        assert_eq!(decoded, request);
+    }
+
+    #[test]
+    fn recheck_shortcut_status_request_round_trips() {
+        let request = IpcRequest::RecheckShortcutStatus;
+        let encoded = serde_json::to_string(&request).expect("serialization failed");
+        assert_eq!(encoded, r#"{"type":"recheck_shortcut_status"}"#);
+        let decoded: IpcRequest = serde_json::from_str(&encoded).expect("deserialization failed");
+        assert_eq!(decoded, request);
+    }
+
+    #[test]
+    fn text_copied_response_round_trips() {
+        let response = IpcResponse::TextCopied;
+        let encoded = serde_json::to_string(&response).expect("serialization failed");
+        assert_eq!(encoded, r#"{"type":"text_copied"}"#);
         let decoded: IpcResponse = serde_json::from_str(&encoded).expect("deserialization failed");
         assert_eq!(decoded, response);
     }

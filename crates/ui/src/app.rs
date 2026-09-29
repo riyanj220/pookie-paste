@@ -13,9 +13,17 @@ use crate::platform::{self, FocusRequestState};
 use crate::rows::{
     RowVisualState, render_history_item_row, render_state_message, render_status_message,
 };
+use crate::shortcut_view::{self, ShortcutViewState};
 use crate::theme::AppTheme;
 use crate::ui_style;
 use crate::{POPUP_HEIGHT, POPUP_WIDTH};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum ViewMode {
+    #[default]
+    History,
+    ShortcutSetup,
+}
 
 /*
  * Native X11 acquisition owns its own timeout and starts
@@ -29,7 +37,15 @@ const FALLBACK_FOCUS_ACQUISITION_TIMEOUT: Duration = Duration::from_millis(500);
 
 const FOCUS_RETRY_INTERVAL: Duration = Duration::from_millis(16);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PendingShortcutAction {
+    SaveShortcut,
+    ConfigurePortal,
+}
+
 pub(crate) struct PookieApp {
+    view_mode: ViewMode,
+
     history: HistoryState,
 
     history_receiver: Option<oneshot::Receiver<Result<Vec<ipc::HistoryItem>, String>>>,
@@ -37,6 +53,20 @@ pub(crate) struct PookieApp {
     selected_index: Option<usize>,
 
     image_thumbnails: ImageThumbnailCache,
+
+    shortcut_status: Option<ipc::ShortcutStatusInfo>,
+
+    shortcut_receiver: Option<oneshot::Receiver<Result<ipc::ShortcutStatusInfo, String>>>,
+
+    shortcut_action_receiver: Option<oneshot::Receiver<Result<ipc::ShortcutStatusInfo, String>>>,
+
+    shortcut_action_in_progress: bool,
+
+    pending_shortcut_action: Option<PendingShortcutAction>,
+
+    last_shortcut_poll: Instant,
+
+    shortcut_view_state: ShortcutViewState,
 
     /*
      * Non-X11 fallback only.
@@ -80,6 +110,7 @@ impl PookieApp {
          * This keeps background-to-UI communication event-driven
          * and avoids continuous polling.
          */
+        let history_repaint_ctx = repaint_context.clone();
         std::thread::spawn(move || {
             let runtime =
                 tokio::runtime::Runtime::new().expect("failed to create UI Tokio runtime");
@@ -87,11 +118,26 @@ impl PookieApp {
             let result = runtime.block_on(ipc_client::get_history());
 
             if sender.send(result).is_ok() {
-                repaint_context.request_repaint();
+                history_repaint_ctx.request_repaint();
+            }
+        });
+
+        let (shortcut_tx, shortcut_rx) = oneshot::channel();
+        let shortcut_repaint_ctx = repaint_context.clone();
+        std::thread::spawn(move || {
+            let runtime =
+                tokio::runtime::Runtime::new().expect("failed to create UI Tokio runtime");
+
+            let result = runtime.block_on(ipc_client::get_shortcut_status());
+
+            if shortcut_tx.send(result).is_ok() {
+                shortcut_repaint_ctx.request_repaint();
             }
         });
 
         Self {
+            view_mode: ViewMode::History,
+
             history: HistoryState::Loading,
 
             history_receiver: Some(receiver),
@@ -99,6 +145,20 @@ impl PookieApp {
             selected_index: None,
 
             image_thumbnails: ImageThumbnailCache::new(),
+
+            shortcut_status: None,
+
+            shortcut_receiver: Some(shortcut_rx),
+
+            shortcut_action_receiver: None,
+
+            shortcut_action_in_progress: false,
+
+            pending_shortcut_action: None,
+
+            last_shortcut_poll: Instant::now(),
+
+            shortcut_view_state: ShortcutViewState::default(),
 
             fallback_focus_started_at: Instant::now(),
 
@@ -570,6 +630,257 @@ impl PookieApp {
             }
         }
     }
+
+    fn apply_shortcut_status_update(&mut self, new_status: ipc::ShortcutStatusInfo) {
+        if let Some(ref current) = self.shortcut_status {
+            let effective_changed =
+                match (&current.effective_shortcut, &new_status.effective_shortcut) {
+                    (Some(old), Some(new)) => old != new,
+                    (None, Some(_)) => true,
+                    _ => false,
+                };
+            if effective_changed {
+                if let Some(ref new_effective) = new_status.effective_shortcut {
+                    self.shortcut_view_state.success_message =
+                        Some(format!("Shortcut updated to {new_effective}!"));
+                } else {
+                    self.shortcut_view_state.success_message =
+                        Some("Shortcut updated successfully!".to_string());
+                }
+            }
+        }
+        self.shortcut_status = Some(new_status);
+    }
+
+    fn poll_shortcut_status(&mut self) {
+        if let Some(receiver) = self.shortcut_receiver.as_mut() {
+            match receiver.try_recv() {
+                Ok(result) => {
+                    self.shortcut_receiver = None;
+                    match result {
+                        Ok(status) => {
+                            self.apply_shortcut_status_update(status);
+                        }
+                        Err(err) => {
+                            tracing::warn!(error = %err, "failed to get shortcut status");
+                        }
+                    }
+                }
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {}
+                Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+                    self.shortcut_receiver = None;
+                }
+            }
+        }
+
+        if let Some(receiver) = self.shortcut_action_receiver.as_mut() {
+            match receiver.try_recv() {
+                Ok(result) => {
+                    self.shortcut_action_receiver = None;
+                    self.shortcut_action_in_progress = false;
+                    let action = self.pending_shortcut_action.take();
+                    match result {
+                        Ok(status) => {
+                            self.shortcut_view_state.candidate = None;
+                            self.shortcut_view_state.is_recording = false;
+                            self.shortcut_view_state.error_message = None;
+                            match action {
+                                Some(PendingShortcutAction::SaveShortcut) => {
+                                    self.shortcut_view_state.success_message =
+                                        Some("Shortcut updated.".to_string());
+                                }
+                                Some(PendingShortcutAction::ConfigurePortal) => {
+                                    // Portal configuration dialog was successfully requested.
+                                    // The shortcut value itself has not changed yet at this point.
+                                    self.shortcut_view_state.success_message = None;
+                                }
+                                None => {}
+                            }
+                            self.apply_shortcut_status_update(status);
+                        }
+                        Err(err) => {
+                            self.shortcut_view_state.error_message = Some(err);
+                            self.shortcut_view_state.success_message = None;
+                        }
+                    }
+                }
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {}
+                Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+                    self.shortcut_action_receiver = None;
+                    self.shortcut_action_in_progress = false;
+                    self.pending_shortcut_action = None;
+                }
+            }
+        }
+    }
+
+    fn start_save_shortcut(&mut self, ctx: &egui::Context, modifiers: Vec<String>, key: String) {
+        if self.shortcut_action_in_progress {
+            return;
+        }
+        self.shortcut_action_in_progress = true;
+        self.pending_shortcut_action = Some(PendingShortcutAction::SaveShortcut);
+        self.shortcut_view_state.error_message = None;
+        self.shortcut_view_state.success_message = None;
+
+        let (sender, receiver) = oneshot::channel();
+        let repaint_context = ctx.clone();
+
+        std::thread::spawn(move || {
+            let runtime =
+                tokio::runtime::Runtime::new().expect("failed to create UI Tokio runtime");
+            let result = runtime.block_on(ipc_client::set_shortcut(modifiers, key));
+            if sender.send(result).is_ok() {
+                repaint_context.request_repaint();
+            }
+        });
+
+        self.shortcut_action_receiver = Some(receiver);
+    }
+
+    fn start_configure_portal(&mut self, ctx: &egui::Context) {
+        if self.shortcut_action_in_progress {
+            return;
+        }
+        self.shortcut_action_in_progress = true;
+        self.pending_shortcut_action = Some(PendingShortcutAction::ConfigurePortal);
+        self.shortcut_view_state.error_message = None;
+        self.shortcut_view_state.success_message = None;
+
+        let (sender, receiver) = oneshot::channel();
+        let repaint_context = ctx.clone();
+
+        std::thread::spawn(move || {
+            let runtime =
+                tokio::runtime::Runtime::new().expect("failed to create UI Tokio runtime");
+            let result = runtime.block_on(ipc_client::configure_portal_shortcut());
+            if sender.send(result).is_ok() {
+                repaint_context.request_repaint();
+            }
+        });
+
+        self.shortcut_action_receiver = Some(receiver);
+    }
+
+    fn start_recheck_shortcut_status(&mut self, ctx: &egui::Context) {
+        if self.shortcut_receiver.is_some() || self.shortcut_action_in_progress {
+            return;
+        }
+        self.shortcut_view_state.error_message = None;
+
+        let (sender, receiver) = oneshot::channel();
+        let repaint_context = ctx.clone();
+
+        std::thread::spawn(move || {
+            let runtime =
+                tokio::runtime::Runtime::new().expect("failed to create UI Tokio runtime");
+            let result = runtime.block_on(ipc_client::recheck_shortcut_status());
+            if sender.send(result).is_ok() {
+                repaint_context.request_repaint();
+            }
+        });
+
+        self.shortcut_receiver = Some(receiver);
+    }
+
+    fn start_poll_shortcut_status(&mut self, ctx: &egui::Context) {
+        if self.shortcut_receiver.is_some() || self.shortcut_action_in_progress {
+            return;
+        }
+        self.last_shortcut_poll = Instant::now();
+
+        let (sender, receiver) = oneshot::channel();
+        let repaint_context = ctx.clone();
+
+        let needs_active_recheck = match &self.shortcut_status {
+            Some(status) => {
+                status.capability == Some(ipc::IpcShortcutCapability::CompositorManaged)
+                    && matches!(
+                        status.state,
+                        ipc::IpcShortcutState::CompositorManaged {
+                            binding_status: ipc::IpcCompositorBindingStatus::Unconfigured
+                                | ipc::IpcCompositorBindingStatus::Conflict,
+                            ..
+                        }
+                    )
+            }
+            None => false,
+        };
+
+        std::thread::spawn(move || {
+            let runtime =
+                tokio::runtime::Runtime::new().expect("failed to create UI Tokio runtime");
+            let result = if needs_active_recheck {
+                runtime.block_on(ipc_client::recheck_shortcut_status())
+            } else {
+                runtime.block_on(ipc_client::get_shortcut_status())
+            };
+            if sender.send(result).is_ok() {
+                repaint_context.request_repaint();
+            }
+        });
+
+        self.shortcut_receiver = Some(receiver);
+    }
+
+    fn start_copy_text(&mut self, ctx: &egui::Context, text: String) {
+        let repaint_context = ctx.clone();
+        std::thread::spawn(move || {
+            let runtime =
+                tokio::runtime::Runtime::new().expect("failed to create UI Tokio runtime");
+            if let Err(err) = runtime.block_on(ipc_client::copy_text(text)) {
+                tracing::warn!(error = %err, "failed to copy text via daemon");
+            }
+            repaint_context.request_repaint();
+        });
+    }
+
+    fn start_open_config(&mut self) {
+        match shortcut_view::resolve_compositor_config_path(self.shortcut_status.as_ref()) {
+            Ok(path) => {
+                let display_path = shortcut_view::format_config_path_for_display(&path);
+                match std::process::Command::new("xdg-open").arg(&path).spawn() {
+                    Ok(_) => {
+                        self.shortcut_view_state.error_message = None;
+                    }
+                    Err(err) => {
+                        tracing::warn!(error = %err, path = %path.display(), "failed to open compositor config");
+                        self.shortcut_view_state.error_message = Some(format!(
+                            "Could not open config automatically.\n{display_path}"
+                        ));
+                    }
+                }
+            }
+            Err(err) => {
+                self.shortcut_view_state.error_message = Some(err);
+            }
+        }
+    }
+
+    fn start_reload_sway(&mut self, ctx: &egui::Context) {
+        match std::process::Command::new("swaymsg").arg("reload").output() {
+            Ok(output) if output.status.success() => {
+                self.shortcut_view_state.error_message = None;
+                self.start_recheck_shortcut_status(ctx);
+            }
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                let msg = if stderr.trim().is_empty() {
+                    format!(
+                        "swaymsg reload failed with exit code {:?}",
+                        output.status.code()
+                    )
+                } else {
+                    format!("swaymsg reload failed: {}", stderr.trim())
+                };
+                self.shortcut_view_state.error_message = Some(msg);
+            }
+            Err(err) => {
+                self.shortcut_view_state.error_message =
+                    Some(format!("Failed to execute swaymsg: {err}"));
+            }
+        }
+    }
 }
 
 impl eframe::App for PookieApp {
@@ -585,6 +896,8 @@ impl eframe::App for PookieApp {
         self.poll_activation(ui.ctx());
 
         self.poll_action(ui.ctx());
+
+        self.poll_shortcut_status();
 
         let viewport_focused = ui.input(|input| input.viewport().focused.unwrap_or(false));
 
@@ -607,24 +920,38 @@ impl eframe::App for PookieApp {
                 return;
             }
 
+            if self.view_mode == ViewMode::ShortcutSetup {
+                if self.shortcut_view_state.is_recording {
+                    self.shortcut_view_state.is_recording = false;
+                    self.shortcut_view_state.candidate = None;
+                } else {
+                    self.view_mode = ViewMode::History;
+                }
+
+                return;
+            }
+
             ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
 
             return;
         }
 
-        let move_up = ui.input(|input| input.key_pressed(egui::Key::ArrowUp));
+        let mut keyboard_selection_changed = false;
+        if self.view_mode == ViewMode::History {
+            let move_up = ui.input(|input| input.key_pressed(egui::Key::ArrowUp));
 
-        let move_down = ui.input(|input| input.key_pressed(egui::Key::ArrowDown));
+            let move_down = ui.input(|input| input.key_pressed(egui::Key::ArrowDown));
 
-        let activate = ui.input(|input| input.key_pressed(egui::Key::Enter));
+            let activate = ui.input(|input| input.key_pressed(egui::Key::Enter));
 
-        let keyboard_selection_changed = self.handle_keyboard_navigation(move_up, move_down);
+            keyboard_selection_changed = self.handle_keyboard_navigation(move_up, move_down);
 
-        if activate {
-            if self.active_menu.is_some() {
-                self.active_menu = None;
-            } else {
-                self.start_selected_activation(ui.ctx());
+            if activate {
+                if self.active_menu.is_some() {
+                    self.active_menu = None;
+                } else {
+                    self.start_selected_activation(ui.ctx());
+                }
             }
         }
 
@@ -639,7 +966,13 @@ impl eframe::App for PookieApp {
             _ => false,
         };
 
-        let header_response = render_header(ui, palette, has_items && !self.action_in_progress);
+        let in_settings = self.view_mode == ViewMode::ShortcutSetup;
+        let header_response = render_header(
+            ui,
+            palette,
+            has_items && !self.action_in_progress,
+            in_settings,
+        );
 
         if header_response.close_clicked {
             ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
@@ -647,12 +980,74 @@ impl eframe::App for PookieApp {
             return;
         }
 
+        if header_response.settings_clicked {
+            if self.view_mode == ViewMode::History {
+                self.view_mode = ViewMode::ShortcutSetup;
+                self.shortcut_view_state.error_message = None;
+                self.shortcut_view_state.success_message = None;
+                self.last_shortcut_poll = Instant::now();
+            } else {
+                self.view_mode = ViewMode::History;
+            }
+        }
+
         if header_response.clear_clicked {
             self.start_clear_history(ui.ctx());
         }
 
+        if self.view_mode == ViewMode::ShortcutSetup {
+            if !self.shortcut_view_state.is_recording
+                && self.shortcut_receiver.is_none()
+                && !self.shortcut_action_in_progress
+                && self.last_shortcut_poll.elapsed() >= std::time::Duration::from_millis(1500)
+            {
+                self.start_poll_shortcut_status(ui.ctx());
+            }
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(1500));
+
+            let action = shortcut_view::render_shortcut_setup(
+                ui,
+                &mut self.shortcut_view_state,
+                self.shortcut_status.as_ref(),
+                palette,
+            );
+
+            match action {
+                shortcut_view::ShortcutViewAction::None => {}
+                shortcut_view::ShortcutViewAction::SwitchToHistory => {
+                    self.view_mode = ViewMode::History;
+                }
+                shortcut_view::ShortcutViewAction::SaveShortcut { modifiers, key } => {
+                    self.start_save_shortcut(ui.ctx(), modifiers, key);
+                }
+                shortcut_view::ShortcutViewAction::ConfigurePortal => {
+                    self.start_configure_portal(ui.ctx());
+                }
+                shortcut_view::ShortcutViewAction::RecheckStatus => {
+                    self.start_recheck_shortcut_status(ui.ctx());
+                }
+                shortcut_view::ShortcutViewAction::CopySnippet(text) => {
+                    self.start_copy_text(ui.ctx(), text);
+                }
+                shortcut_view::ShortcutViewAction::OpenConfig => {
+                    self.start_open_config();
+                }
+                shortcut_view::ShortcutViewAction::ReloadSway => {
+                    self.start_reload_sway(ui.ctx());
+                }
+            }
+
+            return;
+        }
+
         if let Some(message) = &self.status_message {
             render_status_message(ui, message, palette);
+        }
+
+        if shortcut_view::render_attention_banner(ui, self.shortcut_status.as_ref(), palette) {
+            self.view_mode = ViewMode::ShortcutSetup;
+            return;
         }
 
         let mut clicked_index = None;

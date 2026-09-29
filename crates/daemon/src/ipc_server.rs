@@ -1,21 +1,22 @@
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use daemon::activation_service::ClipboardActivationService;
 use daemon::focus_backend::FocusBackend;
 use daemon::paste_backend::PasteBackend;
+use daemon::reload_coordinator::ReloadCoordinator;
 use daemon::request_handler::handle_request;
 use daemon::ui_launcher::UiLauncher;
 
 use history::ClipboardHistoryService;
 
-use ipc::{IpcConnection, IpcServer, ServerError, socket_path};
+use ipc::{IpcConnection, IpcServer, ServerError, ShortcutStatusInfo, socket_path};
 
 use pookie_clipboard::ClipboardBackend;
 
 use tokio::time::timeout;
 
-use tracing::{error, info};
+use tracing::{debug, error, info};
 
 const IPC_READ_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -52,6 +53,8 @@ pub async fn run<B, P, F>(
     history_service: Arc<ClipboardHistoryService>,
     activation_service: Arc<ClipboardActivationService<B, P, F>>,
     ui_launcher: Arc<UiLauncher>,
+    shortcut_status: Arc<RwLock<ShortcutStatusInfo>>,
+    reload_coordinator: Arc<ReloadCoordinator>,
 ) -> anyhow::Result<()>
 where
     B: ClipboardBackend + Send + Sync + 'static,
@@ -75,8 +78,20 @@ where
 
         let ui_launcher = Arc::clone(&ui_launcher);
 
+        let shortcut_status = Arc::clone(&shortcut_status);
+
+        let reload_coordinator = Arc::clone(&reload_coordinator);
+
         tokio::spawn(async move {
-            handle_connection(connection, history_service, activation_service, ui_launcher).await;
+            handle_connection(
+                connection,
+                history_service,
+                activation_service,
+                ui_launcher,
+                shortcut_status,
+                reload_coordinator,
+            )
+            .await;
         });
     }
 }
@@ -86,6 +101,8 @@ async fn handle_connection<B, P, F>(
     history_service: Arc<ClipboardHistoryService>,
     activation_service: Arc<ClipboardActivationService<B, P, F>>,
     ui_launcher: Arc<UiLauncher>,
+    shortcut_status: Arc<RwLock<ShortcutStatusInfo>>,
+    reload_coordinator: Arc<ReloadCoordinator>,
 ) where
     B: ClipboardBackend + Send + Sync + 'static,
     P: PasteBackend + Send + Sync + 'static,
@@ -96,6 +113,8 @@ async fn handle_connection<B, P, F>(
         history_service,
         activation_service,
         ui_launcher,
+        shortcut_status,
+        reload_coordinator,
         IPC_READ_TIMEOUT,
     )
     .await;
@@ -106,6 +125,8 @@ async fn handle_connection_with_timeout<B, P, F>(
     history_service: Arc<ClipboardHistoryService>,
     activation_service: Arc<ClipboardActivationService<B, P, F>>,
     ui_launcher: Arc<UiLauncher>,
+    shortcut_status: Arc<RwLock<ShortcutStatusInfo>>,
+    reload_coordinator: Arc<ReloadCoordinator>,
     read_timeout: Duration,
 ) where
     B: ClipboardBackend + Send + Sync + 'static,
@@ -137,12 +158,29 @@ async fn handle_connection_with_timeout<B, P, F>(
             request,
             history_service.as_ref(),
             activation_service.as_ref(),
+            activation_service.clipboard_service().as_ref(),
             ui_launcher.as_ref(),
+            &shortcut_status,
+            &reload_coordinator,
         )
         .await;
 
         if let Err(error) = connection.send_response(&response).await {
-            error!("failed to send IPC response: {:?}", error);
+            match &error {
+                ServerError::Io(io_err)
+                    if matches!(
+                        io_err.kind(),
+                        std::io::ErrorKind::BrokenPipe
+                            | std::io::ErrorKind::ConnectionReset
+                            | std::io::ErrorKind::ConnectionAborted
+                    ) =>
+                {
+                    debug!("client disconnected before IPC response could be sent: {io_err}");
+                }
+                _ => {
+                    error!("failed to send IPC response: {:?}", error);
+                }
+            }
 
             break;
         }
@@ -274,12 +312,30 @@ mod tests {
         let connection_task = tokio::spawn(async move {
             let connection = server.accept().await.expect("accept failed");
             let ui_launcher = Arc::new(UiLauncher::new());
+            let shortcut_status = Arc::new(RwLock::new(ShortcutStatusInfo {
+                configured_shortcut: "Super+V".to_string(),
+                backend_name: None,
+                capability: None,
+                effective_shortcut: None,
+                state: ipc::IpcShortcutState::Initializing,
+            }));
+            let reload_handle = daemon::shortcut_listener::ShortcutReloadHandle::new_test_handle(
+                Arc::clone(&shortcut_status),
+            );
+            let dummy = std::path::PathBuf::from("/nonexistent/test/pookie/config.toml");
+            let reload_coordinator = Arc::new(ReloadCoordinator::with_custom_paths(
+                reload_handle,
+                dummy.clone(),
+                dummy,
+            ));
 
             handle_connection_with_timeout(
                 connection,
                 service,
                 activation,
                 ui_launcher,
+                shortcut_status,
+                reload_coordinator,
                 Duration::from_millis(50),
             )
             .await;

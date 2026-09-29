@@ -32,9 +32,12 @@ use daemon::shortcut_listener::ShortcutListener;
 
 use daemon::ui_launcher::{UiLaunchOutcome, UiLauncher};
 
+use daemon::app_paths;
+
 use daemon::clipboard_watcher;
 
-use daemon::app_paths;
+use daemon::reload_coordinator::ReloadCoordinator;
+use daemon::shortcut_config::ShortcutConfig;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -132,7 +135,13 @@ async fn main() -> anyhow::Result<()> {
 
     let focus_service = FocusService::new(focus_backend);
 
+    if let Err(err) = ShortcutConfig::ensure_config_file_exists() {
+        warn!(error = %err, "could not bootstrap configuration file");
+    }
+
     let mut shortcut_listener = ShortcutListener::start();
+    let reload_handle = shortcut_listener.reload_handle();
+    let reload_coordinator = Arc::new(ReloadCoordinator::new(reload_handle));
 
     let mut shortcut_available = true;
 
@@ -147,14 +156,20 @@ async fn main() -> anyhow::Result<()> {
 
     let processor = ClipboardProcessor::new();
 
+    let shortcut_status = shortcut_listener.status_handle();
+
     let ipc_future = ipc_server::run(
         ipc_listener,
         Arc::clone(&history_service),
         Arc::clone(&activation_service),
         Arc::clone(&ui_launcher),
+        shortcut_status,
+        Arc::clone(&reload_coordinator),
     );
 
     tokio::pin!(ipc_future);
+
+    let mut sighup = shutdown::SighupListener::new()?;
 
     info!("Pookie daemon running");
 
@@ -226,6 +241,25 @@ async fn main() -> anyhow::Result<()> {
                         );
 
                         break;
+                    }
+                }
+            }
+
+            Some(()) = sighup.recv() => {
+                info!("SIGHUP received; initiating configuration reload");
+                match reload_coordinator.reload().await {
+                    Ok(status) => {
+                        info!(
+                            configured_shortcut = %status.configured_shortcut,
+                            effective_shortcut = ?status.effective_shortcut,
+                            "configuration and shortcut reloaded successfully via SIGHUP"
+                        );
+                    }
+                    Err(error) => {
+                        warn!(
+                            error = %error,
+                            "configuration reload via SIGHUP failed; current runtime shortcut and active bindings have been preserved"
+                        );
                     }
                 }
             }

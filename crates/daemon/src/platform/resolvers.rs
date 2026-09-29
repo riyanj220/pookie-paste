@@ -9,6 +9,7 @@ use super::environment::{DesktopKind, EnvironmentAudit, SessionKind};
 use crate::clipboard_backend::PlatformClipboard;
 use crate::focus_backend::{FocusError, UnavailableFocusBackend};
 use crate::hyprland_focus_backend::HyprlandFocusBackend;
+use crate::hyprland_shortcut_backend::HyprlandShortcutBackend;
 use crate::kde_focus_backend::KdeFocusBackend;
 use crate::paste_backend::{PasteError, PlatformPasteBackend, WaylandPasteBackend};
 use crate::platform_focus_backend::PlatformFocusBackend;
@@ -16,6 +17,7 @@ use crate::platform_shortcut_backend::PlatformShortcutBackend;
 use crate::portal_eis_paste_backend::PortalEisPasteBackend;
 use crate::shortcut_backend::ShortcutError;
 use crate::sway_focus_backend::SwayFocusBackend;
+use crate::sway_shortcut_backend::SwayShortcutBackend;
 use crate::wayland_shortcut_backend::WaylandShortcutBackend;
 use crate::wlroots_paste_backend::WlrootsPasteBackend;
 use crate::x11_focus_backend::X11FocusBackend;
@@ -156,10 +158,88 @@ pub fn resolve_shortcut_backend(
             X11ShortcutBackend::new()?,
         ))),
 
-        SessionKind::Wayland => Ok(PlatformShortcutBackend::Wayland(Box::new(
-            WaylandShortcutBackend::new()?,
-        ))),
+        SessionKind::Wayland => match audit.desktop {
+            DesktopKind::Kde => Ok(PlatformShortcutBackend::Wayland(Box::new(
+                WaylandShortcutBackend::new()?,
+            ))),
+            _ => {
+                if is_sway_environment(audit) {
+                    match SwayShortcutBackend::new() {
+                        Ok(backend) => Ok(PlatformShortcutBackend::Sway(Box::new(backend))),
+                        Err(err) => {
+                            tracing::warn!(
+                                error = ?err,
+                                "Sway shortcut backend unavailable; using portal fallback"
+                            );
+                            Ok(PlatformShortcutBackend::Wayland(Box::new(
+                                WaylandShortcutBackend::new()?,
+                            )))
+                        }
+                    }
+                } else if is_hyprland_environment(audit) {
+                    match HyprlandShortcutBackend::new() {
+                        Ok(backend) => Ok(PlatformShortcutBackend::Hyprland(Box::new(backend))),
+                        Err(err) => {
+                            tracing::warn!(
+                                error = ?err,
+                                "Hyprland shortcut backend unavailable; using portal fallback"
+                            );
+                            Ok(PlatformShortcutBackend::Wayland(Box::new(
+                                WaylandShortcutBackend::new()?,
+                            )))
+                        }
+                    }
+                } else {
+                    Ok(PlatformShortcutBackend::Wayland(Box::new(
+                        WaylandShortcutBackend::new()?,
+                    )))
+                }
+            }
+        },
 
         SessionKind::Unknown => Ok(PlatformShortcutBackend::Unavailable),
     }
+}
+
+fn is_sway_environment(audit: &EnvironmentAudit) -> bool {
+    let desktop_indicates_sway = audit
+        .raw_desktop
+        .to_ascii_lowercase()
+        .split([':', ';'])
+        .any(|p| p.trim() == "sway");
+
+    let swaysock_valid = std::env::var_os("SWAYSOCK")
+        .map(std::path::PathBuf::from)
+        .map(|p| p.exists())
+        .unwrap_or(false);
+
+    desktop_indicates_sway || swaysock_valid
+}
+
+fn is_hyprland_environment(audit: &EnvironmentAudit) -> bool {
+    let desktop_indicates_hyprland = audit
+        .raw_desktop
+        .to_ascii_lowercase()
+        .split([':', ';'])
+        .any(|p| p.trim() == "hyprland");
+
+    let hyprland_instance_valid = std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE")
+        .map(|sig| {
+            if let Some(xdg) = std::env::var_os("XDG_RUNTIME_DIR") {
+                let candidate = std::path::PathBuf::from(xdg)
+                    .join("hypr")
+                    .join(&sig)
+                    .join(".socket.sock");
+                if candidate.exists() {
+                    return true;
+                }
+            }
+            let fallback = std::path::PathBuf::from("/tmp/hypr")
+                .join(sig)
+                .join(".socket.sock");
+            fallback.exists()
+        })
+        .unwrap_or(false);
+
+    desktop_indicates_hyprland || hyprland_instance_valid
 }

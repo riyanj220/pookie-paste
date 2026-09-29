@@ -32,6 +32,8 @@ pub struct WaylandState {
     pub clipboard_requested: bool,
 
     pub has_selection: bool,
+
+    pub connection: Connection,
 }
 
 impl WaylandState {
@@ -62,83 +64,110 @@ impl WaylandState {
 
     fn request_content(&mut self) {
         if self.clipboard_requested {
+            tracing::debug!("clipboard request already sent");
+
             return;
         }
 
         let Some(offer) = self.current_offer.as_ref() else {
+            tracing::debug!("request_content: no current offer");
+
             return;
         };
 
-        let Some(preferred) = mime::preferred_content_mime(&self.offered_mime_types) else {
+        let candidates = mime::candidate_content_mimes(&self.offered_mime_types);
+        if candidates.is_empty() {
             tracing::debug!(
                 offered = ?self.offered_mime_types,
                 "no supported WLR clipboard MIME"
             );
 
             return;
-        };
-
-        let requested_mime = preferred.mime_type.to_string();
-
-        let kind = preferred.kind;
-
-        tracing::debug!(
-            mime = %requested_mime,
-            kind = ?kind,
-            "requesting WLR clipboard data"
-        );
-
-        let (read_fd, write_fd) = match nix::unistd::pipe() {
-            Ok(pipe) => pipe,
-
-            Err(error) => {
-                tracing::error!(
-                    error = %error,
-                    "failed creating WLR clipboard pipe"
-                );
-
-                return;
-            }
-        };
-
-        offer.receive(requested_mime.clone(), write_fd.as_fd());
-
-        drop(write_fd);
+        }
 
         self.clipboard_requested = true;
 
+        let offer = offer.clone();
+        let connection = self.connection.clone();
         let sender = self.sender.clone();
+        let candidates: Vec<(String, mime::ClipboardMimeKind)> = candidates
+            .into_iter()
+            .map(|c| (c.mime_type.to_string(), c.kind))
+            .collect();
 
         std::thread::spawn(move || {
-            match clipboard_reader::read_clipboard_fd(read_fd, &requested_mime, kind) {
-                Ok(content) => {
-                    match &content {
-                        crate::ClipboardContent::Text(text) => {
-                            tracing::debug!(
-                                length = text.len(),
-                                mime = %requested_mime,
-                                "Wayland WLR clipboard text received"
-                            );
+            let total = candidates.len();
+            for (idx, (requested_mime, kind)) in candidates.iter().enumerate() {
+                let is_last = idx + 1 == total;
+
+                let (read_fd, write_fd) = match nix::unistd::pipe() {
+                    Ok(pipe) => pipe,
+
+                    Err(error) => {
+                        tracing::error!(
+                            error = %error,
+                            "failed creating WLR clipboard pipe"
+                        );
+
+                        return;
+                    }
+                };
+
+                offer.receive(requested_mime.clone(), write_fd.as_fd());
+
+                drop(write_fd);
+
+                let _ = connection.flush();
+
+                match clipboard_reader::read_clipboard_fd(read_fd, requested_mime, *kind) {
+                    Ok(content) => {
+                        match &content {
+                            crate::ClipboardContent::Text(text) => {
+                                tracing::debug!(
+                                    length = text.len(),
+                                    mime = %requested_mime,
+                                    "Wayland WLR clipboard text received"
+                                );
+                            }
+
+                            crate::ClipboardContent::Image(image) => {
+                                tracing::debug!(
+                                    encoded_bytes = image.len(),
+                                    mime = %requested_mime,
+                                    "Wayland WLR clipboard image received"
+                                );
+                            }
                         }
 
-                        crate::ClipboardContent::Image(image) => {
-                            tracing::debug!(
-                                encoded_bytes = image.len(),
-                                mime = %requested_mime,
-                                "Wayland WLR clipboard image received"
-                            );
-                        }
+                        clipboard_reader::send_clipboard_event(sender, content);
+                        return;
                     }
 
-                    clipboard_reader::send_clipboard_event(sender, content);
-                }
-
-                Err(error) => {
-                    tracing::error!(
-                        error = %error,
-                        mime = %requested_mime,
-                        "failed reading WLR clipboard payload"
-                    );
+                    Err(error) => {
+                        if error == "clipboard payload is empty" {
+                            if !is_last {
+                                tracing::debug!(
+                                    mime = %requested_mime,
+                                    "WLR clipboard payload is empty for candidate MIME; trying fallback representation"
+                                );
+                                continue;
+                            } else {
+                                tracing::warn!(
+                                    mime = %requested_mime,
+                                    "all compatible WLR clipboard MIME candidates yielded empty payload"
+                                );
+                            }
+                        } else {
+                            tracing::error!(
+                                error = %error,
+                                mime = %requested_mime,
+                                "failed reading WLR clipboard payload"
+                            );
+                            if !is_last {
+                                continue;
+                            }
+                        }
+                    }
                 }
             }
         });
@@ -216,11 +245,13 @@ impl Dispatch<zwlr_data_control_device_v1::ZwlrDataControlDeviceV1, ()> for Wayl
                         state.has_selection = true;
 
                         /*
-                         * Handles:
+                         * wlr-data-control-unstable-v1 guarantees that DataOffer
+                         * and all associated Offer MIME events are delivered
+                         * immediately before this Selection event.
                          *
-                         * DataOffer
-                         * -> Offer MIME(s)
-                         * -> Selection
+                         * The Selection event is the authoritative completion
+                         * delimiter signalling that the full set of candidate
+                         * MIMEs is available.
                          */
                         if !state.offered_mime_types.is_empty() {
                             state.request_content();
@@ -271,17 +302,12 @@ impl Dispatch<zwlr_data_control_offer_v1::ZwlrDataControlOfferV1, ()> for Waylan
                     if !state.offered_mime_types.contains(&mime_type) {
                         state.offered_mime_types.push(mime_type);
                     }
-
                     /*
-                     * Handles:
-                     *
-                     * DataOffer
-                     * -> Selection
-                     * -> Offer MIME(s)
+                     * Note: Wayland protocol (wlr-data-control-unstable-v1) guarantees
+                     * that all Offer MIME events are delivered before the
+                     * corresponding Selection event. MIME types are accumulated
+                     * here, and content is requested once Selection arrives.
                      */
-                    if state.has_selection {
-                        state.request_content();
-                    }
                 }
             }
 

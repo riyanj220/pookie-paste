@@ -13,7 +13,8 @@ use zbus::{
 };
 
 use crate::shortcut_backend::{
-    Shortcut, ShortcutActivation, ShortcutBackend, ShortcutError, ShortcutKey,
+    BackendEvent, Shortcut, ShortcutActivation, ShortcutBackend, ShortcutBackendCapability,
+    ShortcutError, ShortcutKey, ShortcutRegistrationOutcome,
 };
 
 const PORTAL_DESTINATION: &str = "org.freedesktop.portal.Desktop";
@@ -47,6 +48,9 @@ const CREATE_SESSION_TIMEOUT: Duration = Duration::from_secs(15);
 const BIND_SHORTCUTS_TIMEOUT: Duration = Duration::from_secs(120);
 
 type ActivationResult = Result<ShortcutActivation, ShortcutError>;
+
+pub type RawShortcutsPayload = Vec<(String, HashMap<String, OwnedValue>)>;
+type ShortcutsChangedBody = (OwnedObjectPath, RawShortcutsPayload);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WaylandShortcutCapability {
@@ -91,7 +95,15 @@ pub struct WaylandShortcutBackend {
 
     activation_receiver: Option<Receiver<ActivationResult>>,
 
+    wake_sender: Option<Sender<ActivationResult>>,
+
+    event_sender: Option<Sender<BackendEvent>>,
+
+    changed_listener_started: bool,
+
     registered: bool,
+
+    effective_trigger: Option<String>,
 }
 
 /*
@@ -217,6 +229,97 @@ impl WaylandShortcutSession {
             preferred_trigger,
         )
         .await
+    }
+
+    pub async fn list_shortcuts(&self) -> Result<Vec<BoundShortcut>, ShortcutError> {
+        list_shortcuts(&self.connection, &self.session_handle.as_ref()).await
+    }
+
+    pub async fn configure_shortcuts(&self, parent_window: &str) -> Result<(), ShortcutError> {
+        configure_shortcuts(
+            &self.connection,
+            &self.session_handle.as_ref(),
+            parent_window,
+        )
+        .await
+    }
+
+    pub async fn run_shortcuts_changed_loop(
+        &self,
+        event_sender: Sender<BackendEvent>,
+        wake_sender: Sender<ActivationResult>,
+    ) -> Result<(), ShortcutError> {
+        let proxy = match Proxy::new(
+            &self.connection,
+            PORTAL_DESTINATION,
+            PORTAL_PATH,
+            GLOBAL_SHORTCUTS_INTERFACE,
+        )
+        .await
+        {
+            Ok(proxy) => proxy,
+            Err(_) => return Err(ShortcutError::Unavailable),
+        };
+
+        let mut stream = match proxy.receive_signal("ShortcutsChanged").await {
+            Ok(stream) => stream,
+            Err(error) => {
+                debug!("failed to subscribe to GlobalShortcuts ShortcutsChanged: {error}");
+                return Err(ShortcutError::Failed(format!("{error}")));
+            }
+        };
+
+        while let Some(message) = stream.next().await {
+            let decoded: Result<ShortcutsChangedBody, _> = message.body().deserialize();
+
+            let (signal_session, raw_shortcuts) = match decoded {
+                Ok(res) => res,
+                Err(error) => {
+                    debug!("failed to decode ShortcutsChanged signal: {error}");
+                    continue;
+                }
+            };
+
+            if signal_session.as_ref() != *self.session_handle {
+                continue;
+            }
+
+            let shortcuts = decode_shortcuts_vec(raw_shortcuts);
+            let effective = shortcuts
+                .into_iter()
+                .find(|s| s.id == CLIPBOARD_HISTORY_SHORTCUT_ID)
+                .and_then(|s| s.trigger_description)
+                .filter(|t| !t.trim().is_empty());
+
+            let effective = match effective {
+                Some(eff) => Some(eff),
+                None => {
+                    if let Ok(bound) =
+                        list_shortcuts(&self.connection, &self.session_handle.as_ref()).await
+                    {
+                        bound
+                            .into_iter()
+                            .find(|s| s.id == CLIPBOARD_HISTORY_SHORTCUT_ID)
+                            .and_then(|s| s.trigger_description)
+                            .filter(|t| !t.trim().is_empty())
+                    } else {
+                        None
+                    }
+                }
+            };
+
+            if let Some(new_trigger) = effective {
+                info!(trigger = %new_trigger, "received portal ShortcutsChanged notification");
+                let _ = event_sender.send(BackendEvent::ShortcutsChanged {
+                    effective_shortcut: new_trigger,
+                });
+                let _ = wake_sender.send(Err(ShortcutError::Interrupted));
+            }
+        }
+
+        Err(ShortcutError::Failed(
+            "GlobalShortcuts ShortcutsChanged stream ended".to_string(),
+        ))
     }
 
     pub async fn wait_for_clipboard_history_activation(
@@ -372,8 +475,72 @@ impl WaylandShortcutBackend {
             runtime,
             session: None,
             activation_receiver: None,
+            wake_sender: None,
+            event_sender: None,
+            changed_listener_started: false,
             registered: false,
+            effective_trigger: None,
         })
+    }
+
+    /// Sets an event channel sender for receiving asynchronous backend events (e.g. portal shortcuts changed).
+    pub fn set_event_sender(&mut self, sender: Sender<BackendEvent>) {
+        self.event_sender = Some(sender);
+        self.ensure_changed_listener_started();
+    }
+
+    /// Updates the backend's internal effective trigger description.
+    pub fn set_effective_trigger(&mut self, trigger: Option<String>) {
+        self.effective_trigger = trigger;
+    }
+
+    fn ensure_changed_listener_started(&mut self) {
+        if self.changed_listener_started {
+            return;
+        }
+        if let (Some(session), Some(event_sender), Some(wake_sender)) =
+            (&self.session, &self.event_sender, &self.wake_sender)
+        {
+            let session_clone = session.clone();
+            let event_sender_clone = event_sender.clone();
+            let wake_sender_clone = wake_sender.clone();
+
+            self.runtime.handle().spawn(async move {
+                let _ = session_clone
+                    .run_shortcuts_changed_loop(event_sender_clone, wake_sender_clone)
+                    .await;
+            });
+            self.changed_listener_started = true;
+        }
+    }
+
+    /// Returns the active effective trigger string reported by the portal, if registered.
+    pub fn effective_trigger(&self) -> Option<&str> {
+        self.effective_trigger.as_deref()
+    }
+
+    /// Returns a reference to the active portal session, if registered.
+    pub fn session(&self) -> Option<&WaylandShortcutSession> {
+        self.session.as_ref()
+    }
+
+    /// Requests global shortcut configuration for the active session using the portal's native UI
+    /// (supported on GlobalShortcuts interface version >= 2).
+    ///
+    /// This method is fire-and-return: once the D-Bus call requests the UI, it returns promptly
+    /// without waiting for user completion or timeouts.
+    pub fn configure_shortcuts(
+        &mut self,
+        parent_window: Option<&str>,
+    ) -> Result<Option<String>, ShortcutError> {
+        let session = self.session.as_ref().ok_or_else(|| {
+            ShortcutError::Failed("Wayland shortcut backend has not been registered".to_string())
+        })?;
+
+        let parent = parent_window.unwrap_or("");
+        self.runtime.block_on(session.configure_shortcuts(parent))?;
+
+        Ok(self.effective_trigger.clone())
     }
 
     fn close_session_after_failed_registration(&self, session: &WaylandShortcutSession) {
@@ -385,7 +552,18 @@ impl WaylandShortcutBackend {
 }
 
 impl ShortcutBackend for WaylandShortcutBackend {
-    fn register(&mut self, shortcut: Shortcut) -> Result<(), ShortcutError> {
+    fn name(&self) -> &'static str {
+        "Wayland portal global shortcut"
+    }
+
+    fn capability(&self) -> ShortcutBackendCapability {
+        ShortcutBackendCapability::Portal
+    }
+
+    fn register(
+        &mut self,
+        shortcut: Shortcut,
+    ) -> Result<ShortcutRegistrationOutcome, ShortcutError> {
         if self.registered {
             return Err(ShortcutError::Failed(
                 "Wayland shortcut backend is already registered".to_string(),
@@ -409,15 +587,20 @@ impl ShortcutBackend for WaylandShortcutBackend {
             }
         };
 
-        let shortcut_bound = bound
-            .iter()
-            .any(|shortcut| shortcut.id == CLIPBOARD_HISTORY_SHORTCUT_ID);
+        info!(
+            requested_shortcut = %shortcut,
+            requested_trigger = %preferred_trigger,
+            bound_count = bound.len(),
+            "XDG GlobalShortcuts BindShortcuts response received"
+        );
 
-        if !shortcut_bound {
-            self.close_session_after_failed_registration(&session);
-
-            return Err(ShortcutError::Unavailable);
-        }
+        let (effective_trigger, outcome) = match evaluate_bound_shortcuts(&bound, shortcut) {
+            Ok(res) => res,
+            Err(error) => {
+                self.close_session_after_failed_registration(&session);
+                return Err(error);
+            }
+        };
 
         let (activation_sender, activation_receiver) = channel();
 
@@ -426,6 +609,7 @@ impl ShortcutBackend for WaylandShortcutBackend {
         let listener_session = session.clone();
 
         let terminal_sender = activation_sender.clone();
+        self.wake_sender = Some(activation_sender.clone());
 
         self.runtime.handle().spawn(async move {
             let result = listener_session
@@ -460,20 +644,14 @@ impl ShortcutBackend for WaylandShortcutBackend {
             return Err(error);
         }
 
-        /*
-         * Only publish initialized state after:
-         *
-         *   session created
-         *   shortcut bound
-         *   Activated subscription established
-         */
+        self.effective_trigger = effective_trigger;
         self.session = Some(session);
-
         self.activation_receiver = Some(activation_receiver);
-
         self.registered = true;
 
-        Ok(())
+        self.ensure_changed_listener_started();
+
+        Ok(outcome)
     }
 
     fn wait_for_activation(&mut self) -> Result<ShortcutActivation, ShortcutError> {
@@ -484,6 +662,70 @@ impl ShortcutBackend for WaylandShortcutBackend {
         receiver
             .recv()
             .map_err(|_| ShortcutError::Failed("Wayland activation listener stopped".to_string()))?
+    }
+
+    fn effective_trigger(&self) -> Option<&str> {
+        self.effective_trigger()
+    }
+
+    fn rebind(&mut self, shortcut: Shortcut) -> Result<ShortcutRegistrationOutcome, ShortcutError> {
+        let Some(ref session) = self.session else {
+            return self.register(shortcut);
+        };
+
+        // Validate requested shortcut for portal trigger format
+        let _preferred_trigger = portal_trigger(shortcut)?;
+
+        // Non-destructively query current effective binding if ListShortcuts is supported
+        if let Ok(bound) = self.runtime.block_on(list_shortcuts(
+            &session.connection,
+            &session.session_handle.as_ref(),
+        )) && let Ok((effective_trigger, outcome)) = evaluate_bound_shortcuts(&bound, shortcut)
+        {
+            self.effective_trigger = effective_trigger;
+            return Ok(outcome);
+        }
+
+        // ListShortcuts unsupported or failed: preserve existing effective trigger
+        let description = match &self.effective_trigger {
+            Some(trigger) => {
+                format!("XDG Desktop Portal global shortcut for {trigger} (requested {shortcut})")
+            }
+            None => {
+                format!("XDG Desktop Portal global shortcut (requested {shortcut})")
+            }
+        };
+
+        Ok(ShortcutRegistrationOutcome::Active { description })
+    }
+
+    fn wake(&self) -> Result<(), ShortcutError> {
+        if let Some(ref sender) = self.wake_sender {
+            let _ = sender.send(Err(ShortcutError::Interrupted));
+        }
+        Ok(())
+    }
+
+    fn wake_trigger(&self) -> Option<std::sync::Arc<dyn Fn() + Send + Sync>> {
+        let wake_sender = self.wake_sender.clone()?;
+        Some(std::sync::Arc::new(move || {
+            let _ = wake_sender.send(Err(ShortcutError::Interrupted));
+        }))
+    }
+
+    fn configure_portal_shortcuts(
+        &mut self,
+        parent_window: Option<&str>,
+    ) -> Result<Option<String>, ShortcutError> {
+        self.configure_shortcuts(parent_window)
+    }
+
+    fn set_event_sender(&mut self, sender: Sender<BackendEvent>) {
+        self.set_event_sender(sender);
+    }
+
+    fn set_effective_trigger(&mut self, trigger: Option<String>) {
+        self.set_effective_trigger(trigger);
     }
 }
 
@@ -721,7 +963,7 @@ async fn bind_shortcuts(
         }
     };
 
-    let (response, mut results) = request
+    let (response, results) = request
         .finish(
             connection,
             request_handle,
@@ -731,31 +973,185 @@ async fn bind_shortcuts(
         .await?;
 
     check_portal_response("GlobalShortcuts BindShortcuts", response)?;
+    decode_shortcuts_result(results, "GlobalShortcuts BindShortcuts")
+}
 
-    let shortcuts = results.remove("shortcuts").ok_or_else(|| {
-        ShortcutError::Failed("BindShortcuts response did not contain shortcuts".to_string())
-    })?;
-
-    let shortcuts: Vec<(String, HashMap<String, OwnedValue>)> =
-        shortcuts.try_into().map_err(|error| {
-            ShortcutError::Failed(format!("invalid BindShortcuts shortcuts result: {error}"))
-        })?;
-
-    let bound = shortcuts
-        .into_iter()
+pub fn decode_shortcuts_vec(raw: RawShortcutsPayload) -> Vec<BoundShortcut> {
+    raw.into_iter()
         .map(|(id, mut properties)| {
             let trigger_description = properties
                 .remove("trigger_description")
-                .and_then(|value| String::try_from(value).ok());
+                .and_then(|value| String::try_from(value).ok())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
 
             BoundShortcut {
                 id,
                 trigger_description,
             }
         })
-        .collect();
+        .collect()
+}
 
-    Ok(bound)
+pub fn decode_shortcuts_result(
+    mut results: HashMap<String, OwnedValue>,
+    operation: &str,
+) -> Result<Vec<BoundShortcut>, ShortcutError> {
+    let shortcuts = results.remove("shortcuts").ok_or_else(|| {
+        ShortcutError::Failed(format!("{operation} response did not contain shortcuts"))
+    })?;
+
+    let shortcuts: RawShortcutsPayload = shortcuts.try_into().map_err(|error| {
+        ShortcutError::Failed(format!("invalid {operation} shortcuts result: {error}"))
+    })?;
+
+    Ok(decode_shortcuts_vec(shortcuts))
+}
+
+pub fn evaluate_bound_shortcuts(
+    bound: &[BoundShortcut],
+    requested: Shortcut,
+) -> Result<(Option<String>, ShortcutRegistrationOutcome), ShortcutError> {
+    let bound_entry = bound
+        .iter()
+        .find(|entry| entry.id == CLIPBOARD_HISTORY_SHORTCUT_ID);
+
+    let Some(bound_entry) = bound_entry else {
+        return Err(ShortcutError::Unavailable);
+    };
+
+    let effective_trigger = bound_entry
+        .trigger_description
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToString::to_string);
+
+    match &effective_trigger {
+        Some(trigger) => {
+            info!(
+                effective = %trigger,
+                requested = %requested,
+                "portal global shortcut active"
+            );
+        }
+        None => {
+            info!(
+                requested = %requested,
+                "portal global shortcut active (effective trigger description not provided by portal)"
+            );
+        }
+    }
+
+    let description = match &effective_trigger {
+        Some(trigger) => {
+            format!("XDG Desktop Portal global shortcut for {trigger} (requested {requested})")
+        }
+        None => {
+            format!("XDG Desktop Portal global shortcut (requested {requested})")
+        }
+    };
+
+    Ok((
+        effective_trigger,
+        ShortcutRegistrationOutcome::Active { description },
+    ))
+}
+
+async fn list_shortcuts(
+    connection: &Connection,
+    session_handle: &ObjectPath<'_>,
+) -> Result<Vec<BoundShortcut>, ShortcutError> {
+    let portal = Proxy::new(
+        connection,
+        PORTAL_DESTINATION,
+        PORTAL_PATH,
+        GLOBAL_SHORTCUTS_INTERFACE,
+    )
+    .await
+    .map_err(|_| ShortcutError::Unavailable)?;
+
+    let version: u32 = portal
+        .get_property("version")
+        .await
+        .map_err(|_| ShortcutError::Unavailable)?;
+
+    if version < 2 {
+        warn!(
+            version,
+            "GlobalShortcuts portal does not support ListShortcuts (requires version >= 2)"
+        );
+        return Err(ShortcutError::Unavailable);
+    }
+
+    let request = PortalRequest::prepare(connection, "pookie_list").await?;
+    let mut options: HashMap<&str, Value<'_>> = HashMap::new();
+    options.insert("handle_token", Value::from(request.handle_token()));
+
+    let request_handle: OwnedObjectPath = match portal
+        .call("ListShortcuts", &(session_handle, options))
+        .await
+    {
+        Ok(handle) => handle,
+        Err(error) => {
+            close_portal_request(connection, &request.expected_path.as_ref()).await;
+            return Err(map_portal_method_error(
+                "GlobalShortcuts ListShortcuts",
+                error,
+            ));
+        }
+    };
+
+    let (response, results) = request
+        .finish(
+            connection,
+            request_handle,
+            "GlobalShortcuts ListShortcuts",
+            Duration::from_secs(15),
+        )
+        .await?;
+
+    check_portal_response("GlobalShortcuts ListShortcuts", response)?;
+    decode_shortcuts_result(results, "GlobalShortcuts ListShortcuts")
+}
+
+async fn configure_shortcuts(
+    connection: &Connection,
+    session_handle: &ObjectPath<'_>,
+    parent_window: &str,
+) -> Result<(), ShortcutError> {
+    let portal = Proxy::new(
+        connection,
+        PORTAL_DESTINATION,
+        PORTAL_PATH,
+        GLOBAL_SHORTCUTS_INTERFACE,
+    )
+    .await
+    .map_err(|_| ShortcutError::Unavailable)?;
+
+    let version: u32 = portal
+        .get_property("version")
+        .await
+        .map_err(|_| ShortcutError::Unavailable)?;
+
+    if version < 2 {
+        warn!(
+            version,
+            "GlobalShortcuts portal does not support ConfigureShortcuts (requires version >= 2)"
+        );
+        return Err(ShortcutError::Unavailable);
+    }
+
+    let options: HashMap<&str, Value<'_>> = HashMap::new();
+    portal
+        .call::<_, _, ()>(
+            "ConfigureShortcuts",
+            &(session_handle, parent_window, options),
+        )
+        .await
+        .map_err(|error| map_portal_method_error("GlobalShortcuts ConfigureShortcuts", error))?;
+
+    Ok(())
 }
 
 async fn wait_for_activation(
@@ -881,7 +1277,7 @@ fn clipboard_history_shortcuts(
     vec![(CLIPBOARD_HISTORY_SHORTCUT_ID.to_string(), properties)]
 }
 
-fn portal_trigger(shortcut: Shortcut) -> Result<String, ShortcutError> {
+pub fn portal_trigger(shortcut: Shortcut) -> Result<String, ShortcutError> {
     let mut trigger = String::new();
 
     if shortcut.modifiers.control {
@@ -907,6 +1303,10 @@ fn portal_trigger(shortcut: Shortcut) -> Result<String, ShortcutError> {
 
         ShortcutKey::Character(_) => {
             return Err(ShortcutError::Unavailable);
+        }
+
+        ShortcutKey::Named(named) => {
+            trigger.push_str(named.portal_name());
         }
     }
 

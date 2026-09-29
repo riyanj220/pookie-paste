@@ -123,6 +123,113 @@ pub async fn clear_history() -> Result<u64, String> {
     }
 }
 
+pub async fn get_shortcut_status() -> Result<ipc::ShortcutStatusInfo, String> {
+    let mut client = connect()
+        .await
+        .map_err(|error| format!("failed to connect to daemon: {error}"))?;
+
+    let response = client
+        .send(&IpcRequest::GetShortcutStatus)
+        .await
+        .map_err(|error| format!("failed to request shortcut status: {error:?}"))?;
+
+    match response {
+        IpcResponse::ShortcutStatus { status } => Ok(status),
+        IpcResponse::Error { message } => Err(message),
+        other => Err(format!("unexpected IPC response: {other:?}")),
+    }
+}
+
+pub async fn set_shortcut(
+    modifiers: Vec<String>,
+    key: String,
+) -> Result<ipc::ShortcutStatusInfo, String> {
+    let mut client = connect()
+        .await
+        .map_err(|error| format!("failed to connect to daemon: {error}"))?;
+
+    let response = client
+        .send(&IpcRequest::SetShortcut { modifiers, key })
+        .await
+        .map_err(|error| format!("failed to set shortcut: {error:?}"))?;
+
+    match response {
+        IpcResponse::ShortcutStatus { status } => Ok(status),
+        IpcResponse::Error { message } => Err(message),
+        other => Err(format!("unexpected IPC response: {other:?}")),
+    }
+}
+
+pub async fn configure_portal_shortcut() -> Result<ipc::ShortcutStatusInfo, String> {
+    let mut client = connect()
+        .await
+        .map_err(|error| format!("failed to connect to daemon: {error}"))?;
+
+    let response = client
+        .send(&IpcRequest::ConfigurePortalShortcut)
+        .await
+        .map_err(|error| format!("failed to configure portal shortcut: {error:?}"))?;
+
+    match response {
+        IpcResponse::ShortcutStatus { status } => Ok(status),
+        IpcResponse::Error { message } => Err(message),
+        other => Err(format!("unexpected IPC response: {other:?}")),
+    }
+}
+
+#[allow(dead_code)]
+pub async fn reload_config() -> Result<ipc::ShortcutStatusInfo, String> {
+    let mut client = connect()
+        .await
+        .map_err(|error| format!("failed to connect to daemon: {error}"))?;
+
+    let response = client
+        .send(&IpcRequest::ReloadConfig)
+        .await
+        .map_err(|error| format!("failed to reload configuration: {error:?}"))?;
+
+    match response {
+        IpcResponse::ConfigReloaded { status } => Ok(status),
+        IpcResponse::ShortcutStatus { status } => Ok(status),
+        IpcResponse::Error { message } => Err(message),
+        other => Err(format!("unexpected IPC response: {other:?}")),
+    }
+}
+
+pub async fn recheck_shortcut_status() -> Result<ipc::ShortcutStatusInfo, String> {
+    let mut client = connect()
+        .await
+        .map_err(|error| format!("failed to connect to daemon: {error}"))?;
+
+    let response = client
+        .send(&IpcRequest::RecheckShortcutStatus)
+        .await
+        .map_err(|error| format!("failed to recheck shortcut status: {error:?}"))?;
+
+    match response {
+        IpcResponse::ShortcutStatus { status } => Ok(status),
+        IpcResponse::Error { message } => Err(message),
+        other => Err(format!("unexpected IPC response: {other:?}")),
+    }
+}
+
+pub async fn copy_text(text: String) -> Result<(), String> {
+    let mut client = connect()
+        .await
+        .map_err(|error| format!("failed to connect to daemon: {error}"))?;
+
+    let response = client
+        .send(&IpcRequest::CopyText { text })
+        .await
+        .map_err(|error| format!("failed to copy text: {error:?}"))?;
+
+    match response {
+        IpcResponse::TextCopied => Ok(()),
+        IpcResponse::Error { message } => Err(message),
+        other => Err(format!("unexpected IPC response: {other:?}")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #[test]

@@ -52,6 +52,8 @@ pub fn start(connection: Connection, globals: GlobalList, sender: Sender<Clipboa
         clipboard_requested: false,
 
         has_selection: false,
+
+        connection: connection.clone(),
     };
 
     if let Err(error) = connection.roundtrip() {

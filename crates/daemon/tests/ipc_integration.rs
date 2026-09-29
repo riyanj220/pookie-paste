@@ -15,7 +15,8 @@ use daemon::request_handler::handle_request;
 use history::{ClipboardHistoryService, HistoryConfig};
 
 use ipc::{
-    ActivationOutcome, IpcClient, IpcFocusTarget, IpcRequest, IpcResponse, IpcServer, ServerError,
+    ActivationOutcome, IpcClient, IpcFocusTarget, IpcRequest, IpcResponse, IpcServer,
+    IpcShortcutCapability, IpcShortcutState, ServerError,
 };
 
 use pookie_clipboard::{ClipboardBackend, ClipboardContent, ClipboardError};
@@ -134,6 +135,91 @@ struct TestIpcApp {
     history_service: Arc<ClipboardHistoryService>,
 
     clipboard_backend: FakeClipboardBackend,
+
+    clipboard_state: Arc<ClipboardState>,
+
+    #[allow(dead_code)]
+    reload_coordinator: Arc<daemon::reload_coordinator::ReloadCoordinator>,
+
+    #[allow(dead_code)]
+    _listener: daemon::shortcut_listener::ShortcutListener,
+}
+
+struct IpcMockShortcutBackend {
+    registered: Arc<StdMutex<Option<daemon::shortcut_backend::Shortcut>>>,
+    activation_tx: std::sync::mpsc::Sender<
+        Result<
+            daemon::shortcut_backend::ShortcutActivation,
+            daemon::shortcut_backend::ShortcutError,
+        >,
+    >,
+    activation_rx: Arc<
+        StdMutex<
+            std::sync::mpsc::Receiver<
+                Result<
+                    daemon::shortcut_backend::ShortcutActivation,
+                    daemon::shortcut_backend::ShortcutError,
+                >,
+            >,
+        >,
+    >,
+}
+
+impl daemon::shortcut_backend::ShortcutBackend for IpcMockShortcutBackend {
+    fn name(&self) -> &'static str {
+        "test-ipc-backend"
+    }
+
+    fn capability(&self) -> daemon::shortcut_backend::ShortcutBackendCapability {
+        daemon::shortcut_backend::ShortcutBackendCapability::Native
+    }
+
+    fn register(
+        &mut self,
+        shortcut: daemon::shortcut_backend::Shortcut,
+    ) -> Result<
+        daemon::shortcut_backend::ShortcutRegistrationOutcome,
+        daemon::shortcut_backend::ShortcutError,
+    > {
+        *self.registered.lock().unwrap() = Some(shortcut);
+        Ok(
+            daemon::shortcut_backend::ShortcutRegistrationOutcome::Active {
+                description: "test active grab".to_string(),
+            },
+        )
+    }
+
+    fn wait_for_activation(
+        &mut self,
+    ) -> Result<daemon::shortcut_backend::ShortcutActivation, daemon::shortcut_backend::ShortcutError>
+    {
+        match self.activation_rx.lock().unwrap().recv() {
+            Ok(result) => result,
+            Err(_) => Err(daemon::shortcut_backend::ShortcutError::Unavailable),
+        }
+    }
+
+    fn wake_trigger(&self) -> Option<Arc<dyn Fn() + Send + Sync>> {
+        let tx = self.activation_tx.clone();
+        Some(Arc::new(move || {
+            let _ = tx.send(Err(daemon::shortcut_backend::ShortcutError::Interrupted));
+        }))
+    }
+
+    fn rebind(
+        &mut self,
+        shortcut: daemon::shortcut_backend::Shortcut,
+    ) -> Result<
+        daemon::shortcut_backend::ShortcutRegistrationOutcome,
+        daemon::shortcut_backend::ShortcutError,
+    > {
+        *self.registered.lock().unwrap() = Some(shortcut);
+        Ok(
+            daemon::shortcut_backend::ShortcutRegistrationOutcome::Active {
+                description: format!("reloaded {shortcut}"),
+            },
+        )
+    }
 }
 
 impl TestIpcApp {
@@ -142,6 +228,17 @@ impl TestIpcApp {
     }
 
     async fn start_with_focus_target(target_id: Option<u64>) -> Self {
+        Self::start_internal(target_id, None).await
+    }
+
+    async fn start_with_custom_config(resolved_path: PathBuf, default_path: PathBuf) -> Self {
+        Self::start_internal(Some(42), Some((resolved_path, default_path))).await
+    }
+
+    async fn start_internal(
+        target_id: Option<u64>,
+        custom_paths: Option<(PathBuf, PathBuf)>,
+    ) -> Self {
         let database = Database::new("sqlite::memory:")
             .await
             .expect("database initialization failed");
@@ -155,9 +252,11 @@ impl TestIpcApp {
 
         let clipboard_backend = FakeClipboardBackend::new("");
 
+        let clipboard_state = Arc::new(ClipboardState::default());
+
         let clipboard_service = Arc::new(Mutex::new(ClipboardService::new(
             clipboard_backend.clone(),
-            Arc::new(ClipboardState::default()),
+            Arc::clone(&clipboard_state),
         )));
 
         let focus_service = FocusService::new(FakeFocusBackend { target_id });
@@ -178,6 +277,47 @@ impl TestIpcApp {
 
         let activation = Arc::clone(&activation_service);
 
+        let (tx, rx) = std::sync::mpsc::channel();
+        let backend = IpcMockShortcutBackend {
+            registered: Arc::new(StdMutex::new(None)),
+            activation_tx: tx,
+            activation_rx: Arc::new(StdMutex::new(rx)),
+        };
+        let listener = daemon::shortcut_listener::ShortcutListener::start_with_backend_and_shortcut(
+            backend,
+            daemon::shortcut_backend::Shortcut::super_v(),
+        );
+
+        for _ in 0..50 {
+            if !matches!(listener.status().state, ipc::IpcShortcutState::Initializing) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+
+        let reload_handle = listener.reload_handle();
+        let reload_coordinator = match custom_paths {
+            Some((resolved, default)) => Arc::new(
+                daemon::reload_coordinator::ReloadCoordinator::with_custom_paths(
+                    reload_handle,
+                    resolved,
+                    default,
+                ),
+            ),
+            None => {
+                let dummy = std::path::PathBuf::from("/nonexistent/test/pookie/config.toml");
+                Arc::new(
+                    daemon::reload_coordinator::ReloadCoordinator::with_custom_paths(
+                        reload_handle,
+                        dummy.clone(),
+                        dummy,
+                    ),
+                )
+            }
+        };
+
+        let coordinator_for_server = Arc::clone(&reload_coordinator);
+
         let server_task = tokio::spawn(async move {
             loop {
                 let connection = match server.accept().await {
@@ -192,8 +332,10 @@ impl TestIpcApp {
 
                 let activation = Arc::clone(&activation);
 
+                let coordinator = Arc::clone(&coordinator_for_server);
+
                 tokio::spawn(async move {
-                    handle_test_connection(connection, service, activation).await;
+                    handle_test_connection(connection, service, activation, coordinator).await;
                 });
             }
         });
@@ -203,6 +345,9 @@ impl TestIpcApp {
             server_task,
             history_service,
             clipboard_backend,
+            clipboard_state,
+            reload_coordinator,
+            _listener: listener,
         }
     }
 
@@ -231,6 +376,7 @@ async fn handle_test_connection<P>(
     mut connection: ipc::IpcConnection,
     history_service: Arc<ClipboardHistoryService>,
     activation_service: Arc<ClipboardActivationService<FakeClipboardBackend, P, FakeFocusBackend>>,
+    reload_coordinator: Arc<daemon::reload_coordinator::ReloadCoordinator>,
 ) where
     P: PasteBackend + Send + Sync + 'static,
 {
@@ -253,7 +399,10 @@ async fn handle_test_connection<P>(
             request,
             history_service.as_ref(),
             activation_service.as_ref(),
+            activation_service.clipboard_service().as_ref(),
             &ui_launcher,
+            &reload_coordinator.status_handle(),
+            &reload_coordinator,
         )
         .await;
 
@@ -872,13 +1021,30 @@ async fn x11_style_direct_activation_round_trips_through_ipc() {
     let server = IpcServer::bind(&socket_path).expect("IPC server bind failed");
 
     let service = Arc::clone(&history_service);
-
     let activation = Arc::clone(&activation_service);
+
+    let shortcut_status = Arc::new(std::sync::RwLock::new(ipc::ShortcutStatusInfo {
+        configured_shortcut: "Super+V".to_string(),
+        backend_name: None,
+        capability: None,
+        effective_shortcut: None,
+        state: ipc::IpcShortcutState::Initializing,
+    }));
+    let reload_handle =
+        daemon::shortcut_listener::ShortcutReloadHandle::new_test_handle(shortcut_status);
+    let dummy = std::path::PathBuf::from("/nonexistent/test/pookie/config.toml");
+    let reload_coordinator = Arc::new(
+        daemon::reload_coordinator::ReloadCoordinator::with_custom_paths(
+            reload_handle,
+            dummy.clone(),
+            dummy,
+        ),
+    );
 
     let server_task = tokio::spawn(async move {
         let connection = server.accept().await.expect("accept failed");
 
-        handle_test_connection(connection, service, activation).await;
+        handle_test_connection(connection, service, activation, reload_coordinator).await;
     });
 
     let mut client = IpcClient::connect(&socket_path)
@@ -941,5 +1107,170 @@ async fn handles_toggle_ui_ipc_request() {
             );
         }
         other => panic!("unexpected response for ToggleUi: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn handles_get_shortcut_status_ipc_request() {
+    let app = TestIpcApp::start().await;
+    let mut client = app.client().await;
+
+    let response = client
+        .send(&IpcRequest::GetShortcutStatus)
+        .await
+        .expect("GetShortcutStatus request failed");
+
+    match response {
+        IpcResponse::ShortcutStatus { status } => {
+            assert_eq!(status.configured_shortcut, "Super+V");
+            assert_eq!(status.backend_name.as_deref(), Some("test-ipc-backend"));
+            assert_eq!(status.capability, Some(IpcShortcutCapability::Native));
+            assert_eq!(status.effective_shortcut.as_deref(), Some("Super+V"));
+            assert!(matches!(status.state, IpcShortcutState::Active { .. }));
+        }
+        other => panic!("unexpected response for GetShortcutStatus: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn handles_reload_config_ipc_request_success() {
+    let temp_dir =
+        std::env::temp_dir().join(format!("pookie_ipc_reload_success_{}", Uuid::new_v4()));
+    std::fs::create_dir_all(&temp_dir).unwrap();
+    let config_file = temp_dir.join("config.toml");
+    std::fs::write(
+        &config_file,
+        "[shortcut.primary]\nmodifiers = ['CTRL', 'SHIFT']\nkey = 'P'\n",
+    )
+    .unwrap();
+
+    let app = TestIpcApp::start_with_custom_config(config_file.clone(), config_file.clone()).await;
+    let mut client = app.client().await;
+
+    // Initial status is Super+V
+    let init_resp = client
+        .send(&IpcRequest::GetShortcutStatus)
+        .await
+        .expect("GetShortcutStatus failed");
+    match init_resp {
+        IpcResponse::ShortcutStatus { status } => {
+            assert_eq!(status.configured_shortcut, "Super+V");
+        }
+        other => panic!("unexpected response: {other:?}"),
+    }
+
+    // Send ReloadConfig
+    let reload_resp = client
+        .send(&IpcRequest::ReloadConfig)
+        .await
+        .expect("ReloadConfig failed");
+    match reload_resp {
+        IpcResponse::ConfigReloaded { status } => {
+            assert_eq!(status.configured_shortcut, "Ctrl+Shift+P");
+            assert_eq!(status.effective_shortcut.as_deref(), Some("Ctrl+Shift+P"));
+        }
+        other => panic!("unexpected reload response: {other:?}"),
+    }
+
+    // Verify subsequent GetShortcutStatus returns updated shortcut
+    let status_resp = client
+        .send(&IpcRequest::GetShortcutStatus)
+        .await
+        .expect("GetShortcutStatus failed");
+    match status_resp {
+        IpcResponse::ShortcutStatus { status } => {
+            assert_eq!(status.configured_shortcut, "Ctrl+Shift+P");
+            assert_eq!(status.effective_shortcut.as_deref(), Some("Ctrl+Shift+P"));
+        }
+        other => panic!("unexpected response: {other:?}"),
+    }
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn handles_reload_config_ipc_request_malformed_preserves_status() {
+    let temp_dir =
+        std::env::temp_dir().join(format!("pookie_ipc_reload_malformed_{}", Uuid::new_v4()));
+    std::fs::create_dir_all(&temp_dir).unwrap();
+    let config_file = temp_dir.join("config.toml");
+    std::fs::write(&config_file, "[shortcut\nnot valid toml").unwrap();
+
+    let app = TestIpcApp::start_with_custom_config(config_file.clone(), config_file.clone()).await;
+    let mut client = app.client().await;
+
+    // Send ReloadConfig with malformed file
+    let reload_resp = client
+        .send(&IpcRequest::ReloadConfig)
+        .await
+        .expect("ReloadConfig failed");
+    match reload_resp {
+        IpcResponse::Error { message } => {
+            assert!(
+                message.contains("configuration error") || message.contains("failed to parse"),
+                "expected config/parse error, got: {message}"
+            );
+        }
+        other => panic!("expected Error for malformed reload, got: {other:?}"),
+    }
+
+    // Verify previous active shortcut (Super+V) is completely preserved!
+    let status_resp = client
+        .send(&IpcRequest::GetShortcutStatus)
+        .await
+        .expect("GetShortcutStatus failed");
+    match status_resp {
+        IpcResponse::ShortcutStatus { status } => {
+            assert_eq!(status.configured_shortcut, "Super+V");
+            assert_eq!(status.effective_shortcut.as_deref(), Some("Super+V"));
+            assert!(matches!(status.state, IpcShortcutState::Active { .. }));
+        }
+        other => panic!("unexpected response: {other:?}"),
+    }
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn copy_text_writes_to_platform_backend_and_marks_self_write() {
+    let app = TestIpcApp::start_with_focus_target(Some(1)).await;
+    let mut client = app.client().await;
+
+    let directive = "bindsym $mod+v exec pookie-paste".to_string();
+    let response = client
+        .send(&IpcRequest::CopyText {
+            text: directive.clone(),
+        })
+        .await
+        .expect("send CopyText request failed");
+
+    assert_eq!(response, IpcResponse::TextCopied);
+
+    // Verify backend received the directive
+    assert_eq!(app.clipboard_content(), directive);
+
+    // Verify it was marked as a self-write (so watcher skips reinserting it into history)
+    assert!(
+        app.clipboard_state
+            .is_self_write(&pookie_clipboard::ClipboardContent::Text(directive))
+    );
+}
+
+#[tokio::test]
+async fn recheck_shortcut_status_ipc_round_trip() {
+    let app = TestIpcApp::start_with_focus_target(Some(1)).await;
+    let mut client = app.client().await;
+
+    let response = client
+        .send(&IpcRequest::RecheckShortcutStatus)
+        .await
+        .expect("send RecheckShortcutStatus request failed");
+
+    match response {
+        IpcResponse::ShortcutStatus { status } => {
+            assert_eq!(status.configured_shortcut, "Super+V");
+            assert!(matches!(status.state, ipc::IpcShortcutState::Active { .. }));
+        }
+        other => panic!("expected ShortcutStatus response, got: {other:?}"),
     }
 }

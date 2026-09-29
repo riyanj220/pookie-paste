@@ -32,6 +32,8 @@ pub mod x11_paste_backend;
 
 pub mod shortcut_backend;
 
+pub mod shortcut_config;
+
 pub mod shortcut_listener;
 
 pub mod x11_shortcut_backend;
@@ -42,6 +44,10 @@ pub mod platform_shortcut_backend;
 
 pub mod wayland_shortcut_backend;
 
+pub mod sway_shortcut_backend;
+
+pub mod hyprland_shortcut_backend;
+
 pub mod app_paths;
 
 pub mod sway_focus_backend;
@@ -51,3 +57,5 @@ pub mod hyprland_focus_backend;
 pub mod wlroots_paste_backend;
 
 pub mod platform;
+
+pub mod reload_coordinator;
