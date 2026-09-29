@@ -90,7 +90,6 @@ Comprehensive architecture and subsystem documentation is available in `docs/`:
 - [Architecture Overview](docs/ARCHITECTURE.md)
 - [Platform Support Matrix](docs/platform-support.md)
 - [Development Guide](docs/DEVELOPMENT.md)
-- [Roadmap](docs/ROADMAP.md)
 - [Release Testing](docs/RELEASE_TESTING.md)
 
 ## Development
