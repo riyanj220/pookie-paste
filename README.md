@@ -1,60 +1,68 @@
 # Pookie Paste
 
-Tired of bloated, text-only clipboard managers on Linux with clunky workflows and no direct paste? There you go.
+Tired of clunky, text-only clipboard managers on Linux?
 
-**Pookie Paste** is a lightweight, snappy clipboard manager inspired by **Windows Clipboard History**. Copy text or images, press `Super+V`, choose an item, and Pookie Paste immediately restores it and pastes it directly back into your active application.
+**Pookie Paste** is a lightweight, snappy clipboard manager inspired by **Windows Clipboard History**. Copy text or images, press your shortcut (default `Super+V`), select an item, and Pookie Paste restores and pastes it directly back into your active application on supported environments.
 
 ## Demo
+
 <img width="800" height="450" alt="ezgif-1812d21b3a903346" src="https://github.com/user-attachments/assets/edd33c24-8481-478e-b984-64552b240148" />
 
 ## Screenshot
+
 <img width="1034" height="604" alt="Pookie Paste Screenshot" src="https://github.com/user-attachments/assets/d0265d10-8741-483e-b818-e11edefa699b" />
 
 ## Features
 
-- **Text & Image Support** — Full clipboard history for both rich text and images with instant thumbnail previews.
-- **Direct Paste** — Pastes directly into your target application on X11 and KDE Plasma Wayland with zero extra clicks.
-- **`Super+V` Shortcut** — Snappy, keyboard-friendly popup positioned right near your active window.
+- **Text & Image Support** — Full clipboard history for rich text and images with instant thumbnail previews.
+- **Direct Paste** — Restores and pastes the selected item directly into your active application on supported environments.
+- **Configurable Shortcut** — Snappy, keyboard-driven access via a global hotkey (defaults to `Super+V`).
 - **Pin & Manage** — Pin favorite clips to the top, remove individual items, or clear history effortlessly.
+- **Cross-Desktop Native** — First-class desktop integration across X11, KDE Plasma Wayland, Sway, and Hyprland.
+- **Lightweight & Fast** — Instant native popup built with egui, backed by an efficient background daemon.
 
 ## Platform Support
 
-Pookie Paste currently targets:
+| Desktop / Platform | Support Status |
+| :--- | :--- |
+| **X11** | Supported |
+| **KDE Plasma** (Wayland) | Supported |
+| **Sway** | Supported |
+| **Hyprland** | Supported |
+| **Other Wayland** | Limited / clipboard-only fallback |
 
-- **X11** — supported
-- **KDE Plasma + Wayland** — supported
-- **Other Wayland desktops, including GNOME** — not currently supported for the full Pookie Paste experience
+On environments without direct paste or window focus restoration, Pookie Paste gracefully falls back to clipboard-only mode so you can paste manually.
 
-Support for additional Wayland desktop environments is planned.
+For technical details on focus backends, paste injection mechanisms, and shortcut models, see the [Platform Support Guide](docs/platform-support.md).
 
 ## Install
 
 Install the latest stable release:
 
 ```bash
-curl -fsSL   https://raw.githubusercontent.com/riyanj220/pookie-paste/main/install.sh   | bash
+curl -fsSL https://raw.githubusercontent.com/riyanj220/pookie-paste/main/install.sh | bash
 ```
 
-Rust is not required for normal installation.
+Rust is not required for normal installation (prebuilt x86_64 binaries are downloaded automatically).
 
 ### Install a Specific Version
 
 ```bash
-curl -fsSL   https://raw.githubusercontent.com/riyanj220/pookie-paste/main/install.sh   | bash -s -- --version <version>
+curl -fsSL https://raw.githubusercontent.com/riyanj220/pookie-paste/main/install.sh | bash -s -- --version <version>
 ```
 
 Example:
 
 ```bash
-curl -fsSL   https://raw.githubusercontent.com/riyanj220/pookie-paste/main/install.sh   | bash -s -- --version v0.1.1
+curl -fsSL https://raw.githubusercontent.com/riyanj220/pookie-paste/main/install.sh | bash -s -- --version v0.2.1
 ```
 
 ## Update
 
-Run the installer again:
+Run the installer again to update to the latest release:
 
 ```bash
-curl -fsSL   https://raw.githubusercontent.com/riyanj220/pookie-paste/main/install.sh   | bash
+curl -fsSL https://raw.githubusercontent.com/riyanj220/pookie-paste/main/install.sh | bash
 ```
 
 Existing clipboard history and application state are preserved.
@@ -67,40 +75,27 @@ From a cloned repository:
 ./scripts/uninstall.sh
 ```
 
-This removes Pookie Paste while preserving clipboard history and application state.
+This removes Pookie Paste application files while preserving your clipboard history and settings.
 
-To remove everything:
+To remove everything, including history and stored images:
 
 ```bash
 ./scripts/uninstall.sh --purge
 ```
 
-## Data Locations
+## Documentation
 
-Pookie Paste uses user-local Linux directories.
+Comprehensive architecture and subsystem documentation is available in `docs/`:
 
-```text
-~/.local/bin/pookie-paste
-~/.local/bin/pookie-paste-ui
-
-~/.local/share/pookie-paste/
-├── pookie-paste.db
-└── images/
-
-~/.local/state/pookie-paste/
-```
-
-On KDE Plasma, the KWin focus helper is installed under:
-
-```text
-~/.local/share/kwin/scripts/pookie-focus/
-```
-
-XDG directory overrides are respected when configured.
+- [Architecture Overview](docs/ARCHITECTURE.md)
+- [Platform Support Matrix](docs/platform-support.md)
+- [Development Guide](docs/DEVELOPMENT.md)
+- [Roadmap](docs/ROADMAP.md)
+- [Release Testing](docs/RELEASE_TESTING.md)
 
 ## Development
 
-Install from source:
+Build and install from source:
 
 ```bash
 git clone https://github.com/riyanj220/pookie-paste.git
@@ -108,16 +103,11 @@ cd pookie-paste
 ./scripts/install.sh --from-source
 ```
 
-Project documentation:
-
-- [Architecture](docs/ARCHITECTURE.md)
-- [Development Guide](docs/DEVELOPMENT.md)
-- [Roadmap](docs/ROADMAP.md)
-- [Release Testing](docs/RELEASE_TESTING.md)
+For test suites, validation commands, and local development workflows, see the [Development Guide](docs/DEVELOPMENT.md).
 
 ## Contributing
 
-Contributions are welcome. Please read the [Development Guide](docs/DEVELOPMENT.md) before contributing.
+Contributions are welcome! Please read [CONTRIBUTING.md](CONTRIBUTING.md) and the [Development Guide](docs/DEVELOPMENT.md) before submitting pull requests.
 
 ## License
 
