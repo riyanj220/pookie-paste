@@ -171,6 +171,15 @@ Detailed platform mechanics, IPC discovery, and troubleshooting:
 
 ---
 
+## Related Documentation
+
+* [**Architecture Overview**](../architecture/overview.md): High-level system structure, architectural boundaries, and crate organization.
+* [**Runtime Model**](../architecture/runtime-model.md): Multi-process lifecycle, memory usage, and background threads.
+* [**Activation Overview**](../activation/overview.md): What happens after hotkey activation requests popup display.
+* [**IPC Overview**](../ipc/overview.md): Wire requests for `SetShortcut`, `RecheckShortcutStatus`, and `ConfigurePortalShortcut`.
+
+---
+
 ## Implementation References
 
 | Component | Responsibility | Repository File Path |

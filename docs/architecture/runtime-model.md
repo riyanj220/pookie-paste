@@ -68,6 +68,8 @@ On launch, the daemon attempts to bind the Unix domain socket at `$XDG_RUNTIME_D
 3. If the connection succeeds, another daemon instance is already active; the new process logs an informational message and exits with status 0.
 4. If the connection is refused, the socket file is stale from a previous unclean shutdown; the daemon removes the file and proceeds to bind.
 
+For complete wire protocol and stale socket cleanup mechanics, see [IPC Overview](../ipc/overview.md).
+
 ### 2. Startup Sequence
 Once the socket is acquired, the daemon initializes in strict dependency order:
 1. **Socket Binding & Singleton Check**: Binds the Unix IPC socket and clears stale socket files before allocating services.
@@ -106,7 +108,7 @@ let target_id = capture_initial_focus_target();
 
 Because the popup window has not yet been mapped, the user's previously active application still holds window manager focus. The daemon queries the platform focus backend and returns a typed [`IpcFocusTarget`](../../crates/ipc/src/protocol.rs). This target identifier is:
 1. Used under X11 to calculate window geometry coordinates and anchor the popup near the active target window or cursor. On Wayland, unprivileged window geometry queries are disallowed, so the UI relies on compositor window placement rules.
-2. Passed back to the daemon during `ActivateItem` so the daemon knows exactly which window must regain focus before paste injection.
+2. Passed back to the daemon during `ActivateItem` so the daemon knows exactly which window must regain focus before paste injection. If target capture returns `None` (or was omitted), the activation service halts before paste capability evaluation and returns `ClipboardUpdated` without attempting synthetic paste.
 
 ### Dismissal & Termination
 The UI process terminates immediately when:
@@ -145,13 +147,23 @@ If an environment lacks focus restoration support, the daemon resolves to `Unava
 
 Pookie Paste strictly adheres to the XDG Base Directory Specification:
 
-| Path Category | Environment Variable | Default Fallback | Purpose |
+| Path Category | Environment Variable / Primary Path | Default Fallback | Purpose |
 | --- | --- | --- | --- |
 | **Data Directory** | `$XDG_DATA_HOME` | `~/.local/share/pookie-paste/` | Contains `pookie-paste.db` and the `images/` directory. |
 | **Image Store** | `$XDG_DATA_HOME` | `~/.local/share/pookie-paste/images/` | Standalone canonical PNG files referenced by UUID. |
 | **Config Directory** | `$XDG_CONFIG_HOME` | `~/.config/pookie-paste/` | Contains user settings in `config.toml` (also checks legacy/convenience path `~/.config/pookie/config.toml`). |
 | **State Directory** | `$XDG_STATE_HOME` | `~/.local/state/pookie-paste/` | Stores runtime state tokens such as `remote-desktop.restore-token`. |
-| **Runtime Socket** | `$XDG_RUNTIME_DIR` | `/tmp/pookie-paste-<uid>/` | Contains the Unix domain IPC socket `pookie.sock`. |
+| **Runtime Socket** | `$XDG_RUNTIME_DIR/pookie-paste/pookie.sock` | `/tmp/pookie-paste-<EUID>/pookie.sock` | Local Unix domain stream socket for daemon/UI/CLI communication. |
+
+---
+
+## Related Documentation
+
+* [**Architecture Overview**](overview.md): High-level system structure, architectural boundaries, and crate organization.
+* [**Clipboard Subsystem**](../clipboard/overview.md): Clipboard capture, MIME negotiation, and normalization.
+* [**Activation Subsystem**](../activation/overview.md): Focus restoration, target confirmation, and paste injection.
+* [**Global Shortcuts**](../shortcuts/overview.md): Keybinding architecture, rebind transactions, and status model.
+* [**IPC Subsystem**](../ipc/overview.md): Unix domain socket transport, framing codec, and request dispatch.
 
 ---
 

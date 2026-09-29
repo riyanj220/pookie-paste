@@ -148,6 +148,16 @@ Focus restoration and paste injection are platform-specific. See the dedicated g
 
 ---
 
+## Related Documentation
+
+* [**Architecture Overview**](../architecture/overview.md): High-level system structure, architectural boundaries, and crate organization.
+* [**Runtime Model**](../architecture/runtime-model.md): Multi-process lifecycle, memory usage, and background threads.
+* [**Clipboard Overview**](../clipboard/overview.md): Clipboard writeback and self-write suppression markers.
+* [**Shortcut Overview**](../shortcuts/overview.md): Hotkey trigger mechanisms initiating popup display.
+* [**IPC Overview**](../ipc/overview.md): Request routing for `CaptureFocusTarget` and `ActivateItem`.
+
+---
+
 ## Implementation References
 
 | Component | Responsibility | Repository File Path |

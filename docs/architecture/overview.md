@@ -55,7 +55,7 @@ The codebase enforces strict boundaries so that platform-specific windowing and 
 
 ## Core Subsystems
 
-Pookie Paste is structured into four main functional subsystems, each documented in detail in its respective section:
+Pookie Paste is structured into five main functional subsystems, each documented in detail in its respective section:
 
 ### 1. Clipboard Management
 Monitors the system clipboard for new entries, applies content limits and normalization, and canonicalizes all incoming image formats (PNG, JPEG, WebP, BMP, GIF) into canonical PNG-encoded RGBA8 bytes. Includes self-write suppression so that Pookie-initiated clipboard writes do not generate duplicate history items.
@@ -72,6 +72,10 @@ Governs what happens when a history item is selected. It executes a strict chron
 ### 4. Global Shortcuts
 Provides cross-desktop shortcut handling across three distinct paradigms: native key grabs (X11), desktop portals (KDE Plasma), and compositor-managed keybindings (Sway, Hyprland). Supports live configuration reloads, observational status rechecks, and conflict detection.
 *Detailed guide: [Shortcuts Overview](../shortcuts/overview.md)*
+
+### 5. Inter-Process Communication (IPC)
+Provides typed, framed wire communication over local Unix domain stream sockets between the persistent daemon, ephemeral popup UI, and CLI commands. Enforces connection timeouts, frame size limits, and daemon single-instance enforcement through socket probing and binding.
+*Detailed guide: [IPC Overview](../ipc/overview.md)*
 
 ---
 
@@ -93,5 +97,9 @@ The repository is organized as a Cargo workspace with distinct crate boundaries:
 
 ## Next Steps
 
-To understand the runtime lifecycle, process model, and filesystem conventions, see:
+To explore the runtime lifecycle, process model, or specific subsystem architectures:
 * [Runtime Model & Process Lifecycle](runtime-model.md)
+* [Clipboard & History Subsystem](../clipboard/overview.md)
+* [Activation & Paste Subsystem](../activation/overview.md)
+* [Global Shortcuts Subsystem](../shortcuts/overview.md)
+* [IPC Subsystem](../ipc/overview.md)

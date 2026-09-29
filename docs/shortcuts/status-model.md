@@ -2,6 +2,8 @@
 
 This document explains Pookie Paste's shortcut status model: how runtime status is decoupled from persistent configuration, what each status enum variant represents, and how compositor binding states are interpreted by the daemon and UI.
 
+For overall shortcut architecture, see [Shortcut Overview](overview.md). For platform implementations, see the [Platform Guides](overview.md#platform-guides).
+
 ---
 
 ## Why Status Is Separate from Configuration

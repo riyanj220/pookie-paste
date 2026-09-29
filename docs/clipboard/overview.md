@@ -212,6 +212,15 @@ Once content passes the processing pipeline, it is committed to storage by [`Cli
 
 ---
 
+## Related Documentation
+
+* [**Architecture Overview**](../architecture/overview.md): High-level system structure, architectural boundaries, and crate organization.
+* [**Runtime Model**](../architecture/runtime-model.md): Multi-process lifecycle, memory usage, and background threads.
+* [**Activation Overview**](../activation/overview.md): Focus restoration, target confirmation, and synthetic paste.
+* [**IPC Overview**](../ipc/overview.md): Unix domain socket protocol, request routing, and history serialization.
+
+---
+
 ## Implementation References
 
 | Component | Responsibility | Repository File Path |

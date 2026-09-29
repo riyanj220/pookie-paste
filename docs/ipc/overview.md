@@ -293,6 +293,7 @@ The Unix domain socket is Pookie Paste's sole mechanism for detecting an already
 
 * [**Architecture Overview**](../architecture/overview.md): High-level system structure and subsystem boundaries.
 * [**Runtime Model**](../architecture/runtime-model.md): Multi-process lifecycle, memory usage, and background threads.
+* [**Clipboard Overview**](../clipboard/overview.md): History storage, canonical image persistence, and suppression markers.
 * [**Activation Overview**](../activation/overview.md): Sequence and safety invariants for focus restoration and paste injection.
 * [**Shortcut Overview**](../shortcuts/overview.md): Keybinding subsystem architecture, transactional rebinding, and compositor inspection.
 
