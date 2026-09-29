@@ -13,6 +13,7 @@ pub enum CliAction {
     ToggleUi,
     ShortcutSetup,
     ShortcutStatus,
+    ShortcutStatusPorcelain,
     ReloadConfig,
     Help,
     Version,
@@ -24,25 +25,74 @@ pub fn parse_args() -> CliAction {
 }
 
 pub fn parse_args_from(args: impl IntoIterator<Item = impl AsRef<str>>) -> CliAction {
-    let mut args = args.into_iter();
-    let first = match args.next() {
-        Some(arg) => arg.as_ref().to_string(),
-        None => return CliAction::RunDaemon,
-    };
+    let args: Vec<String> = args.into_iter().map(|s| s.as_ref().to_string()).collect();
+    if args.is_empty() {
+        return CliAction::RunDaemon;
+    }
 
-    match first.as_str() {
-        "--toggle" | "-t" => CliAction::ToggleUi,
-        "--shortcut-setup" => CliAction::ShortcutSetup,
-        "--shortcut-status" => CliAction::ShortcutStatus,
-        "--reload" | "-r" => CliAction::ReloadConfig,
-        "--help" | "-h" => CliAction::Help,
-        "--version" | "-V" => CliAction::Version,
-        unknown => {
-            eprintln!("error: unrecognized argument '{unknown}'");
+    let has_porcelain = args.iter().any(|a| a == "--porcelain");
+
+    if has_porcelain {
+        if args.len() == 2
+            && ((args[0] == "--shortcut-status" && args[1] == "--porcelain")
+                || (args[0] == "--porcelain" && args[1] == "--shortcut-status"))
+        {
+            return CliAction::ShortcutStatusPorcelain;
+        }
+
+        if args.iter().any(|a| {
+            matches!(
+                a.as_str(),
+                "--toggle"
+                    | "-t"
+                    | "--reload"
+                    | "-r"
+                    | "--shortcut-setup"
+                    | "--help"
+                    | "-h"
+                    | "--version"
+                    | "-V"
+            )
+        }) {
+            eprintln!("error: '--porcelain' is only supported with '--shortcut-status'");
             eprintln!();
             print_help();
             process::exit(2);
         }
+
+        if args.len() == 1 && args[0] == "--porcelain" {
+            eprintln!("error: '--porcelain' requires '--shortcut-status'");
+            eprintln!();
+            print_help();
+            process::exit(2);
+        }
+
+        eprintln!("error: unrecognized argument combination with '--porcelain'");
+        eprintln!();
+        print_help();
+        process::exit(2);
+    }
+
+    if args.len() == 1 {
+        match args[0].as_str() {
+            "--toggle" | "-t" => CliAction::ToggleUi,
+            "--shortcut-setup" => CliAction::ShortcutSetup,
+            "--shortcut-status" => CliAction::ShortcutStatus,
+            "--reload" | "-r" => CliAction::ReloadConfig,
+            "--help" | "-h" => CliAction::Help,
+            "--version" | "-V" => CliAction::Version,
+            unknown => {
+                eprintln!("error: unrecognized argument '{unknown}'");
+                eprintln!();
+                print_help();
+                process::exit(2);
+            }
+        }
+    } else {
+        eprintln!("error: unexpected argument '{}'", args[1]);
+        eprintln!();
+        print_help();
+        process::exit(2);
     }
 }
 
@@ -62,6 +112,9 @@ pub fn print_help() {
     println!("        --shortcut-setup     Open Pookie Paste directly to shortcut settings");
     println!(
         "        --shortcut-status    Print global shortcut configuration and active runtime status"
+    );
+    println!(
+        "        --porcelain          Produce machine-readable output (used with --shortcut-status)"
     );
     println!("    -h, --help               Print help information");
     println!("    -V, --version            Print version information");
@@ -86,7 +139,8 @@ pub async fn run_client(action: CliAction) -> anyhow::Result<()> {
         }
         CliAction::ToggleUi => send_toggle_request().await,
         CliAction::ShortcutSetup => send_shortcut_setup_request().await,
-        CliAction::ShortcutStatus => send_shortcut_status_request().await,
+        CliAction::ShortcutStatus => send_shortcut_status_request(false).await,
+        CliAction::ShortcutStatusPorcelain => send_shortcut_status_request(true).await,
         CliAction::ReloadConfig => send_reload_request().await,
     }
 }
@@ -254,12 +308,12 @@ pub async fn send_shortcut_setup_request_to(path: &Path) -> anyhow::Result<()> {
     }
 }
 
-pub async fn send_shortcut_status_request() -> anyhow::Result<()> {
+pub async fn send_shortcut_status_request(porcelain: bool) -> anyhow::Result<()> {
     let path = socket_path();
-    send_shortcut_status_request_to(&path).await
+    send_shortcut_status_request_to(&path, porcelain).await
 }
 
-pub async fn send_shortcut_status_request_to(path: &Path) -> anyhow::Result<()> {
+pub async fn send_shortcut_status_request_to(path: &Path, porcelain: bool) -> anyhow::Result<()> {
     let mut client = match IpcClient::connect(path).await {
         Ok(client) => client,
         Err(err) => {
@@ -274,7 +328,11 @@ pub async fn send_shortcut_status_request_to(path: &Path) -> anyhow::Result<()> 
 
     match client.send(&IpcRequest::RecheckShortcutStatus).await {
         Ok(IpcResponse::ShortcutStatus { status }) => {
-            print!("{}", format_shortcut_status(&status));
+            if porcelain {
+                print!("{}", format_shortcut_status_porcelain(&status));
+            } else {
+                print!("{}", format_shortcut_status(&status));
+            }
             Ok(())
         }
         Ok(IpcResponse::Error { message }) => {
@@ -337,6 +395,88 @@ pub fn format_shortcut_status(status: &ShortcutStatusInfo) -> String {
 
 pub fn format_reload_status(status: &ShortcutStatusInfo) -> String {
     format_shortcut_status_with_header("Pookie Paste Configuration Reloaded", status)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OnboardingShortcutStatus {
+    Ready,
+    NeedsSetup,
+    Conflict,
+    BoundUnverified,
+    Unavailable,
+}
+
+impl OnboardingShortcutStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Ready => "ready",
+            Self::NeedsSetup => "needs_setup",
+            Self::Conflict => "conflict",
+            Self::BoundUnverified => "bound_unverified",
+            Self::Unavailable => "unavailable",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OnboardingShortcutResult<'a> {
+    pub status: OnboardingShortcutStatus,
+    pub shortcut: &'a str,
+}
+
+pub fn shortcut_status_to_onboarding_status(
+    status: &ShortcutStatusInfo,
+) -> OnboardingShortcutResult<'_> {
+    match &status.state {
+        IpcShortcutState::Active { .. } => {
+            let shortcut = status
+                .effective_shortcut
+                .as_deref()
+                .unwrap_or(&status.configured_shortcut);
+            OnboardingShortcutResult {
+                status: OnboardingShortcutStatus::Ready,
+                shortcut,
+            }
+        }
+        IpcShortcutState::CompositorManaged { binding_status, .. } => {
+            let onboarding_status = match binding_status {
+                IpcCompositorBindingStatus::Verified => OnboardingShortcutStatus::Ready,
+                IpcCompositorBindingStatus::BoundUnverified => {
+                    OnboardingShortcutStatus::BoundUnverified
+                }
+                IpcCompositorBindingStatus::Unconfigured => OnboardingShortcutStatus::NeedsSetup,
+                IpcCompositorBindingStatus::Conflict => OnboardingShortcutStatus::Conflict,
+            };
+            OnboardingShortcutResult {
+                status: onboarding_status,
+                shortcut: &status.configured_shortcut,
+            }
+        }
+        IpcShortcutState::Conflict { .. } => OnboardingShortcutResult {
+            status: OnboardingShortcutStatus::Conflict,
+            shortcut: &status.configured_shortcut,
+        },
+        IpcShortcutState::Unavailable { .. }
+        | IpcShortcutState::Failed { .. }
+        | IpcShortcutState::Initializing => OnboardingShortcutResult {
+            status: OnboardingShortcutStatus::Unavailable,
+            shortcut: &status.configured_shortcut,
+        },
+    }
+}
+
+pub fn format_shortcut_status_porcelain(status: &ShortcutStatusInfo) -> String {
+    let result = shortcut_status_to_onboarding_status(status);
+    let sanitized_shortcut: String = result
+        .shortcut
+        .chars()
+        .filter(|&c| c != '\n' && c != '\r')
+        .collect();
+    format!(
+        "status={}\nshortcut={}\n",
+        result.status.as_str(),
+        sanitized_shortcut
+    )
 }
 
 pub fn format_shortcut_status_with_header(header: &str, status: &ShortcutStatusInfo) -> String {
@@ -613,6 +753,228 @@ mod tests {
         assert_eq!(
             parse_args_from(["--shortcut-setup"]),
             CliAction::ShortcutSetup
+        );
+    }
+
+    #[test]
+    fn parses_shortcut_status_porcelain_flag_combinations() {
+        assert_eq!(
+            parse_args_from(["--shortcut-status", "--porcelain"]),
+            CliAction::ShortcutStatusPorcelain
+        );
+        assert_eq!(
+            parse_args_from(["--porcelain", "--shortcut-status"]),
+            CliAction::ShortcutStatusPorcelain
+        );
+    }
+
+    #[test]
+    fn maps_active_state_with_effective_shortcut_to_ready() {
+        let status = ShortcutStatusInfo {
+            configured_shortcut: "Super+V".to_string(),
+            backend_name: Some("KDE Portal".to_string()),
+            capability: Some(IpcShortcutCapability::Portal),
+            effective_shortcut: Some("Meta+V".to_string()),
+            state: IpcShortcutState::Active {
+                description: "portal shortcut active".to_string(),
+            },
+        };
+        let result = shortcut_status_to_onboarding_status(&status);
+        assert_eq!(result.status, OnboardingShortcutStatus::Ready);
+        assert_eq!(result.shortcut, "Meta+V");
+        assert_eq!(
+            format_shortcut_status_porcelain(&status),
+            "status=ready\nshortcut=Meta+V\n"
+        );
+    }
+
+    #[test]
+    fn maps_active_state_without_effective_shortcut_to_ready() {
+        let status = ShortcutStatusInfo {
+            configured_shortcut: "Super+V".to_string(),
+            backend_name: Some("X11".to_string()),
+            capability: Some(IpcShortcutCapability::Native),
+            effective_shortcut: None,
+            state: IpcShortcutState::Active {
+                description: "native shortcut active".to_string(),
+            },
+        };
+        let result = shortcut_status_to_onboarding_status(&status);
+        assert_eq!(result.status, OnboardingShortcutStatus::Ready);
+        assert_eq!(result.shortcut, "Super+V");
+        assert_eq!(
+            format_shortcut_status_porcelain(&status),
+            "status=ready\nshortcut=Super+V\n"
+        );
+    }
+
+    #[test]
+    fn maps_compositor_verified_to_ready() {
+        let status = ShortcutStatusInfo {
+            configured_shortcut: "Super+V".to_string(),
+            backend_name: Some("Sway".to_string()),
+            capability: Some(IpcShortcutCapability::CompositorManaged),
+            effective_shortcut: None,
+            state: IpcShortcutState::CompositorManaged {
+                binding_status: IpcCompositorBindingStatus::Verified,
+                snippet: "bindsym $mod+v exec pookie-paste".to_string(),
+                conflict: None,
+                diagnostic: None,
+            },
+        };
+        let result = shortcut_status_to_onboarding_status(&status);
+        assert_eq!(result.status, OnboardingShortcutStatus::Ready);
+        assert_eq!(result.shortcut, "Super+V");
+        assert_eq!(
+            format_shortcut_status_porcelain(&status),
+            "status=ready\nshortcut=Super+V\n"
+        );
+    }
+
+    #[test]
+    fn maps_compositor_bound_unverified_to_bound_unverified() {
+        let status = ShortcutStatusInfo {
+            configured_shortcut: "Super+V".to_string(),
+            backend_name: Some("Hyprland".to_string()),
+            capability: Some(IpcShortcutCapability::CompositorManaged),
+            effective_shortcut: None,
+            state: IpcShortcutState::CompositorManaged {
+                binding_status: IpcCompositorBindingStatus::BoundUnverified,
+                snippet: "hl.bind(\"SUPER + V\")".to_string(),
+                conflict: None,
+                diagnostic: None,
+            },
+        };
+        let result = shortcut_status_to_onboarding_status(&status);
+        assert_eq!(result.status, OnboardingShortcutStatus::BoundUnverified);
+        assert_eq!(result.shortcut, "Super+V");
+        assert_eq!(
+            format_shortcut_status_porcelain(&status),
+            "status=bound_unverified\nshortcut=Super+V\n"
+        );
+    }
+
+    #[test]
+    fn maps_compositor_unconfigured_to_needs_setup() {
+        let status = ShortcutStatusInfo {
+            configured_shortcut: "Super+V".to_string(),
+            backend_name: Some("Sway".to_string()),
+            capability: Some(IpcShortcutCapability::CompositorManaged),
+            effective_shortcut: None,
+            state: IpcShortcutState::CompositorManaged {
+                binding_status: IpcCompositorBindingStatus::Unconfigured,
+                snippet: "bindsym $mod+v exec pookie-paste".to_string(),
+                conflict: None,
+                diagnostic: None,
+            },
+        };
+        let result = shortcut_status_to_onboarding_status(&status);
+        assert_eq!(result.status, OnboardingShortcutStatus::NeedsSetup);
+        assert_eq!(result.shortcut, "Super+V");
+        assert_eq!(
+            format_shortcut_status_porcelain(&status),
+            "status=needs_setup\nshortcut=Super+V\n"
+        );
+    }
+
+    #[test]
+    fn maps_compositor_conflict_to_conflict() {
+        let status = ShortcutStatusInfo {
+            configured_shortcut: "Super+V".to_string(),
+            backend_name: Some("Sway".to_string()),
+            capability: Some(IpcShortcutCapability::CompositorManaged),
+            effective_shortcut: None,
+            state: IpcShortcutState::CompositorManaged {
+                binding_status: IpcCompositorBindingStatus::Conflict,
+                snippet: "bindsym $mod+v exec pookie-paste".to_string(),
+                conflict: Some("existing conflict".to_string()),
+                diagnostic: None,
+            },
+        };
+        let result = shortcut_status_to_onboarding_status(&status);
+        assert_eq!(result.status, OnboardingShortcutStatus::Conflict);
+        assert_eq!(result.shortcut, "Super+V");
+        assert_eq!(
+            format_shortcut_status_porcelain(&status),
+            "status=conflict\nshortcut=Super+V\n"
+        );
+    }
+
+    #[test]
+    fn maps_native_conflict_to_conflict() {
+        let status = ShortcutStatusInfo {
+            configured_shortcut: "Super+V".to_string(),
+            backend_name: Some("X11".to_string()),
+            capability: Some(IpcShortcutCapability::Native),
+            effective_shortcut: None,
+            state: IpcShortcutState::Conflict {
+                details: "already grabbed".to_string(),
+            },
+        };
+        let result = shortcut_status_to_onboarding_status(&status);
+        assert_eq!(result.status, OnboardingShortcutStatus::Conflict);
+        assert_eq!(result.shortcut, "Super+V");
+        assert_eq!(
+            format_shortcut_status_porcelain(&status),
+            "status=conflict\nshortcut=Super+V\n"
+        );
+    }
+
+    #[test]
+    fn maps_unavailable_to_unavailable() {
+        let status = ShortcutStatusInfo {
+            configured_shortcut: "Super+V".to_string(),
+            backend_name: None,
+            capability: Some(IpcShortcutCapability::Unsupported),
+            effective_shortcut: None,
+            state: IpcShortcutState::Unavailable {
+                reason: "no display server".to_string(),
+            },
+        };
+        let result = shortcut_status_to_onboarding_status(&status);
+        assert_eq!(result.status, OnboardingShortcutStatus::Unavailable);
+        assert_eq!(result.shortcut, "Super+V");
+        assert_eq!(
+            format_shortcut_status_porcelain(&status),
+            "status=unavailable\nshortcut=Super+V\n"
+        );
+    }
+
+    #[test]
+    fn maps_failed_to_unavailable() {
+        let status = ShortcutStatusInfo {
+            configured_shortcut: "Super+V".to_string(),
+            backend_name: Some("X11".to_string()),
+            capability: Some(IpcShortcutCapability::Native),
+            effective_shortcut: None,
+            state: IpcShortcutState::Failed {
+                error: "io error".to_string(),
+            },
+        };
+        let result = shortcut_status_to_onboarding_status(&status);
+        assert_eq!(result.status, OnboardingShortcutStatus::Unavailable);
+        assert_eq!(result.shortcut, "Super+V");
+        assert_eq!(
+            format_shortcut_status_porcelain(&status),
+            "status=unavailable\nshortcut=Super+V\n"
+        );
+    }
+
+    #[test]
+    fn maps_initializing_to_unavailable() {
+        let status = ShortcutStatusInfo {
+            configured_shortcut: "Super+V".to_string(),
+            backend_name: Some("X11".to_string()),
+            capability: Some(IpcShortcutCapability::Native),
+            effective_shortcut: None,
+            state: IpcShortcutState::Initializing,
+        };
+        let result = shortcut_status_to_onboarding_status(&status);
+        assert_eq!(result.status, OnboardingShortcutStatus::Unavailable);
+        assert_eq!(result.shortcut, "Super+V");
+        assert_eq!(
+            format_shortcut_status_porcelain(&status),
+            "status=unavailable\nshortcut=Super+V\n"
         );
     }
 
