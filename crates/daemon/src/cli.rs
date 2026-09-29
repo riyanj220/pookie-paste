@@ -87,20 +87,105 @@ pub async fn run_client(action: CliAction) -> anyhow::Result<()> {
     }
 }
 
+const DAEMON_STARTUP_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(2500);
+const DAEMON_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(25);
+
+/// Returns true if an IPC connection error indicates the daemon is not running.
+pub fn is_daemon_absence_error(err: &std::io::Error) -> bool {
+    matches!(
+        err.kind(),
+        std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+    )
+}
+
+#[cfg(unix)]
+fn spawn_detached_daemon() -> std::io::Result<()> {
+    use std::os::unix::process::CommandExt;
+    use std::process::{Command, Stdio};
+
+    let current_exe = env::current_exe()?;
+    let mut cmd = Command::new(current_exe);
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+
+    unsafe {
+        cmd.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+
+    cmd.spawn()?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn spawn_detached_daemon() -> std::io::Result<()> {
+    use std::process::{Command, Stdio};
+
+    let current_exe = env::current_exe()?;
+    Command::new(current_exe)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+    Ok(())
+}
+
+async fn wait_for_daemon_ready(path: &Path) -> Result<IpcClient, String> {
+    let deadline = tokio::time::Instant::now() + DAEMON_STARTUP_TIMEOUT;
+
+    loop {
+        if let Ok(mut client) = IpcClient::connect(path).await
+            && let Ok(IpcResponse::Pong) = client.send(&IpcRequest::Ping).await
+        {
+            return Ok(client);
+        }
+
+        if tokio::time::Instant::now() >= deadline {
+            return Err(
+                "Error: Pookie Paste failed to become responsive after startup.\n\nRun 'pookie-paste' from a terminal to inspect the startup error."
+                    .to_string(),
+            );
+        }
+
+        tokio::time::sleep(DAEMON_POLL_INTERVAL).await;
+    }
+}
+
+/// Connects to the daemon's IPC socket, or safely starts the daemon detached
+/// if it is absent and waits for it to become ready via IPC Ping/Pong.
+pub async fn connect_or_ensure_daemon(path: &Path) -> Result<IpcClient, String> {
+    match IpcClient::connect(path).await {
+        Ok(client) => Ok(client),
+        Err(err) if is_daemon_absence_error(&err) => {
+            if let Err(spawn_err) = spawn_detached_daemon() {
+                return Err(format!(
+                    "Error: Failed to start Pookie Paste background daemon: {spawn_err}"
+                ));
+            }
+            wait_for_daemon_ready(path).await
+        }
+        Err(err) => Err(format!(
+            "Error: Could not connect to Pookie Paste IPC socket at {}: {err}",
+            path.display()
+        )),
+    }
+}
+
 pub async fn send_toggle_request() -> anyhow::Result<()> {
     let path = socket_path();
     send_toggle_request_to(&path).await
 }
 
 pub async fn send_toggle_request_to(path: &Path) -> anyhow::Result<()> {
-    let mut client = match IpcClient::connect(path).await {
+    let mut client = match connect_or_ensure_daemon(path).await {
         Ok(client) => client,
-        Err(err) => {
-            eprintln!(
-                "Error: Pookie Paste daemon is not running (could not connect to IPC socket at {})",
-                path.display()
-            );
-            eprintln!("Details: {err}");
+        Err(err_msg) => {
+            eprintln!("{err_msg}");
             process::exit(1);
         }
     };
@@ -460,5 +545,36 @@ mod tests {
             "Guidance            : Ensure the active binding executes 'pookie-paste --toggle'"
         ));
         assert!(!formatted.contains("Action Required"));
+    }
+
+    #[test]
+    fn classifies_daemon_absence_errors_correctly() {
+        use std::io::{Error, ErrorKind};
+
+        assert!(is_daemon_absence_error(&Error::from(ErrorKind::NotFound)));
+        assert!(is_daemon_absence_error(&Error::from(
+            ErrorKind::ConnectionRefused
+        )));
+
+        assert!(!is_daemon_absence_error(&Error::from(
+            ErrorKind::PermissionDenied
+        )));
+        assert!(!is_daemon_absence_error(&Error::from(ErrorKind::AddrInUse)));
+        assert!(!is_daemon_absence_error(&Error::from(ErrorKind::TimedOut)));
+        assert!(!is_daemon_absence_error(&Error::from(
+            ErrorKind::AlreadyExists
+        )));
+    }
+
+    #[test]
+    fn non_auto_start_actions_retain_distinct_parsing() {
+        assert_eq!(
+            parse_args_from(["--shortcut-status"]),
+            CliAction::ShortcutStatus
+        );
+        assert_eq!(parse_args_from(["--reload"]), CliAction::ReloadConfig);
+        assert_eq!(parse_args_from(["-r"]), CliAction::ReloadConfig);
+        assert_eq!(parse_args_from(["--toggle"]), CliAction::ToggleUi);
+        assert_eq!(parse_args_from(["-t"]), CliAction::ToggleUi);
     }
 }
