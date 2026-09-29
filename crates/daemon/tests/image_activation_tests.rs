@@ -260,7 +260,7 @@ async fn activates_persisted_image_writes_clipboard_pastes_and_promotes() {
     );
 
     let result = service
-        .activate(&image_id.to_string(), None)
+        .activate(&image_id.to_string(), Some(FocusTarget::new(1)))
         .await
         .expect("image activation failed");
 
