@@ -14,7 +14,7 @@ mod shortcut_view;
 mod theme;
 mod ui_style;
 
-use app::PookieApp;
+use app::{PookieApp, ViewMode};
 use eframe::egui;
 
 pub(crate) const POPUP_WIDTH: f32 = 360.0;
@@ -30,6 +30,19 @@ fn capture_initial_focus_target() -> Option<ipc::IpcFocusTarget> {
         .flatten()
 }
 
+fn parse_initial_view_mode() -> ViewMode {
+    parse_initial_view_mode_from(std::env::args().skip(1))
+}
+
+fn parse_initial_view_mode_from(args: impl IntoIterator<Item = impl AsRef<str>>) -> ViewMode {
+    for arg in args {
+        if arg.as_ref() == "--shortcut-setup" {
+            return ViewMode::ShortcutSetup;
+        }
+    }
+    ViewMode::History
+}
+
 fn main() -> eframe::Result<()> {
     /*
      * Capture the application that currently owns focus
@@ -39,6 +52,8 @@ fn main() -> eframe::Result<()> {
      * is activated so it can restore the original app.
      */
     let target_id = capture_initial_focus_target();
+
+    let initial_view_mode = parse_initial_view_mode();
 
     let app_theme = theme::detect_system_theme();
 
@@ -70,7 +85,40 @@ fn main() -> eframe::Result<()> {
         Box::new(move |cc| {
             ui_style::apply_theme(&cc.egui_ctx, app_theme);
 
-            Ok(Box::new(PookieApp::new(target_id, cc.egui_ctx.clone())))
+            Ok(Box::new(PookieApp::new(
+                target_id,
+                initial_view_mode,
+                cc.egui_ctx.clone(),
+            )))
         }),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_ui_startup_mode_remains_history() {
+        assert_eq!(
+            parse_initial_view_mode_from(Vec::<String>::new()),
+            ViewMode::History
+        );
+        assert_eq!(
+            parse_initial_view_mode_from(["--random-arg"]),
+            ViewMode::History
+        );
+    }
+
+    #[test]
+    fn shortcut_setup_startup_mode_resolves_to_shortcut_setup() {
+        assert_eq!(
+            parse_initial_view_mode_from(["--shortcut-setup"]),
+            ViewMode::ShortcutSetup
+        );
+        assert_eq!(
+            parse_initial_view_mode_from(["--other", "--shortcut-setup"]),
+            ViewMode::ShortcutSetup
+        );
+    }
 }

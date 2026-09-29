@@ -11,6 +11,7 @@ use ipc::{
 pub enum CliAction {
     RunDaemon,
     ToggleUi,
+    ShortcutSetup,
     ShortcutStatus,
     ReloadConfig,
     Help,
@@ -31,6 +32,7 @@ pub fn parse_args_from(args: impl IntoIterator<Item = impl AsRef<str>>) -> CliAc
 
     match first.as_str() {
         "--toggle" | "-t" => CliAction::ToggleUi,
+        "--shortcut-setup" => CliAction::ShortcutSetup,
         "--shortcut-status" => CliAction::ShortcutStatus,
         "--reload" | "-r" => CliAction::ReloadConfig,
         "--help" | "-h" => CliAction::Help,
@@ -57,6 +59,7 @@ pub fn print_help() {
     println!(
         "    -r, --reload             Reload configuration and shortcut in the running daemon"
     );
+    println!("        --shortcut-setup     Open Pookie Paste directly to shortcut settings");
     println!(
         "        --shortcut-status    Print global shortcut configuration and active runtime status"
     );
@@ -82,6 +85,7 @@ pub async fn run_client(action: CliAction) -> anyhow::Result<()> {
             Ok(())
         }
         CliAction::ToggleUi => send_toggle_request().await,
+        CliAction::ShortcutSetup => send_shortcut_setup_request().await,
         CliAction::ShortcutStatus => send_shortcut_status_request().await,
         CliAction::ReloadConfig => send_reload_request().await,
     }
@@ -207,6 +211,44 @@ pub async fn send_toggle_request_to(path: &Path) -> anyhow::Result<()> {
         }
         Err(err) => {
             eprintln!("Failed to send toggle request to daemon: {err:?}");
+            process::exit(1);
+        }
+    }
+}
+
+pub async fn send_shortcut_setup_request() -> anyhow::Result<()> {
+    let path = socket_path();
+    send_shortcut_setup_request_to(&path).await
+}
+
+pub async fn send_shortcut_setup_request_to(path: &Path) -> anyhow::Result<()> {
+    let mut client = match connect_or_ensure_daemon(path).await {
+        Ok(client) => client,
+        Err(err_msg) => {
+            eprintln!("{err_msg}");
+            process::exit(1);
+        }
+    };
+
+    match client.send(&IpcRequest::OpenShortcutSetup).await {
+        Ok(IpcResponse::UiToggled { launched }) => {
+            if !launched {
+                println!(
+                    "Pookie Paste is already open. Use the gear icon to open shortcut settings."
+                );
+            }
+            Ok(())
+        }
+        Ok(IpcResponse::Error { message }) => {
+            eprintln!("Error from Pookie Paste daemon: {message}");
+            process::exit(1);
+        }
+        Ok(other) => {
+            eprintln!("Unexpected response from daemon: {other:?}");
+            process::exit(1);
+        }
+        Err(err) => {
+            eprintln!("Failed to send shortcut setup request to daemon: {err:?}");
             process::exit(1);
         }
     }
@@ -564,6 +606,14 @@ mod tests {
         assert!(!is_daemon_absence_error(&Error::from(
             ErrorKind::AlreadyExists
         )));
+    }
+
+    #[test]
+    fn parses_shortcut_setup_flag() {
+        assert_eq!(
+            parse_args_from(["--shortcut-setup"]),
+            CliAction::ShortcutSetup
+        );
     }
 
     #[test]

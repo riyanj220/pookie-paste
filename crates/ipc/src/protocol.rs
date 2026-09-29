@@ -285,6 +285,8 @@ pub enum IpcRequest {
 
     ToggleUi,
 
+    OpenShortcutSetup,
+
     GetShortcutStatus,
 
     RecheckShortcutStatus,
@@ -739,6 +741,15 @@ mod tests {
         let request = IpcRequest::ToggleUi;
         let encoded = serde_json::to_string(&request).expect("serialization failed");
         assert_eq!(encoded, r#"{"type":"toggle_ui"}"#);
+        let decoded: IpcRequest = serde_json::from_str(&encoded).expect("deserialization failed");
+        assert_eq!(decoded, request);
+    }
+
+    #[test]
+    fn open_shortcut_setup_request_round_trips() {
+        let request = IpcRequest::OpenShortcutSetup;
+        let encoded = serde_json::to_string(&request).expect("serialization failed");
+        assert_eq!(encoded, r#"{"type":"open_shortcut_setup"}"#);
         let decoded: IpcRequest = serde_json::from_str(&encoded).expect("deserialization failed");
         assert_eq!(decoded, request);
     }

@@ -124,6 +124,7 @@ fn should_close_on_focus_loss(
 impl PookieApp {
     pub(crate) fn new(
         target_id: Option<ipc::IpcFocusTarget>,
+        initial_view_mode: ViewMode,
         repaint_context: egui::Context,
     ) -> Self {
         let (sender, receiver) = oneshot::channel();
@@ -164,7 +165,7 @@ impl PookieApp {
         });
 
         Self {
-            view_mode: ViewMode::History,
+            view_mode: initial_view_mode,
 
             history: HistoryState::Loading,
 
