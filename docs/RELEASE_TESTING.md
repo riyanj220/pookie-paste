@@ -8,6 +8,8 @@ Current primary validation targets:
 
 - X11
 - KDE Plasma Wayland
+- Sway
+- Hyprland
 
 ---
 
@@ -170,7 +172,7 @@ The following require real-session testing:
 
 - `Super+V`
 - Popup positioning
-- Popup focus behavior
+- Popup focus behavior and platform dismissal policy
 - Keyboard and mouse navigation
 - Text activation
 - Image activation
@@ -220,6 +222,7 @@ Validate:
 12. Confirm self-generated clipboard writes do not create duplicate history rows.
 13. Restart Pookie Paste and confirm text and image history still exists.
 14. Confirm the popup can be opened repeatedly after activation without leaving a stale UI process.
+15. Confirm clicking outside the popup window closes it (focus-loss dismissal).
 
 For image testing, use an application that accepts pasted images.
 
@@ -253,6 +256,7 @@ Validate:
 10. Activate an image in an image-capable target and confirm focus restoration + direct paste.
 11. Confirm activated items are promoted without creating duplicates.
 12. Restart Pookie Paste and confirm mixed history persists.
+13. Confirm clicking outside the popup window closes it (focus-loss dismissal).
 
 Also validate clipboard-content transitions:
 
@@ -289,6 +293,30 @@ focus target no longer exists
 ```
 
 This is currently treated as a focus-selection edge case rather than a release-blocking safety issue, provided the failure remains safe.
+
+---
+
+## Sway & Hyprland (wlroots / Tiling Wayland)
+
+Expected capabilities:
+
+```text
+Text capture: supported
+Image capture: supported
+Focus restoration: supported (Sway IPC / Hyprland IPC)
+Direct paste: supported (zwp_virtual_keyboard_v1)
+Popup dismissal: explicit-only (bare focus loss ignored)
+```
+
+Validate popup dismissal policy:
+
+1. Start Pookie Paste.
+2. Open the popup (`Super+V` or `pookie-paste --toggle`).
+3. Move the mouse cursor freely into the popup and back outside: confirm the popup remains open.
+4. Click an underlying application window outside the popup: confirm the popup remains open.
+5. Press `Escape`: confirm the popup closes.
+6. Open the popup and click the header close button (`✕`): confirm the popup closes.
+7. Open the popup, select an item, and activate: confirm the popup activates and closes.
 
 ---
 
@@ -433,8 +461,9 @@ Before considering a release validated:
 - [ ] Source-install smoke test passes
 - [ ] Published-release smoke test passes
 - [ ] SHA256 verification passes
-- [ ] X11 text + image E2E validation passes
-- [ ] KDE Plasma Wayland text + image E2E validation passes
+- [ ] X11 text + image E2E validation passes (including click-outside dismissal)
+- [ ] KDE Plasma Wayland text + image E2E validation passes (including click-outside dismissal)
+- [ ] Sway / Hyprland popup dismissal validation passes (pointer freedom, outside click ignored, explicit close)
 - [ ] Mixed text/image history behaves correctly
 - [ ] Image activation does not create duplicate history rows
 - [ ] Update preserves database and image history

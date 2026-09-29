@@ -26,12 +26,12 @@ Pookie Paste employs a multi-process architecture to decouple persistent state f
 |     UI Process        |       |      CLI Commands     |
 | - Short-lived client  |       | - Short-lived clients |
 | - egui/eframe popup   |       | - pookie-paste --toggle
-| - Closes on click/esc |       | - pookie-paste --reload
+| - Ephemeral lifecycle |       | - pookie-paste --reload
 +-----------------------+       +-----------------------+
 ```
 
 ### Why IPC Exists
-* **Process Independence**: The UI popup is short-lived and closes as soon as an item is selected or focus is lost. By isolating application state in the daemon, the UI can terminate or crash without risking clipboard history loss, database corruption, or listener disconnection.
+* **Process Independence**: The UI popup is short-lived and terminates on item activation, explicit user dismissal, or focus loss where the active popup policy treats focus loss as a dismissal signal (see [Runtime Model](../architecture/runtime-model.md)). By isolating application state in the daemon, the UI can terminate or crash without risking clipboard history loss, database corruption, or listener disconnection.
 * **Single Source of Truth**: SQLite storage, active clipboard listeners, self-write suppression fingerprints, and compositor connections are maintained exclusively by the daemon.
 * **CLI Control**: Administrative and keybinding commands (`--toggle`, `--reload`, `--shortcut-status`) connect as short-lived clients to query or control the running daemon.
 

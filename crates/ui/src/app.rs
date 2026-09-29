@@ -9,7 +9,7 @@ use crate::header::render_header;
 use crate::history::HistoryState;
 use crate::image_thumbnail::ImageThumbnailCache;
 use crate::ipc_client;
-use crate::platform::{self, FocusRequestState};
+use crate::platform::{self, FocusLossDismissalPolicy, FocusRequestState};
 use crate::rows::{
     RowVisualState, render_history_item_row, render_state_message, render_status_message,
 };
@@ -91,6 +91,34 @@ pub(crate) struct PookieApp {
     action_receiver: Option<oneshot::Receiver<Result<UiActionOutcome, String>>>,
 
     action_in_progress: bool,
+
+    /*
+     * Resolved once at startup from XDG_SESSION_TYPE and
+     * XDG_CURRENT_DESKTOP.
+     *
+     * Sway and Hyprland use focus-follows-mouse, so a bare
+     * wl_keyboard.leave is not a reliable "user clicked away"
+     * signal. This policy gates the focus-loss dismissal path
+     * so that pointer motion alone cannot close the popup on
+     * those compositors.
+     */
+    focus_loss_policy: FocusLossDismissalPolicy,
+}
+
+/// Determines whether a keyboard focus-loss event should close the popup.
+///
+/// Extracted as a pure function so that the dismissal logic can be unit
+/// tested without an egui context or live Wayland/X11 session.
+fn should_close_on_focus_loss(
+    policy: FocusLossDismissalPolicy,
+    has_received_focus: bool,
+    viewport_focused: bool,
+    activation_in_progress: bool,
+) -> bool {
+    policy == FocusLossDismissalPolicy::Dismiss
+        && has_received_focus
+        && !viewport_focused
+        && !activation_in_progress
 }
 
 impl PookieApp {
@@ -177,6 +205,8 @@ impl PookieApp {
             action_receiver: None,
 
             action_in_progress: false,
+
+            focus_loss_policy: platform::focus_loss_dismissal_policy(),
         }
     }
 
@@ -905,7 +935,12 @@ impl eframe::App for PookieApp {
             self.has_received_focus = true;
         }
 
-        if self.has_received_focus && !viewport_focused && !self.activation_in_progress {
+        if should_close_on_focus_loss(
+            self.focus_loss_policy,
+            self.has_received_focus,
+            viewport_focused,
+            self.activation_in_progress,
+        ) {
             ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
 
             return;
@@ -1281,5 +1316,73 @@ impl eframe::App for PookieApp {
 
             self.start_activation_for_index(ui.ctx(), index);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /*
+     * Tests for the pure dismissal-decision function.
+     *
+     * These tests do not require a live egui context, Wayland session,
+     * or X11 connection. They verify only the boolean decision logic so
+     * that a regression in the dismissal gate can be caught in CI
+     * regardless of the host environment.
+     */
+
+    #[test]
+    fn dismiss_policy_closes_after_focus_lost() {
+        assert!(should_close_on_focus_loss(
+            FocusLossDismissalPolicy::Dismiss,
+            true,  // has_received_focus
+            false, // viewport_focused (focus lost)
+            false, // activation_in_progress
+        ));
+    }
+
+    #[test]
+    fn ignore_policy_does_not_close_on_focus_lost() {
+        // On Sway/Hyprland pointer motion alone causes focus loss.
+        // With Ignore policy the popup must stay open.
+        assert!(!should_close_on_focus_loss(
+            FocusLossDismissalPolicy::Ignore,
+            true,  // has_received_focus
+            false, // viewport_focused (focus lost)
+            false, // activation_in_progress
+        ));
+    }
+
+    #[test]
+    fn activation_in_progress_prevents_close_regardless_of_policy() {
+        assert!(!should_close_on_focus_loss(
+            FocusLossDismissalPolicy::Dismiss,
+            true,  // has_received_focus
+            false, // viewport_focused (focus lost)
+            true,  // activation_in_progress
+        ));
+    }
+
+    #[test]
+    fn no_close_before_focus_received() {
+        // Guard: popup must have received focus at least once before focus
+        // loss is treated as a dismissal event.
+        assert!(!should_close_on_focus_loss(
+            FocusLossDismissalPolicy::Dismiss,
+            false, // has_received_focus (never acquired)
+            false, // viewport_focused
+            false, // activation_in_progress
+        ));
+    }
+
+    #[test]
+    fn no_close_while_still_focused() {
+        assert!(!should_close_on_focus_loss(
+            FocusLossDismissalPolicy::Dismiss,
+            true,  // has_received_focus
+            true,  // viewport_focused (still focused)
+            false, // activation_in_progress
+        ));
     }
 }

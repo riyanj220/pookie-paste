@@ -24,6 +24,7 @@ For comprehensive implementation details, see the modular guides in [Platform Do
 * **Architecture**: Direct display server interaction using `x11rb`.
 * **Clipboard**: Continuous monitoring via periodic polling (`POLL_INTERVAL = 500ms`) and `arboard` read/write access.
 * **Focus & Paste**: Window capture and restoration via EWMH `_NET_ACTIVE_WINDOW` root-window messages; synthetic Ctrl+V keystroke injection via the `XTest` extension.
+* **Popup Lifecycle**: Focus loss is treated as a dismissal signal (`FocusLossDismissalPolicy::Dismiss`); when focus transfers away from the popup, the popup closes.
 * **Shortcuts**: Pookie directly owns the global keybinding using transactional passive root-window grabs (`XGrabKey`) covering all `NumLock` and `CapsLock` modifier mask permutations.
 * *Details: [X11 Activation](activation/platforms/x11.md) | [X11 Shortcuts](shortcuts/platforms/x11.md)*
 
@@ -31,6 +32,7 @@ For comprehensive implementation details, see the modular guides in [Platform Do
 * **Architecture**: Interacts across session D-Bus and standard Wayland protocols.
 * **Clipboard**: Continuous event-driven monitoring using modern `ext-data-control-v1` (falling back to `zwlr_data_control_v1`) and `wl-clipboard-rs`.
 * **Focus & Paste**: Window identity tracking and focus switching via a dedicated KWin D-Bus helper script (`org.kde.kglobalaccel`); synthetic keystroke injection via XDG Desktop Portal `RemoteDesktop` and the Emulated Input System (EIS / `libei`).
+* **Popup Lifecycle**: Focus loss is treated as a dismissal signal (`FocusLossDismissalPolicy::Dismiss`); when focus transfers away from the popup, the popup closes.
 * **Shortcuts**: Managed through the XDG Desktop Portal `GlobalShortcuts` interface (`org.freedesktop.portal.GlobalShortcuts`). The portal-reported effective shortcut is authoritative over `config.toml`, and graphical rebinding opens the portal's native configuration dialog.
 * *Details: [KDE Wayland Activation](activation/platforms/kde-wayland.md) | [KDE Desktop Portal Shortcuts](shortcuts/platforms/kde-portal.md)*
 
@@ -38,6 +40,7 @@ For comprehensive implementation details, see the modular guides in [Platform Do
 * **Architecture**: Communicates with the live compositor over Sway's Unix domain socket (`$SWAYSOCK`).
 * **Clipboard**: Event-driven monitoring via `wlr-data-control-v1` / `ext-data-control-v1` protocols.
 * **Focus & Paste**: Container capture and focus switching via Sway IPC (`GET_TREE` and `[con_id=...] focus`); synthetic Ctrl+V injection via the `zwp_virtual_keyboard_v1` protocol.
+* **Popup Lifecycle**: Bare focus loss is ignored (`FocusLossDismissalPolicy::Ignore`). Pointer motion into or out of the popup does not close it, and clicking outside does not dismiss it. Explicit dismissal remains Escape, the header close button (`✕`), or item activation.
 * **Shortcuts**: Compositor-managed. Sway owns the live keybinding and executes `pookie-paste --toggle`. Pookie records desired intent in `~/.config/pookie-paste/config.toml`, formats the canonical `bindsym` snippet, and verifies status authoritatively over live Sway IPC (`GET_CONFIG`). Pookie never silently modifies `~/.config/sway/config`.
 * *Details: [Sway Activation](activation/platforms/sway.md) | [Sway Shortcuts](shortcuts/platforms/sway.md)*
 
@@ -45,6 +48,7 @@ For comprehensive implementation details, see the modular guides in [Platform Do
 * **Architecture**: Communicates with Hyprland over its Unix domain command socket (`$HYPRLAND_INSTANCE_SIGNATURE`).
 * **Clipboard**: Event-driven monitoring via `ext-data-control-v1` / `wlr-data-control-v1`.
 * **Focus & Paste**: Hexadecimal window memory address capture (`j/activewindow`) and dispatcher focus restoration; synthetic Ctrl+V injection via `zwp_virtual_keyboard_v1`.
+* **Popup Lifecycle**: Bare focus loss is ignored (`FocusLossDismissalPolicy::Ignore`). Pointer motion into or out of the popup does not close it, and clicking outside does not dismiss it. Explicit dismissal remains Escape, the header close button (`✕`), or item activation.
 * **Shortcuts**: Compositor-managed. Hyprland captures the shortcut and executes `pookie-paste --toggle`. Pookie inspects live active bindings via `j/binds` IPC. If bound to an opaque Lua callback (`__lua`), Pookie truthfully classifies the binding as `BoundUnverified` (accepted as valid in the UI without false upgrades). Pookie never silently modifies `hyprland.conf` or `hyprland.lua`.
 * *Details: [Hyprland Activation](activation/platforms/hyprland.md) | [Hyprland Shortcuts](shortcuts/platforms/hyprland.md)*
 
@@ -64,8 +68,8 @@ When running in an unsupported environment, when direct paste capability is unav
 
 ## Current Known Limitations
 
-1. **Wayland Floating Window Placement**:
-   The popup UI (`pookie-paste-ui`) is built on `eframe`/`winit` as a standard `xdg_toplevel` window. In tiling compositors (Sway, Hyprland), window rules (`windowrulev2 = float, class:^(pookie-paste-ui)$` or `for_window [app_id="pookie-paste-ui"] floating enable`) are recommended to ensure floating presentation.
+1. **Wayland Floating Window Placement & Tiling Lifecycles**:
+   The popup UI (`pookie-paste-ui`) is built on `eframe`/`winit` as a standard `xdg_toplevel` window. In tiling compositors (Sway, Hyprland), window rules (`windowrulev2 = float, class:^(pookie-paste-ui)$` or `for_window [app_id="pookie-paste-ui"] floating enable`) are recommended to ensure floating presentation. Additionally, because pointer motion across window boundaries can trigger focus transitions on these compositors, Pookie ignores bare focus loss on Sway and Hyprland, requiring explicit dismissal (Escape, header close button, or item selection).
 2. **Wayland Shortcut Recording Constraint**:
    When recording a shortcut in the UI, if the compositor already has that exact key chord bound, the compositor intercepts the key event before the popup window receives it. To rebind an existing key chord, users may update `config.toml` directly or temporarily disable the compositor binding.
 3. **Toggle Semantics (`--toggle`)**:
