@@ -55,7 +55,7 @@ The `pookie-paste` binary serves as both the persistent background daemon and th
 | `pookie-paste -V, --version` | Prints the application version. | [`crates/daemon/src/cli.rs`](../../crates/daemon/src/cli.rs) |
 
 > [!NOTE]
-> `--toggle` is named historically but does not implement a true visibility toggle (i.e. it does not close an already visible popup). If the popup is already running, the daemon preserves the existing window and returns `UiLaunchOutcome::AlreadyRunning`. On X11, an open popup may close on an external click or hotkey due to native window focus-loss semantics, but Wayland compositors do not have an explicit daemon-driven close mechanism.
+> `--toggle` is named historically but does not implement a true visibility toggle (i.e. it does not close an already visible popup). If the popup is already running, the daemon preserves the existing window and returns `UiLaunchOutcome::AlreadyRunning`. On X11 and KDE Plasma Wayland, an open popup closes when focus is transferred away from the popup under its dismissal policy, while on Sway and Hyprland, bare focus loss is ignored to accommodate compositor pointer-driven focus transitions.
 
 ---
 
@@ -111,11 +111,13 @@ Because the popup window has not yet been mapped, the user's previously active a
 2. Passed back to the daemon during `ActivateItem` so the daemon knows exactly which window must regain focus before paste injection. If target capture returns `None` (or was omitted), the activation service halts before paste capability evaluation and returns `ClipboardUpdated` without attempting synthetic paste.
 
 ### Dismissal & Termination
-The UI process terminates immediately when:
-* A history item is clicked or selected with Enter (initiating activation). The popup hides while the daemon restores focus and pastes; it closes permanently upon a successful outcome (`Pasted` or `ClipboardUpdated`), or unhides with an error message if paste restoration fails.
-* The user presses Escape. If a context menu or shortcut recording is active, Escape cancels that sub-state first; a subsequent Escape closes the popup.
-* The user clicks the header close button (`✕`).
-* The popup window loses input focus after having initially acquired focus (`has_received_focus && !viewport_focused && !activation_in_progress`).
+The UI process terminates upon:
+* **Item Activation**: A history item is clicked or selected with Enter. The popup hides while the daemon restores focus and pastes; it closes permanently upon a successful outcome (`Pasted` or `ClipboardUpdated`), or unhides with an error message if paste restoration fails.
+* **Explicit Cancellation**: The user presses Escape (canceling active sub-states such as context menus or shortcut recording first), or clicks the header close button (`✕`).
+* **Platform Focus-Loss Policy**: The popup window loses input focus after having initially acquired focus (`has_received_focus && !viewport_focused && !activation_in_progress`), evaluated against the startup `FocusLossDismissalPolicy`:
+  * **X11 and KDE Plasma Wayland (`Dismiss`)**: Pookie preserves focus-loss dismissal on X11 and KDE Plasma Wayland. When focus is transferred away from the popup, the popup closes.
+  * **Sway and Hyprland (`Ignore`)**: On Sway and Hyprland, bare focus loss is ignored because compositor-driven focus changes can occur without dismissal intent. Pointer movement into or out of the popup does not close it, and clicking outside does not dismiss it. Explicit dismissal remains available through Escape, the header close button (`✕`), or item activation.
+  * **Unknown / Generic Wayland (`Dismiss`)**: Falls back to dismissal on focus loss to preserve standard desktop popup expectations.
 
 ---
 
