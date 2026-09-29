@@ -48,6 +48,24 @@ pub enum ShortcutViewAction {
     ReloadSway,
 }
 
+/// Returns the concise attention banner text for a shortcut status if attention is required.
+pub fn attention_banner_text(status: &ShortcutStatusInfo) -> Option<&'static str> {
+    match &status.state {
+        IpcShortcutState::CompositorManaged {
+            binding_status: IpcCompositorBindingStatus::Unconfigured,
+            ..
+        } => Some("Shortcut not bound in compositor"),
+        IpcShortcutState::CompositorManaged {
+            binding_status: IpcCompositorBindingStatus::Conflict,
+            ..
+        } => Some("Shortcut conflict detected in compositor"),
+        IpcShortcutState::Conflict { .. } => Some("Shortcut is already in use"),
+        IpcShortcutState::Failed { .. } => Some("Shortcut configuration failed"),
+        IpcShortcutState::Unavailable { .. } => Some("Global shortcut is currently unavailable"),
+        _ => None,
+    }
+}
+
 /// Renders a non-blocking attention banner above the clipboard history
 /// if shortcut configuration requires attention (e.g. Unconfigured or Conflict).
 pub fn render_attention_banner(
@@ -59,20 +77,7 @@ pub fn render_attention_banner(
         return false;
     };
 
-    let banner_text = match &status.state {
-        IpcShortcutState::CompositorManaged {
-            binding_status: IpcCompositorBindingStatus::Unconfigured,
-            ..
-        } => Some("Shortcut not bound in compositor"),
-        IpcShortcutState::CompositorManaged {
-            binding_status: IpcCompositorBindingStatus::Conflict,
-            ..
-        } => Some("Shortcut conflict detected in compositor"),
-        IpcShortcutState::Unavailable { .. } => Some("Global shortcut is currently unavailable"),
-        _ => None,
-    };
-
-    let Some(text) = banner_text else {
+    let Some(text) = attention_banner_text(status) else {
         return false;
     };
 
@@ -391,6 +396,50 @@ pub(crate) fn format_config_path_for_display(path: &std::path::Path) -> String {
     path.display().to_string()
 }
 
+fn render_status_notice(ui: &mut egui::Ui, status: &ShortcutStatusInfo) {
+    match &status.state {
+        IpcShortcutState::Conflict { details } => {
+            ui.add_space(6.0);
+            let warn_color = if ui.visuals().dark_mode {
+                egui::Color32::from_rgb(251, 191, 36)
+            } else {
+                egui::Color32::from_rgb(217, 119, 6)
+            };
+            ui.horizontal(|ui| {
+                let (icon_rect, _) =
+                    ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
+                crate::controls::render_warning_icon(ui, icon_rect.center(), warn_color);
+                ui.add_space(2.0);
+                ui.label(
+                    egui::RichText::new(details)
+                        .size(ui_style::BODY_TEXT_SIZE - 1.0)
+                        .color(warn_color),
+                );
+            });
+        }
+        IpcShortcutState::Failed { error } => {
+            ui.add_space(6.0);
+            let err_color = if ui.visuals().dark_mode {
+                egui::Color32::from_rgb(248, 113, 113)
+            } else {
+                egui::Color32::from_rgb(220, 38, 38)
+            };
+            ui.horizontal(|ui| {
+                let (icon_rect, _) =
+                    ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
+                crate::controls::render_warning_icon(ui, icon_rect.center(), err_color);
+                ui.add_space(2.0);
+                ui.label(
+                    egui::RichText::new(error)
+                        .size(ui_style::BODY_TEXT_SIZE - 1.0)
+                        .color(err_color),
+                );
+            });
+        }
+        _ => {}
+    }
+}
+
 fn render_native_section(
     ui: &mut egui::Ui,
     state: &mut ShortcutViewState,
@@ -413,6 +462,10 @@ fn render_native_section(
         state.error_message = None;
         state.success_message = None;
     }
+
+    if !state.is_recording && state.candidate.is_none() {
+        render_status_notice(ui, status);
+    }
 }
 
 fn render_portal_section(
@@ -429,6 +482,8 @@ fn render_portal_section(
     if render_current_shortcut_row(ui, "Current shortcut", display_shortcut, palette) {
         *action = ShortcutViewAction::ConfigurePortal;
     }
+
+    render_status_notice(ui, status);
 }
 
 fn render_sway_section(
@@ -1398,5 +1453,92 @@ mod tests {
         } else {
             assert_eq!(formatted, "/etc/sway/config");
         }
+    }
+
+    #[test]
+    fn attention_banner_identifies_warning_and_healthy_states() {
+        let make_status = |state| ShortcutStatusInfo {
+            configured_shortcut: "Super+V".to_string(),
+            backend_name: Some("test".to_string()),
+            capability: Some(IpcShortcutCapability::Native),
+            effective_shortcut: None,
+            state,
+        };
+
+        // Native conflict -> warning
+        assert_eq!(
+            attention_banner_text(&make_status(IpcShortcutState::Conflict {
+                details: "already in use".to_string()
+            })),
+            Some("Shortcut is already in use")
+        );
+
+        // Failed -> warning
+        assert_eq!(
+            attention_banner_text(&make_status(IpcShortcutState::Failed {
+                error: "registration failed".to_string()
+            })),
+            Some("Shortcut configuration failed")
+        );
+
+        // Unavailable -> warning
+        assert_eq!(
+            attention_banner_text(&make_status(IpcShortcutState::Unavailable {
+                reason: "no backend".to_string()
+            })),
+            Some("Global shortcut is currently unavailable")
+        );
+
+        // Compositor Unconfigured -> warning
+        assert_eq!(
+            attention_banner_text(&make_status(IpcShortcutState::CompositorManaged {
+                binding_status: IpcCompositorBindingStatus::Unconfigured,
+                snippet: "bindsym ...".to_string(),
+                conflict: None,
+                diagnostic: None,
+            })),
+            Some("Shortcut not bound in compositor")
+        );
+
+        // Compositor Conflict -> warning
+        assert_eq!(
+            attention_banner_text(&make_status(IpcShortcutState::CompositorManaged {
+                binding_status: IpcCompositorBindingStatus::Conflict,
+                snippet: "bindsym ...".to_string(),
+                conflict: Some("conflict".to_string()),
+                diagnostic: None,
+            })),
+            Some("Shortcut conflict detected in compositor")
+        );
+
+        // BoundUnverified -> NO warning
+        assert_eq!(
+            attention_banner_text(&make_status(IpcShortcutState::CompositorManaged {
+                binding_status: IpcCompositorBindingStatus::BoundUnverified,
+                snippet: "hl.bind(...)".to_string(),
+                conflict: None,
+                diagnostic: None,
+            })),
+            None
+        );
+
+        // Compositor Verified -> NO warning
+        assert_eq!(
+            attention_banner_text(&make_status(IpcShortcutState::CompositorManaged {
+                binding_status: IpcCompositorBindingStatus::Verified,
+                snippet: "bindsym ...".to_string(),
+                conflict: None,
+                diagnostic: None,
+            })),
+            None
+        );
+
+        // Active -> NO warning
+        assert_eq!(
+            attention_banner_text(&make_status(IpcShortcutState::Active {
+                description: "active".to_string()
+            })),
+            None
+        );
     }
 }
