@@ -143,9 +143,21 @@ where
             return Ok(ActivationResult::NotFound);
         }
 
-        if let Some(target) = target
-            && let Err(error) = self.focus_service.restore_and_wait(target.clone()).await
-        {
+        /*
+         * Safety invariant: Pookie never injects synthetic paste
+         * into an unconfirmed target.
+         *
+         * If no focus target was provided, clipboard writeback and
+         * history promotion have already completed, so degrade
+         * gracefully to ClipboardUpdated without calling paste().
+         */
+        let Some(target) = target else {
+            tracing::debug!("no focus target provided; direct paste skipped");
+
+            return Ok(ActivationResult::ClipboardUpdated);
+        };
+
+        if let Err(error) = self.focus_service.restore_and_wait(target.clone()).await {
             tracing::error!(
                 error = ?error,
                 target = %target,
@@ -447,7 +459,7 @@ mod tests {
         history_service.save(c).await.expect("save C failed");
 
         let result = activation_service
-            .activate(&b_id, None)
+            .activate(&b_id, Some(FocusTarget::new(12345)))
             .await
             .expect("activation failed");
 
@@ -477,6 +489,70 @@ mod tests {
         assert_eq!(items[1].id, c_id);
 
         assert_eq!(items[2].id, a_id);
+    }
+
+    #[tokio::test]
+    async fn missing_target_with_direct_capability_updates_clipboard_without_pasting() {
+        let history_service = create_history_service().await;
+
+        let written = StdArc::new(StdMutex::new(None));
+
+        let pasted = StdArc::new(AtomicBool::new(false));
+
+        let paste_backend = FakePasteBackend::direct(StdArc::clone(&pasted));
+
+        let activation_service = create_activation_service(
+            StdArc::clone(&history_service),
+            StdArc::clone(&written),
+            paste_backend,
+        );
+
+        let base_time = chrono::Utc::now() - chrono::Duration::seconds(10);
+
+        let item = ClipboardItem {
+            id: uuid::Uuid::new_v4(),
+            content: ClipboardContent::Text("Targetless write".to_string()),
+            hash: "targetless-direct".to_string(),
+            created_at: base_time,
+        };
+
+        let item_id = item.id.to_string();
+
+        history_service
+            .save(item)
+            .await
+            .expect("history save failed");
+
+        let result = activation_service
+            .activate(&item_id, None)
+            .await
+            .expect("activation failed");
+
+        assert_eq!(result, ActivationResult::ClipboardUpdated,);
+
+        assert!(
+            !pasted.load(Ordering::SeqCst),
+            "direct paste backend must not be called when target is None",
+        );
+
+        assert_eq!(
+            written
+                .lock()
+                .expect("fake clipboard mutex poisoned")
+                .as_deref(),
+            Some("Targetless write"),
+            "clipboard should be updated",
+        );
+
+        let items = history_service
+            .get_all()
+            .await
+            .expect("history retrieval failed");
+
+        assert_eq!(
+            items[0].id, item_id,
+            "activated item should still be promoted",
+        );
     }
 
     #[tokio::test]
@@ -640,7 +716,7 @@ mod tests {
         history_service.save(c).await.expect("save C failed");
 
         let result = activation_service
-            .activate(&b_id, None)
+            .activate(&b_id, Some(FocusTarget::new(12345)))
             .await
             .expect("activation failed");
 
@@ -720,7 +796,7 @@ mod tests {
         history_service.save(c).await.expect("save C failed");
 
         let result = activation_service
-            .activate(&b_id, None)
+            .activate(&b_id, Some(FocusTarget::new(12345)))
             .await
             .expect("activation failed");
 
