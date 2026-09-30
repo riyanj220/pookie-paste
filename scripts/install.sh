@@ -359,8 +359,8 @@ case ":${PATH}:" in
 
     *)
         echo
-        echo "Note: ~/.local/bin is not in PATH."
-        echo 'Add: export PATH="$HOME/.local/bin:$PATH"'
+        echo "Note: ~/.local/bin isn't in this shell's PATH."
+        echo "Pookie will work normally, but terminal commands may require the full path."
         ;;
 esac
 echo
