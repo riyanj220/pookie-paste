@@ -65,7 +65,17 @@ rm -f \
     "$POOKIE_DAEMON_DEST" \
     "$POOKIE_UI_DEST" \
     "$POOKIE_DESKTOP_DEST" \
-    "$POOKIE_AUTOSTART_DEST"
+    "$POOKIE_AUTOSTART_DEST" \
+    "${POOKIE_ICONS_DIR}/scalable/apps/${POOKIE_APP_ID}.svg" \
+    "${POOKIE_ICONS_DIR}/256x256/apps/${POOKIE_APP_ID}.png" \
+    "${POOKIE_ICONS_DIR}/128x128/apps/${POOKIE_APP_ID}.png" \
+    "${POOKIE_ICONS_DIR}/64x64/apps/${POOKIE_APP_ID}.png" \
+    "${POOKIE_ICONS_DIR}/48x48/apps/${POOKIE_APP_ID}.png" \
+    "${POOKIE_ICONS_DIR}/32x32/apps/${POOKIE_APP_ID}.png"
+
+if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+    gtk-update-icon-cache -q -t "${POOKIE_ICONS_DIR}" 2>/dev/null || true
+fi
 
 uninstall_kwin_helper || true
 

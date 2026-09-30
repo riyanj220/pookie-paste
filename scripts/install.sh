@@ -153,6 +153,8 @@ AUTOSTART_SOURCE=""
 
 KWIN_SOURCE=""
 
+ICONS_SOURCE=""
+
 if [[ "$FROM_SOURCE" == true ]]; then
     if ! command -v cc >/dev/null 2>&1 \
         || ! command -v make >/dev/null 2>&1 \
@@ -206,6 +208,8 @@ if [[ "$FROM_SOURCE" == true ]]; then
     AUTOSTART_SOURCE="${PROJECT_ROOT}/packaging/linux/io.github.riyanj220.PookiePaste-autostart.desktop"
 
     KWIN_SOURCE="${PROJECT_ROOT}/extras/kwin/pookie-focus"
+
+    ICONS_SOURCE="${PROJECT_ROOT}/packaging/icons/hicolor"
 else
     if ! command -v curl >/dev/null 2>&1 \
         || ! command -v tar >/dev/null 2>&1 \
@@ -258,6 +262,8 @@ else
     AUTOSTART_SOURCE="${POOKIE_RELEASE_BUNDLE_DIR}/share/autostart/io.github.riyanj220.PookiePaste-autostart.desktop"
 
     KWIN_SOURCE="${POOKIE_RELEASE_BUNDLE_DIR}/share/pookie-paste/kwin/pookie-focus"
+
+    ICONS_SOURCE="${POOKIE_RELEASE_BUNDLE_DIR}/share/icons/hicolor"
 fi
 
 #
@@ -305,6 +311,12 @@ then
     exit 1
 fi
 
+if [[ ! -d "$ICONS_SOURCE" ]]; then
+    echo "Prepared icon directory is missing:" >&2
+    echo "  ${ICONS_SOURCE}" >&2
+    exit 1
+fi
+
 if [[ "$IS_UPGRADE" == true ]]; then
     echo "Updating Pookie Paste..."
 else
@@ -334,6 +346,26 @@ install \
     -m 0644 \
     "$AUTOSTART_SOURCE" \
     "$POOKIE_AUTOSTART_DEST"
+
+for size in 256x256 128x128 64x64 48x48 32x32; do
+    if [[ -f "${ICONS_SOURCE}/${size}/apps/${POOKIE_APP_ID}.png" ]]; then
+        install \
+            -m 0644 \
+            "${ICONS_SOURCE}/${size}/apps/${POOKIE_APP_ID}.png" \
+            "${POOKIE_ICONS_DIR}/${size}/apps/${POOKIE_APP_ID}.png"
+    fi
+done
+
+if [[ -f "${ICONS_SOURCE}/scalable/apps/${POOKIE_APP_ID}.svg" ]]; then
+    install \
+        -m 0644 \
+        "${ICONS_SOURCE}/scalable/apps/${POOKIE_APP_ID}.svg" \
+        "${POOKIE_ICONS_DIR}/scalable/apps/${POOKIE_APP_ID}.svg"
+fi
+
+if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+    gtk-update-icon-cache -q -t "${POOKIE_ICONS_DIR}" 2>/dev/null || true
+fi
 
 if is_kde_session; then
     install_kde_dependencies \

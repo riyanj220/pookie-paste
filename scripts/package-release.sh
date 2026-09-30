@@ -201,6 +201,12 @@ cp -a \
     "${PROJECT_ROOT}/extras/kwin/pookie-focus" \
     "${BUNDLE_DIR}/share/pookie-paste/kwin/pookie-focus"
 
+mkdir -p "${BUNDLE_DIR}/share/icons"
+
+cp -a \
+    "${PROJECT_ROOT}/packaging/icons/hicolor" \
+    "${BUNDLE_DIR}/share/icons/hicolor"
+
 install \
     -m 0644 \
     "${PROJECT_ROOT}/LICENSE" \

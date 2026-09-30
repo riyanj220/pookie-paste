@@ -28,11 +28,19 @@ POOKIE_DESKTOP_DEST="${POOKIE_APPLICATIONS_DIR}/${POOKIE_APP_ID}.desktop"
 
 POOKIE_AUTOSTART_DEST="${POOKIE_AUTOSTART_DIR}/${POOKIE_APP_ID}-autostart.desktop"
 
+POOKIE_ICONS_DIR="${POOKIE_DATA_HOME}/icons/hicolor"
+
 ensure_install_directories() {
     mkdir -p \
         "$POOKIE_BIN_DIR" \
         "$POOKIE_APPLICATIONS_DIR" \
         "$POOKIE_AUTOSTART_DIR" \
         "$POOKIE_DATA_DIR" \
-        "$POOKIE_STATE_DIR"
+        "$POOKIE_STATE_DIR" \
+        "${POOKIE_ICONS_DIR}/scalable/apps" \
+        "${POOKIE_ICONS_DIR}/256x256/apps" \
+        "${POOKIE_ICONS_DIR}/128x128/apps" \
+        "${POOKIE_ICONS_DIR}/64x64/apps" \
+        "${POOKIE_ICONS_DIR}/48x48/apps" \
+        "${POOKIE_ICONS_DIR}/32x32/apps"
 }

@@ -171,6 +171,13 @@ validate_release_bundle() {
         return 1
     fi
 
+    local icon_file="${bundle_dir}/share/icons/hicolor/128x128/apps/io.github.riyanj220.PookiePaste.png"
+
+    if [[ ! -f "$icon_file" ]]; then
+        echo "Release bundle is missing the application icon." >&2
+        return 1
+    fi
+
     local actual_version
 
     actual_version="$(

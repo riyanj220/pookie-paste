@@ -43,6 +43,20 @@ fn parse_initial_view_mode_from(args: impl IntoIterator<Item = impl AsRef<str>>)
     ViewMode::History
 }
 
+const APP_ICON_PNG_BYTES: &[u8] = include_bytes!("../assets/pookie-paste-128.png");
+
+fn load_app_icon() -> Option<egui::IconData> {
+    let image = image::load_from_memory(APP_ICON_PNG_BYTES)
+        .ok()?
+        .into_rgba8();
+    let (width, height) = image.dimensions();
+    Some(egui::IconData {
+        rgba: image.into_raw(),
+        width,
+        height,
+    })
+}
+
 fn main() -> eframe::Result<()> {
     /*
      * Capture the application that currently owns focus
@@ -60,7 +74,12 @@ fn main() -> eframe::Result<()> {
     let mut viewport = egui::ViewportBuilder::default()
         .with_inner_size([POPUP_WIDTH, POPUP_HEIGHT])
         .with_resizable(false)
-        .with_decorations(false);
+        .with_decorations(false)
+        .with_app_id("io.github.riyanj220.PookiePaste");
+
+    if let Some(icon) = load_app_icon() {
+        viewport = viewport.with_icon(icon);
+    }
 
     if let Some(position) = platform::resolve_popup_position(
         target_id.as_ref(),
