@@ -15,7 +15,7 @@ use crate::ipc_mapper::{from_ipc_focus_target, to_history_item, to_ipc_focus_tar
 use crate::paste_backend::PasteBackend;
 use crate::reload_coordinator::ReloadCoordinator;
 use crate::shortcut_config::{KeyBindingConfig, ModifiersConfig};
-use crate::ui_launcher::{UiLaunchOutcome, UiLauncher};
+use crate::ui_launcher::{UiLaunchOutcome, UiLauncher, UiStartupMode};
 
 pub async fn handle_request<B, P, F>(
     request: IpcRequest,
@@ -167,6 +167,30 @@ where
             }
 
             match ui_launcher.launch() {
+                Ok(UiLaunchOutcome::Launched) => IpcResponse::UiToggled { launched: true },
+                Ok(UiLaunchOutcome::AlreadyRunning) => IpcResponse::UiToggled { launched: false },
+                Err(error) => IpcResponse::Error {
+                    message: format!("failed to launch UI: {error:?}"),
+                },
+            }
+        }
+
+        IpcRequest::OpenShortcutSetup => {
+            let is_compositor_managed = match shortcut_status.read() {
+                Ok(guard) => guard.capability == Some(IpcShortcutCapability::CompositorManaged),
+                Err(_) => false,
+            };
+
+            if is_compositor_managed {
+                // Attempt fast compositor status recheck, fail-open (launch UI regardless of outcome)
+                let _ = tokio::time::timeout(
+                    std::time::Duration::from_millis(50),
+                    reload_coordinator.recheck(),
+                )
+                .await;
+            }
+
+            match ui_launcher.launch_mode(UiStartupMode::ShortcutSetup) {
                 Ok(UiLaunchOutcome::Launched) => IpcResponse::UiToggled { launched: true },
                 Ok(UiLaunchOutcome::AlreadyRunning) => IpcResponse::UiToggled { launched: false },
                 Err(error) => IpcResponse::Error {
@@ -855,6 +879,30 @@ mod tests {
         let reload_coordinator = create_test_reload_coordinator(Arc::clone(&shortcut_status));
         let response = handle_request(
             IpcRequest::ToggleUi,
+            service.as_ref(),
+            &activation_service,
+            activation_service.clipboard_service().as_ref(),
+            &ui_launcher,
+            &shortcut_status,
+            &reload_coordinator,
+        )
+        .await;
+
+        assert_eq!(response, IpcResponse::UiToggled { launched: false });
+    }
+
+    #[tokio::test]
+    async fn handles_open_shortcut_setup_when_already_running() {
+        let service = create_history_service().await;
+        let (activation_service, _backend_handle) = create_activation_service(Arc::clone(&service));
+
+        let ui_launcher = UiLauncher::new();
+        ui_launcher.set_running_for_test(true);
+
+        let shortcut_status = create_test_shortcut_status();
+        let reload_coordinator = create_test_reload_coordinator(Arc::clone(&shortcut_status));
+        let response = handle_request(
+            IpcRequest::OpenShortcutSetup,
             service.as_ref(),
             &activation_service,
             activation_service.clipboard_service().as_ref(),

@@ -69,6 +69,7 @@ The portal may assign a trigger that differs from the requested shortcut if:
 * System policy overrode the requested combination.
 
 Pookie records the portal's reported trigger as `effective_shortcut` in `ShortcutStatusInfo`. Pookie **never** attempts to silently overwrite KDE's persisted portal binding from `config.toml`.
+If the portal reports no assigned trigger (`trigger_description` is absent or empty), Pookie reports runtime state `Unconfigured` (`needs_setup`), prompting the user to complete configuration via the portal dialog.
 
 ---
 

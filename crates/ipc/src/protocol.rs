@@ -285,6 +285,8 @@ pub enum IpcRequest {
 
     ToggleUi,
 
+    OpenShortcutSetup,
+
     GetShortcutStatus,
 
     RecheckShortcutStatus,
@@ -358,6 +360,9 @@ pub enum IpcCompositorBindingStatus {
 pub enum IpcShortcutState {
     Initializing,
     Active {
+        description: String,
+    },
+    Unconfigured {
         description: String,
     },
     CompositorManaged {
@@ -744,6 +749,15 @@ mod tests {
     }
 
     #[test]
+    fn open_shortcut_setup_request_round_trips() {
+        let request = IpcRequest::OpenShortcutSetup;
+        let encoded = serde_json::to_string(&request).expect("serialization failed");
+        assert_eq!(encoded, r#"{"type":"open_shortcut_setup"}"#);
+        let decoded: IpcRequest = serde_json::from_str(&encoded).expect("deserialization failed");
+        assert_eq!(decoded, request);
+    }
+
+    #[test]
     fn reload_config_request_round_trips() {
         let request = IpcRequest::ReloadConfig;
         let encoded = serde_json::to_string(&request).expect("serialization failed");
@@ -767,6 +781,25 @@ mod tests {
         };
         let encoded = serde_json::to_string(&response).expect("serialization failed");
         assert!(encoded.contains(r#""type":"config_reloaded""#));
+        let decoded: IpcResponse = serde_json::from_str(&encoded).expect("deserialization failed");
+        assert_eq!(decoded, response);
+    }
+
+    #[test]
+    fn shortcut_status_unconfigured_round_trips() {
+        let response = IpcResponse::ShortcutStatus {
+            status: ShortcutStatusInfo {
+                configured_shortcut: "Super+V".to_string(),
+                backend_name: Some("Wayland portal global shortcut".to_string()),
+                capability: Some(IpcShortcutCapability::Portal),
+                effective_shortcut: None,
+                state: IpcShortcutState::Unconfigured {
+                    description: "XDG Desktop Portal global shortcut not assigned".to_string(),
+                },
+            },
+        };
+        let encoded = serde_json::to_string(&response).expect("serialization failed");
+        assert!(encoded.contains(r#""status":"unconfigured""#));
         let decoded: IpcResponse = serde_json::from_str(&encoded).expect("deserialization failed");
         assert_eq!(decoded, response);
     }

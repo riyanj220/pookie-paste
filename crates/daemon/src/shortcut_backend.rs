@@ -257,6 +257,9 @@ pub enum ShortcutRegistrationOutcome {
     /// Actively registered and grabbed by the backend.
     Active { description: String },
 
+    /// The backend is functional, but no shortcut is assigned or configured.
+    Unconfigured { description: String },
+
     /// Managed externally by window manager or compositor keybinding.
     CompositorManaged {
         binding_snippet: String,
@@ -273,6 +276,7 @@ impl ShortcutRegistrationOutcome {
     pub fn description(&self) -> &str {
         match self {
             Self::Active { description } => description,
+            Self::Unconfigured { description } => description,
             Self::CompositorManaged {
                 binding_snippet, ..
             } => binding_snippet,
@@ -361,7 +365,7 @@ pub trait ShortcutBackend: Send {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BackendEvent {
-    ShortcutsChanged { effective_shortcut: String },
+    ShortcutsChanged { effective_shortcut: Option<String> },
 }
 
 #[cfg(test)]

@@ -69,18 +69,22 @@ Existing clipboard history and application state are preserved.
 
 ## Uninstall
 
-From a cloned repository:
+Remove Pookie Paste while keeping your settings and clipboard history:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/riyanj220/pookie-paste/main/uninstall.sh | bash
+```
+
+To remove Pookie Paste and all stored settings and clipboard data:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/riyanj220/pookie-paste/main/uninstall.sh | bash -s -- --purge
+```
+
+If you cloned the repository, you can also uninstall locally:
 
 ```bash
 ./scripts/uninstall.sh
-```
-
-This removes Pookie Paste application files while preserving your clipboard history and settings.
-
-To remove everything, including history and stored images:
-
-```bash
-./scripts/uninstall.sh --purge
 ```
 
 ## Documentation

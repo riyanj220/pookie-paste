@@ -66,6 +66,9 @@ pub enum IpcShortcutState {
     Active {
         description: String,
     },
+    Unconfigured {
+        description: String,
+    },
     CompositorManaged {
         binding_status: IpcCompositorBindingStatus,
         snippet: String,
@@ -87,7 +90,8 @@ pub enum IpcShortcutState {
 ### State Definitions
 
 * **`Initializing`**: The worker thread has spawned and is negotiating initial backend registration.
-* **`Active { description }`**: The shortcut is actively grabbed or registered. Applies to `Native` and `Portal` backends.
+* **`Active { description }`**: The shortcut is actively grabbed or registered. Applies to `Native` and `Portal` backends when a verified/effective trigger exists.
+* **`Unconfigured { description }`**: The backend subsystem is operational, but no shortcut binding is currently assigned (e.g. portal session exists on KDE Plasma, but user has not assigned a shortcut).
 * **`CompositorManaged { binding_status, snippet, conflict, diagnostic }`**: Shortcut management is delegated to an external compositor. Contains the generated configuration snippet, the active binding status, and diagnostic messages.
 * **`Conflict { details }`**: The shortcut collided with an existing application or compositor binding.
 * **`Unavailable { reason }`**: The required platform subsystem is unavailable in this session.
@@ -134,7 +138,8 @@ The key combination is bound in the active compositor, but targets a different c
 | --- | --- | :---: | --- | :---: | --- |
 | **`Native`** | `Active` | *N/A* | X11 root-window grab active. | Hidden | Minimal `Current shortcut` row with `Change` button. |
 | **`Native`** | `Conflict` | *N/A* | Key grab rejected (`BadAccess`). | Shown | Conflict warning and key recorder. |
-| **`Portal`** | `Active` | *N/A* | Portal session bound and listening. | Hidden | Minimal `Current shortcut` row; clicking opens portal dialog. |
+| **`Portal`** | `Active` | *N/A* | Portal session bound with effective trigger. | Hidden | Minimal `Current shortcut` row; clicking opens portal dialog. |
+| **`Portal`** | `Unconfigured` | *N/A* | Portal session open, but no trigger assigned. | **Shown** (Warning) | Minimal row: "No shortcut assigned" with "[ Set shortcut ]" button. |
 | **`CompositorManaged`** | `CompositorManaged` | `Verified` | Compositor binding proven for Pookie. | Hidden | Minimal `Current shortcut` row with `Change` button. |
 | **`CompositorManaged`** | `CompositorManaged` | `BoundUnverified` | Bound in compositor (opaque Lua callback). | Hidden | Minimal `Current shortcut` row with `Change` button. |
 | **`CompositorManaged`** | `CompositorManaged` | `Unconfigured` | Key missing from compositor configuration. | **Shown** (Warning) | Multi-step guide: snippet, Copy button, and "Check" button. |

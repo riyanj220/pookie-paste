@@ -2,62 +2,27 @@
 
 set -euo pipefail
 
+#
+# If running locally from a cloned repository, delegate directly to scripts/uninstall.sh.
+#
+if [[ -f "${BASH_SOURCE[0]:-}" ]]; then
+    SCRIPT_DIR="$(
+        cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1
+        pwd
+    )"
+
+    if [[ -f "${SCRIPT_DIR}/scripts/uninstall.sh" ]]; then
+        exec "${SCRIPT_DIR}/scripts/uninstall.sh" "$@"
+    fi
+fi
+
 POOKIE_GITHUB_REPOSITORY="riyanj220/pookie-paste"
 
 POOKIE_GITHUB_BASE_URL="https://github.com/${POOKIE_GITHUB_REPOSITORY}"
 
 REQUESTED_VERSION="${POOKIE_VERSION:-latest}"
 
-FROM_SOURCE=false
-
 BOOTSTRAP_WORK_DIR=""
-
-usage() {
-    cat <<EOF
-Pookie Paste bootstrap installer
-
-Usage:
-  install.sh [options]
-
-Options:
-  --version <version>
-      Install a specific Pookie Paste release.
-
-      Examples:
-        --version v0.1.0
-        --version latest
-
-  --from-source
-      Build Pookie Paste from source instead of using
-      the prebuilt release binary.
-
-  -h, --help
-      Show this help message.
-
-Environment:
-  POOKIE_VERSION
-      Select a release version without passing --version.
-
-Examples:
-  Install latest stable release:
-
-    curl -fsSL \
-      https://raw.githubusercontent.com/${POOKIE_GITHUB_REPOSITORY}/main/install.sh \
-      | bash
-
-  Install a specific release:
-
-    curl -fsSL \
-      https://raw.githubusercontent.com/${POOKIE_GITHUB_REPOSITORY}/main/install.sh \
-      | bash -s -- --version v0.1.0
-
-  Using an environment variable:
-
-    curl -fsSL \
-      https://raw.githubusercontent.com/${POOKIE_GITHUB_REPOSITORY}/main/install.sh \
-      | POOKIE_VERSION=v0.1.0 bash
-EOF
-}
 
 is_valid_release_version() {
     local version="$1"
@@ -121,38 +86,6 @@ resolve_version() {
     printf '%s\n' "$requested"
 }
 
-while (( $# > 0 )); do
-    case "$1" in
-        --version)
-            if (( $# < 2 )); then
-                echo "--version requires a value." >&2
-                exit 1
-            fi
-
-            REQUESTED_VERSION="$2"
-
-            shift 2
-            ;;
-
-        --from-source)
-            FROM_SOURCE=true
-            shift
-            ;;
-
-        -h|--help)
-            usage
-            exit 0
-            ;;
-
-        *)
-            echo "Unknown option: $1" >&2
-            echo
-            usage >&2
-            exit 1
-            ;;
-    esac
-done
-
 trap cleanup EXIT
 
 if [[ "$(uname -s)" != "Linux" ]]; then
@@ -161,12 +94,12 @@ if [[ "$(uname -s)" != "Linux" ]]; then
 fi
 
 if ! command -v curl >/dev/null 2>&1; then
-    echo "curl is required to bootstrap Pookie Paste." >&2
+    echo "curl is required to bootstrap Pookie Paste uninstaller." >&2
     exit 1
 fi
 
 if ! command -v tar >/dev/null 2>&1; then
-    echo "tar is required to bootstrap Pookie Paste." >&2
+    echo "tar is required to bootstrap Pookie Paste uninstaller." >&2
     exit 1
 fi
 
@@ -177,7 +110,7 @@ VERSION="$(
 BOOTSTRAP_WORK_DIR="$(
     mktemp \
         -d \
-        "${TMPDIR:-/tmp}/pookie-paste-bootstrap.XXXXXX"
+        "${TMPDIR:-/tmp}/pookie-paste-uninstall-bootstrap.XXXXXX"
 )"
 
 SOURCE_ARCHIVE="${BOOTSTRAP_WORK_DIR}/source.tar.gz"
@@ -202,30 +135,23 @@ tar \
     -xzf "$SOURCE_ARCHIVE" \
     -C "$SOURCE_DIR"
 
-INNER_INSTALLER="$(
+INNER_UNINSTALLER="$(
     find \
         "$SOURCE_DIR" \
-        -mindepth 3 \
-        -maxdepth 3 \
         -type f \
-        -path '*/scripts/install.sh' \
+        -name 'uninstall.sh' \
+        -path '*/scripts/uninstall.sh' \
         -print \
         -quit
 )"
 
-if [[ -z "$INNER_INSTALLER" \
-    || ! -f "$INNER_INSTALLER" ]]
+if [[ -z "$INNER_UNINSTALLER" \
+    || ! -f "$INNER_UNINSTALLER" ]]
 then
-    echo "The downloaded release does not contain scripts/install.sh." >&2
+    echo "The downloaded release does not contain scripts/uninstall.sh." >&2
     exit 1
 fi
 
-chmod +x "$INNER_INSTALLER"
+chmod +x "$INNER_UNINSTALLER"
 
-if [[ "$FROM_SOURCE" == true ]]; then
-    "$INNER_INSTALLER" \
-        --from-source
-else
-    "$INNER_INSTALLER" \
-        --version "$VERSION"
-fi
+"$INNER_UNINSTALLER" "$@"

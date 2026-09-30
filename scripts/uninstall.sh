@@ -25,8 +25,8 @@ Usage:
   ./scripts/uninstall.sh --purge
 
 Options:
-  --purge    Also remove Pookie Paste history, database,
-             portal authorization state, and other user data.
+  --purge    Also remove settings, clipboard history,
+             database, and other user data.
 
   -h, --help Show this help message.
 EOF
@@ -54,46 +54,42 @@ while (( $# > 0 )); do
 done
 
 echo
-echo "Pookie Paste uninstaller"
-echo "========================"
+echo "  ┌─ Pookie Paste"
+echo "  │  Uninstall"
+echo "  └─"
 echo
 
 stop_pookie
-
-echo
-echo "Removing application files..."
 
 rm -f \
     "$POOKIE_DAEMON_DEST" \
     "$POOKIE_UI_DEST" \
     "$POOKIE_DESKTOP_DEST" \
-    "$POOKIE_AUTOSTART_DEST"
+    "$POOKIE_AUTOSTART_DEST" \
+    "${POOKIE_ICONS_DIR}/scalable/apps/${POOKIE_APP_ID}.svg" \
+    "${POOKIE_ICONS_DIR}/256x256/apps/${POOKIE_APP_ID}.png" \
+    "${POOKIE_ICONS_DIR}/128x128/apps/${POOKIE_APP_ID}.png" \
+    "${POOKIE_ICONS_DIR}/64x64/apps/${POOKIE_APP_ID}.png" \
+    "${POOKIE_ICONS_DIR}/48x48/apps/${POOKIE_APP_ID}.png" \
+    "${POOKIE_ICONS_DIR}/32x32/apps/${POOKIE_APP_ID}.png"
 
-echo "Removing KDE integration..."
+if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+    gtk-update-icon-cache -q -t "${POOKIE_ICONS_DIR}" 2>/dev/null || true
+fi
 
 uninstall_kwin_helper || true
 
 if [[ "$PURGE" == true ]]; then
-    echo
-    echo "Purging Pookie Paste user data..."
-
     rm -rf \
         "$POOKIE_DATA_DIR" \
-        "$POOKIE_STATE_DIR"
+        "$POOKIE_STATE_DIR" \
+        "$POOKIE_CONFIG_DIR"
 
-    echo "Pookie Paste user data removed."
+    echo "Pookie Paste and all user data have been removed."
 else
+    echo "Pookie Paste has been uninstalled."
     echo
-    echo "User data was preserved:"
-    echo "  $POOKIE_DATA_DIR"
-    echo "  $POOKIE_STATE_DIR"
-    echo
-    echo "Run:"
-    echo
-    echo "  ./scripts/uninstall.sh --purge"
-    echo
-    echo "to remove it as well."
+    echo "Your settings and clipboard history were preserved."
+    echo "Use --purge to remove them as well."
 fi
-
 echo
-echo "Pookie Paste has been uninstalled."

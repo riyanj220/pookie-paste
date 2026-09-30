@@ -20,6 +20,22 @@ pub enum UiLaunchOutcome {
     AlreadyRunning,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum UiStartupMode {
+    #[default]
+    History,
+    ShortcutSetup,
+}
+
+impl UiStartupMode {
+    pub fn as_arg(&self) -> Option<&'static str> {
+        match self {
+            Self::History => None,
+            Self::ShortcutSetup => Some("--shortcut-setup"),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct UiLauncher {
     popup_running: Arc<AtomicBool>,
@@ -42,6 +58,10 @@ impl UiLauncher {
     }
 
     pub fn launch(&self) -> Result<UiLaunchOutcome, UiLaunchError> {
+        self.launch_mode(UiStartupMode::History)
+    }
+
+    pub fn launch_mode(&self, mode: UiStartupMode) -> Result<UiLaunchOutcome, UiLaunchError> {
         /*
          * Atomically claim permission to launch the popup.
          *
@@ -72,7 +92,12 @@ impl UiLauncher {
             return Err(UiLaunchError::MissingUiBinary(ui_binary));
         }
 
-        let child = match Command::new(&ui_binary).spawn() {
+        let mut cmd = Command::new(&ui_binary);
+        if let Some(arg) = mode.as_arg() {
+            cmd.arg(arg);
+        }
+
+        let child = match cmd.spawn() {
             Ok(child) => child,
 
             Err(error) => {
@@ -140,5 +165,20 @@ fn ui_binary_name() -> &'static str {
         "pookie-paste-ui.exe"
     } else {
         "pookie-paste-ui"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn startup_mode_as_arg_mapping() {
+        assert_eq!(UiStartupMode::History.as_arg(), None);
+        assert_eq!(
+            UiStartupMode::ShortcutSetup.as_arg(),
+            Some("--shortcut-setup")
+        );
+        assert_eq!(UiStartupMode::default(), UiStartupMode::History);
     }
 }
