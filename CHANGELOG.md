@@ -6,7 +6,46 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-Development after the `0.2.1` release will be documented here.
+Development after the `0.3.0` release will be documented here.
+
+---
+
+## [0.3.0] - 2026-09-30
+
+This release introduces first-class cross-desktop global shortcut support—expanding full support to Sway and Hyprland alongside X11 and KDE Plasma Wayland—powered by unified cross-desktop shortcut management with platform-specific ownership semantics. It also hardens Linux desktop integration with dedicated application icon assets, standardized window identity, shortcut-aware installer onboarding, a remote uninstaller, and modernized lifecycle testing.
+
+### Added
+
+- First-class Sway global shortcut integration with live compositor configuration inspection and variable expansion
+- First-class Hyprland global shortcut integration supporting both modern Lua bindings and classic Hyprlang directives
+- Focus restoration and direct paste support for Sway and Hyprland
+- Unified shortcut capability and status model across native key grabs, desktop portals, and compositor-managed keybindings
+- Machine-readable shortcut status via `pookie-paste --shortcut-status --porcelain`
+- Dedicated shortcut configuration interface via `pookie-paste --shortcut-setup` with live conflict detection and copyable configuration snippets
+- Dynamic runtime shortcut recheck, rebind, and configuration reload
+- Dedicated application icon theme across standard resolutions, embedded window icon, and canonical `io.github.riyanj220.PookiePaste` desktop identity
+- Remote uninstaller bootstrapper (`uninstall.sh`) supporting standard uninstall and full `--purge`
+- Automated installation lifecycle smoke testing covering fresh install, persistence, reinstallation, and purge flows
+
+### Changed
+
+- Shortcut ownership is explicitly platform-specific: native key grabs on X11, authoritative portal assignment on KDE Plasma, and compositor-managed keybindings on Sway and Hyprland
+- Configuration in `config.toml` represents user intent and avoids silently modifying compositor configs or external portal registrations
+- Installer onboarding inspects live daemon status to guide users based on actual shortcut availability instead of assuming `Super+V` is active
+- Application desktop launcher now opens the popup directly (`pookie-paste --toggle`) and starts the background daemon automatically if needed
+- Popup window adopts an explicit dismissal policy on Sway and Hyprland while retaining focus-loss dismissal on X11 and KDE Plasma
+- Standard uninstallation preserves user databases, images, and configuration, while `--purge` completely wipes all user data
+- Release archives now bundle application icons alongside binaries, desktop entries, and integration scripts
+- Reworked architecture, shortcut, platform-support, installer, and release-testing documentation to match current runtime behavior
+
+### Fixed
+
+- KDE Plasma portal integration falsely reporting active status when no shortcut was assigned in System Settings
+- Sway shortcut status requiring a daemon restart to reflect external compositor configuration changes
+- Silent shortcut collisions with existing compositor keybindings
+- Launchers and taskbars displaying generic executable placeholder icons instead of official Pookie Paste artwork
+- Direct paste attempting keystroke injection when target focus restoration could not be safely confirmed
+- Installation smoke tests triggering interactive GUI shortcut setup windows during automated runs
 
 ---
 
