@@ -18,6 +18,8 @@ POOKIE_DATA_DIR="${POOKIE_DATA_HOME}/pookie-paste"
 
 POOKIE_STATE_DIR="${POOKIE_STATE_HOME}/pookie-paste"
 
+POOKIE_CONFIG_DIR="${POOKIE_CONFIG_HOME}/pookie-paste"
+
 POOKIE_DAEMON_DEST="${POOKIE_BIN_DIR}/pookie-paste"
 
 POOKIE_UI_DEST="${POOKIE_BIN_DIR}/pookie-paste-ui"

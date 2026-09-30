@@ -164,6 +164,10 @@ uninstall_kwin_helper() {
         return 0
     fi
 
+    if ! kwin_helper_installed; then
+        return 0
+    fi
+
     disable_kwin_helper
 
     remove_kwin_helper
