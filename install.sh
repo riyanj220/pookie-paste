@@ -155,11 +155,6 @@ done
 
 trap cleanup EXIT
 
-echo
-echo "Pookie Paste bootstrap installer"
-echo "================================"
-echo
-
 if [[ "$(uname -s)" != "Linux" ]]; then
     echo "Pookie Paste currently supports Linux only." >&2
     exit 1
@@ -179,10 +174,6 @@ VERSION="$(
     resolve_version "$REQUESTED_VERSION"
 )"
 
-echo "Selected release:"
-echo "  ${VERSION}"
-echo
-
 BOOTSTRAP_WORK_DIR="$(
     mktemp \
         -d \
@@ -197,18 +188,15 @@ mkdir -p "$SOURCE_DIR"
 
 SOURCE_ARCHIVE_URL="${POOKIE_GITHUB_BASE_URL}/archive/refs/tags/${VERSION}.tar.gz"
 
-echo "Downloading installer files for ${VERSION}..."
-
 curl \
     --fail \
+    --silent \
     --location \
     --retry 3 \
     --retry-delay 2 \
     --show-error \
     --output "$SOURCE_ARCHIVE" \
     "$SOURCE_ARCHIVE_URL"
-
-echo "Extracting installer files..."
 
 tar \
     -xzf "$SOURCE_ARCHIVE" \
@@ -233,10 +221,6 @@ then
 fi
 
 chmod +x "$INNER_INSTALLER"
-
-echo
-echo "Starting Pookie Paste installer..."
-echo
 
 if [[ "$FROM_SOURCE" == true ]]; then
     "$INNER_INSTALLER" \

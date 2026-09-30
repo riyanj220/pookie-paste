@@ -28,15 +28,12 @@ stop_pookie() {
         return 0
     fi
 
-    echo "Stopping Pookie Paste..."
-
     pkill \
         -u "$(id -u)" \
         -x pookie-paste \
         >/dev/null 2>&1 || true
 
     if wait_for_pookie_exit 5; then
-        echo "Pookie Paste stopped."
         return 0
     fi
 
@@ -52,8 +49,6 @@ stop_pookie() {
         echo "Unable to stop Pookie Paste." >&2
         return 1
     fi
-
-    echo "Pookie Paste stopped."
 }
 
 #
@@ -158,7 +153,6 @@ start_pookie() {
     fi
 
     if pookie_is_running; then
-        echo "Pookie Paste is already running."
         if wait_for_pookie_ready "$daemon_path" "" 5; then
             return 0
         fi
@@ -169,8 +163,6 @@ start_pookie() {
 
     mkdir -p "$state_dir"
 
-    echo "Starting Pookie Paste..."
-
     nohup "$daemon_path" \
         >"${state_dir}/install-start.log" \
         2>&1 &
@@ -178,7 +170,6 @@ start_pookie() {
     local pid=$!
 
     if wait_for_pookie_ready "$daemon_path" "$pid" 10; then
-        echo "Pookie Paste is running."
         return 0
     fi
 

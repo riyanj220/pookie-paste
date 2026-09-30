@@ -111,14 +111,13 @@ verify_release_checksum() {
             return 1
         }
 
-    echo "Verifying release checksum..."
-
     (
         cd "$work_dir"
 
         sha256sum \
             --check \
-            "$(basename "$selected_checksum")"
+            "$(basename "$selected_checksum")" \
+            >/dev/null
     )
 }
 
@@ -234,19 +233,9 @@ prepare_release_bundle() {
 
     mkdir -p "$extract_dir"
 
-    echo
-    echo "Preparing Pookie Paste release"
-    echo "=============================="
-    echo
-    echo "Version:      ${version}"
-    echo "Architecture: ${architecture}"
-    echo "Platform:     ${platform}"
-    echo
-
-    echo "Downloading release archive..."
-
     curl \
         --fail \
+        --silent \
         --location \
         --retry 3 \
         --retry-delay 2 \
@@ -254,10 +243,9 @@ prepare_release_bundle() {
         --output "$archive_path" \
         "${release_base_url}/${asset_name}"
 
-    echo "Downloading release checksum..."
-
     curl \
         --fail \
+        --silent \
         --location \
         --retry 3 \
         --retry-delay 2 \
@@ -268,8 +256,6 @@ prepare_release_bundle() {
     verify_release_checksum \
         "$POOKIE_RELEASE_WORK_DIR" \
         "$asset_name"
-
-    echo "Extracting release..."
 
     tar \
         -xzf "$archive_path" \
@@ -285,8 +271,6 @@ prepare_release_bundle() {
         return 1
     fi
 
-    echo "Validating release bundle..."
-
     validate_release_bundle \
         "$bundle_dir" \
         "$version"
@@ -294,9 +278,6 @@ prepare_release_bundle() {
     POOKIE_RELEASE_BUNDLE_DIR="$bundle_dir"
 
     POOKIE_RESOLVED_VERSION="$version"
-
-    echo
-    echo "Release bundle is ready."
 }
 
 cleanup_release_bundle() {

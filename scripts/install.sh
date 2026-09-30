@@ -111,10 +111,9 @@ cleanup() {
 trap cleanup EXIT
 
 echo
-echo "Pookie Paste"
-echo "============"
-echo
-echo "Setting up Pookie Paste for your Linux desktop..."
+echo "  ┌─ Pookie Paste"
+echo "  │  Clipboard history for Linux"
+echo "  └─"
 echo
 
 if [[ "$(uname -s)" != "Linux" ]]; then
@@ -137,13 +136,11 @@ if [[ "$DISTRO_FAMILY" == "unsupported" ]]; then
     exit 1
 fi
 
-echo "Detected Linux family: ${DISTRO_FAMILY}"
-
+IS_UPGRADE=false
 if [[ -x "$POOKIE_DAEMON_DEST" \
     || -x "$POOKIE_UI_DEST" ]]
 then
-    echo "Existing Pookie Paste installation found."
-    echo "It will be updated safely."
+    IS_UPGRADE=true
 fi
 
 DAEMON_SOURCE=""
@@ -156,23 +153,13 @@ AUTOSTART_SOURCE=""
 
 KWIN_SOURCE=""
 
-INSTALL_DESCRIPTION=""
-
 if [[ "$FROM_SOURCE" == true ]]; then
-    echo
-    echo "Install mode: source build"
-
-    echo
-    echo "Checking build requirements..."
-
     if ! command -v cc >/dev/null 2>&1 \
         || ! command -v make >/dev/null 2>&1 \
         || ! command -v curl >/dev/null 2>&1
     then
         install_source_dependencies \
             "$DISTRO_FAMILY"
-    else
-        echo "Build requirements are already available."
     fi
 
     if ! command -v cargo >/dev/null 2>&1; then
@@ -219,23 +206,13 @@ if [[ "$FROM_SOURCE" == true ]]; then
     AUTOSTART_SOURCE="${PROJECT_ROOT}/packaging/linux/io.github.riyanj220.PookiePaste-autostart.desktop"
 
     KWIN_SOURCE="${PROJECT_ROOT}/extras/kwin/pookie-focus"
-
-    INSTALL_DESCRIPTION="source build"
 else
-    echo
-    echo "Install mode: prebuilt release"
-
-    echo
-    echo "Checking download requirements..."
-
     if ! command -v curl >/dev/null 2>&1 \
         || ! command -v tar >/dev/null 2>&1 \
         || ! command -v sha256sum >/dev/null 2>&1
     then
         install_download_dependencies \
             "$DISTRO_FAMILY"
-    else
-        echo "Download requirements are already available."
     fi
 
     ARCHITECTURE="$(
@@ -281,8 +258,6 @@ else
     AUTOSTART_SOURCE="${POOKIE_RELEASE_BUNDLE_DIR}/share/autostart/io.github.riyanj220.PookiePaste-autostart.desktop"
 
     KWIN_SOURCE="${POOKIE_RELEASE_BUNDLE_DIR}/share/pookie-paste/kwin/pookie-focus"
-
-    INSTALL_DESCRIPTION="release ${POOKIE_RESOLVED_VERSION}"
 fi
 
 #
@@ -330,16 +305,13 @@ then
     exit 1
 fi
 
-echo
-echo "Prepared installation payload: ${INSTALL_DESCRIPTION}"
-
-echo
-echo "Stopping any existing Pookie Paste instance..."
+if [[ "$IS_UPGRADE" == true ]]; then
+    echo "Updating Pookie Paste..."
+else
+    echo "Installing Pookie Paste..."
+fi
 
 stop_pookie
-
-echo
-echo "Installing Pookie Paste..."
 
 ensure_install_directories
 
@@ -363,12 +335,7 @@ install \
     "$AUTOSTART_SOURCE" \
     "$POOKIE_AUTOSTART_DEST"
 
-echo "Installed application files successfully."
-
 if is_kde_session; then
-    echo
-    echo "Configuring KDE Plasma integration..."
-
     install_kde_dependencies \
         "$DISTRO_FAMILY"
 
@@ -376,38 +343,24 @@ if is_kde_session; then
         "$KWIN_SOURCE"
 fi
 
-case ":${PATH}:" in
-    *":${POOKIE_BIN_DIR}:"*)
-        ;;
-
-    *)
-        echo
-        echo "One small setup note:"
-        echo
-        echo "${POOKIE_BIN_DIR} is not currently in your PATH."
-        echo
-        echo "Add this line to your shell configuration:"
-        echo
-        echo 'export PATH="$HOME/.local/bin:$PATH"'
-        ;;
-esac
-
-echo
-echo "Starting Pookie Paste..."
-
 start_pookie \
     "$POOKIE_DAEMON_DEST" \
     "$POOKIE_STATE_DIR"
-
-if [[ "$FROM_SOURCE" == false ]]; then
-    echo
-    echo "Installed version:"
-    echo "  ${POOKIE_RESOLVED_VERSION}"
-fi
 
 echo
 handle_pookie_onboarding \
     "$POOKIE_DAEMON_DEST" \
     "$POOKIE_SHORTCUT_STATUS" \
     "$POOKIE_SHORTCUT"
+
+case ":${PATH}:" in
+    *":${POOKIE_BIN_DIR}:"*)
+        ;;
+
+    *)
+        echo
+        echo "Note: ~/.local/bin is not in PATH."
+        echo 'Add: export PATH="$HOME/.local/bin:$PATH"'
+        ;;
+esac
 echo

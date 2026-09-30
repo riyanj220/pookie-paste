@@ -74,19 +74,16 @@ remove_kwin_helper() {
         return 0
     fi
 
-    echo "Removing existing Pookie Paste KWin helper..."
-
     kpackagetool6 \
         --type=KWin/Script \
-        --remove "$POOKIE_KWIN_PLUGIN_ID"
+        --remove "$POOKIE_KWIN_PLUGIN_ID" \
+        >/dev/null 2>&1 || true
 }
 
 disable_kwin_helper() {
     if ! command -v kwriteconfig6 >/dev/null 2>&1; then
         return 0
     fi
-
-    echo "Disabling Pookie Paste KWin helper..."
 
     kwriteconfig6 \
         --file kwinrc \
@@ -112,11 +109,10 @@ install_kwin_helper() {
 
     remove_kwin_helper
 
-    echo "Installing Pookie Paste KWin helper..."
-
     kpackagetool6 \
         --type=KWin/Script \
-        --install "$package_path"
+        --install "$package_path" \
+        >/dev/null
 
     if ! kwin_helper_installed; then
         echo "KWin helper installation could not be verified." >&2
@@ -126,8 +122,6 @@ install_kwin_helper() {
 
 enable_kwin_helper() {
     require_kde_tools
-
-    echo "Enabling Pookie Paste KWin helper..."
 
     kwriteconfig6 \
         --file kwinrc \
@@ -144,19 +138,17 @@ reconfigure_kwin() {
         return 1
     }
 
-    echo "Reloading KWin configuration..."
-
     "$qdbus_command" \
         org.kde.KWin \
         /KWin \
-        reconfigure
+        reconfigure \
+        >/dev/null
 }
 
 install_and_enable_kwin_helper() {
     local package_path="$1"
 
     if ! is_kde_session; then
-        echo "KDE Plasma session not detected; skipping KWin helper."
         return 0
     fi
 
@@ -165,8 +157,6 @@ install_and_enable_kwin_helper() {
     enable_kwin_helper
 
     reconfigure_kwin
-
-    echo "Pookie Paste KWin focus helper is ready."
 }
 
 uninstall_kwin_helper() {
