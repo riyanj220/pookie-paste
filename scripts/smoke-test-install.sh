@@ -63,12 +63,12 @@ Examples:
 
   Test a specific release:
 
-    ./scripts/smoke-test-install.sh \
+    ./scripts/smoke-test-install.sh \\
       --version v0.1.1
 
   Test installation from source:
 
-    ./scripts/smoke-test-install.sh \
+    ./scripts/smoke-test-install.sh \\
       --from-source
 
 Important:
@@ -112,6 +112,21 @@ assert_file_exists() {
 
     if [[ ! -f "$path" ]]; then
         fail "${description} does not exist: ${path}"
+    fi
+
+    pass "$description"
+}
+
+assert_nonempty_file() {
+    local path="$1"
+    local description="$2"
+
+    if [[ ! -f "$path" ]]; then
+        fail "${description} does not exist: ${path}"
+    fi
+
+    if [[ ! -s "$path" ]]; then
+        fail "${description} is empty: ${path}"
     fi
 
     pass "$description"
@@ -161,6 +176,18 @@ assert_path_missing() {
     pass "$description"
 }
 
+assert_file_contains_exact_line() {
+    local file="$1"
+    local expected="$2"
+    local description="$3"
+
+    if ! grep -Fxq "$expected" "$file"; then
+        fail "${description} is missing line '${expected}' in ${file}"
+    fi
+
+    pass "$description"
+}
+
 pookie_running() {
     pgrep \
         -u "$(id -u)" \
@@ -183,6 +210,48 @@ wait_for_daemon() {
     done
 
     return 0
+}
+
+assert_valid_shortcut_status() {
+    local daemon_path="$1"
+    local raw_output
+
+    if ! raw_output="$("$daemon_path" --shortcut-status --porcelain 2>/dev/null)"; then
+        fail "Pookie Paste daemon failed to respond to --shortcut-status --porcelain request."
+    fi
+
+    local parsed_status=""
+    local parsed_shortcut=""
+    local key val
+
+    while IFS='=' read -r key val || [[ -n "$key" ]]; do
+        if [[ -z "$key" && -z "$val" ]]; then
+            continue
+        fi
+
+        case "$key" in
+            status)
+                parsed_status="$val"
+                ;;
+            shortcut)
+                parsed_shortcut="$val"
+                ;;
+        esac
+    done <<< "$raw_output"
+
+    case "$parsed_status" in
+        ready|needs_setup|conflict|bound_unverified|unavailable)
+            ;;
+        *)
+            fail "Unrecognized shortcut status: '${parsed_status}' in output:\n${raw_output}"
+            ;;
+    esac
+
+    if [[ -z "$parsed_shortcut" ]]; then
+        fail "Shortcut description is missing in output:\n${raw_output}"
+    fi
+
+    pass "shortcut status porcelain output is structurally valid (${parsed_status}, ${parsed_shortcut})"
 }
 
 stop_test_daemon_best_effort() {
@@ -279,6 +348,11 @@ echo "Pookie Paste installation smoke test"
 echo "===================================="
 echo
 
+# --------------------------------------------------
+# Phase 1: Preflight checks & environment isolation
+# --------------------------------------------------
+echo "Phase 1 — Preflight & environment isolation"
+
 if [[ "$(uname -s)" != "Linux" ]]; then
     fail "The smoke test currently supports Linux only."
 fi
@@ -286,35 +360,33 @@ fi
 if [[ -z "${DISPLAY:-}" \
     && -z "${WAYLAND_DISPLAY:-}" ]]
 then
-    fail \
-        "No graphical Linux session was detected. Run the smoke test from X11 or Wayland."
+    fail "No graphical Linux session was detected. Run the smoke test from X11 or Wayland."
 fi
 
 if [[ -z "$REAL_XDG_RUNTIME_DIR" \
     || ! -d "$REAL_XDG_RUNTIME_DIR" ]]
 then
-    fail \
-        "A valid XDG_RUNTIME_DIR is required for graphical-session testing."
+    fail "A valid XDG_RUNTIME_DIR is required for graphical-session testing."
 fi
 
 if pookie_running; then
-    fail \
-        "A Pookie Paste daemon is already running. Stop your normal Pookie instance before running this smoke test."
+    fail "A Pookie Paste daemon is already running. Stop your normal Pookie instance before running this smoke test."
 fi
 
 if [[ ! -x "${PROJECT_ROOT}/install.sh" ]]; then
-    fail \
-        "Root bootstrap installer is missing or not executable: ${PROJECT_ROOT}/install.sh"
+    fail "Root bootstrap installer is missing or not executable: ${PROJECT_ROOT}/install.sh"
 fi
 
 if [[ ! -x "${PROJECT_ROOT}/scripts/install.sh" ]]; then
-    fail \
-        "Internal installer is missing or not executable: ${PROJECT_ROOT}/scripts/install.sh"
+    fail "Internal installer is missing or not executable: ${PROJECT_ROOT}/scripts/install.sh"
+fi
+
+if [[ ! -x "${PROJECT_ROOT}/uninstall.sh" ]]; then
+    fail "Root bootstrap uninstaller is missing or not executable: ${PROJECT_ROOT}/uninstall.sh"
 fi
 
 if [[ ! -x "${PROJECT_ROOT}/scripts/uninstall.sh" ]]; then
-    fail \
-        "Uninstaller is missing or not executable: ${PROJECT_ROOT}/scripts/uninstall.sh"
+    fail "Internal uninstaller is missing or not executable: ${PROJECT_ROOT}/scripts/uninstall.sh"
 fi
 
 TEST_ROOT="$(
@@ -332,113 +404,60 @@ mkdir -p \
     "${TEST_HOME}/.local/state" \
     "${TEST_HOME}/.config"
 
-#
-# Persistent Pookie files are redirected into this disposable
-# HOME/XDG environment.
-#
-# XDG_RUNTIME_DIR intentionally remains the real graphical
-# session runtime directory. Wayland, the session D-Bus, and
-# desktop portals depend on resources stored there.
-#
 export HOME="$TEST_HOME"
-
 export XDG_DATA_HOME="${TEST_HOME}/.local/share"
-
 export XDG_CONFIG_HOME="${TEST_HOME}/.config"
-
 export XDG_STATE_HOME="${TEST_HOME}/.local/state"
-
 export XDG_RUNTIME_DIR="$REAL_XDG_RUNTIME_DIR"
 
-#
-# A source-build smoke test must use the developer's existing
-# Rust toolchain even though HOME is redirected above.
-#
-# rustup normally resolves its toolchains from:
-#
-#   $HOME/.rustup
-#
-# and Cargo normally resolves its home from:
-#
-#   $HOME/.cargo
-#
-# Without preserving these locations, the rustup proxy can be
-# found through the inherited PATH but cannot find the default
-# toolchain, causing cargo to fail before the source build
-# starts.
-#
 if [[ "$FROM_SOURCE" == true ]]; then
     export CARGO_HOME="$REAL_CARGO_HOME"
     export RUSTUP_HOME="$REAL_RUSTUP_HOME"
-
     export PATH="${CARGO_HOME}/bin:${PATH}"
 fi
 
-#
-# The generic installation smoke test intentionally skips KDE
-# helper installation.
-#
-# KDE/KWin integration is tested separately against the real
-# Plasma session during platform validation.
-#
 export XDG_CURRENT_DESKTOP="PookieSmokeTest"
-
 export PATH="${TEST_HOME}/.local/bin:${PATH}"
 
-POOKIE_BIN_DIR="${TEST_HOME}/.local/bin"
-
-POOKIE_DATA_DIR="${XDG_DATA_HOME}/pookie-paste"
-
-POOKIE_STATE_DIR="${XDG_STATE_HOME}/pookie-paste"
+# shellcheck disable=SC1091
+source "${PROJECT_ROOT}/scripts/lib/paths.sh"
 
 POOKIE_RUNTIME_DIR="${XDG_RUNTIME_DIR}/pookie-paste"
-
-POOKIE_DAEMON="${POOKIE_BIN_DIR}/pookie-paste"
-
-POOKIE_UI="${POOKIE_BIN_DIR}/pookie-paste-ui"
-
-POOKIE_DESKTOP="${XDG_DATA_HOME}/applications/io.github.riyanj220.PookiePaste.desktop"
-
-POOKIE_AUTOSTART="${XDG_CONFIG_HOME}/autostart/io.github.riyanj220.PookiePaste-autostart.desktop"
-
+POOKIE_SOCKET="${POOKIE_RUNTIME_DIR}/pookie.sock"
 POOKIE_DATABASE="${POOKIE_DATA_DIR}/pookie-paste.db"
-
+POOKIE_CONFIG_FILE="${POOKIE_CONFIG_DIR}/config.toml"
 POOKIE_START_LOG="${POOKIE_STATE_DIR}/install-start.log"
 
-POOKIE_SOCKET="${POOKIE_RUNTIME_DIR}/pookie.sock"
+POOKIE_ICON_FILES=(
+    "${POOKIE_ICONS_DIR}/scalable/apps/${POOKIE_APP_ID}.svg"
+    "${POOKIE_ICONS_DIR}/256x256/apps/${POOKIE_APP_ID}.png"
+    "${POOKIE_ICONS_DIR}/128x128/apps/${POOKIE_APP_ID}.png"
+    "${POOKIE_ICONS_DIR}/64x64/apps/${POOKIE_APP_ID}.png"
+    "${POOKIE_ICONS_DIR}/48x48/apps/${POOKIE_APP_ID}.png"
+    "${POOKIE_ICONS_DIR}/32x32/apps/${POOKIE_APP_ID}.png"
+)
 
-echo "Temporary HOME:"
-echo "  ${TEST_HOME}"
+assert_icons_installed() {
+    local icon_path
+    for icon_path in "${POOKIE_ICON_FILES[@]}"; do
+        assert_nonempty_file "$icon_path" "icon installed: $(basename "$(dirname "$icon_path")")/$(basename "$icon_path")"
+    done
+}
 
+assert_icons_missing() {
+    local icon_path
+    for icon_path in "${POOKIE_ICON_FILES[@]}"; do
+        assert_path_missing "$icon_path" "icon removed: $(basename "$(dirname "$icon_path")")/$(basename "$icon_path")"
+    done
+}
+
+pass "preflight checks and isolated test environment initialized"
+
+# --------------------------------------------------
+# Phase 2: Fresh installation
+# --------------------------------------------------
 echo
-echo "Graphical session runtime:"
-echo "  ${XDG_RUNTIME_DIR}"
-
-if [[ "$FROM_SOURCE" == true ]]; then
-    echo
-    echo "Rust toolchain:"
-    echo "  CARGO_HOME=${CARGO_HOME}"
-    echo "  RUSTUP_HOME=${RUSTUP_HOME}"
-fi
-
-echo
-
-if [[ "$FROM_SOURCE" == true ]]; then
-    echo "Smoke-test mode:"
-    echo "  source build"
-else
-    echo "Smoke-test mode:"
-    echo "  prebuilt bootstrap release"
-    echo
-    echo "Requested version:"
-    echo "  ${REQUESTED_VERSION}"
-fi
-
-echo
-echo "--------------------------------------------------"
-echo "STEP 1 — Fresh installation"
-echo "--------------------------------------------------"
-echo
+echo "Phase 2 — Fresh installation"
 
 if [[ "$FROM_SOURCE" == true ]]; then
     "${PROJECT_ROOT}/scripts/install.sh" \
@@ -448,97 +467,91 @@ else
         --version "$REQUESTED_VERSION"
 fi
 
+assert_executable_exists "$POOKIE_DAEMON_DEST" "daemon binary installed"
+assert_executable_exists "$POOKIE_UI_DEST" "UI binary installed"
+assert_file_exists "$POOKIE_DESKTOP_DEST" "desktop entry installed"
+assert_file_exists "$POOKIE_AUTOSTART_DEST" "autostart entry installed"
+
+assert_file_contains_exact_line "$POOKIE_DESKTOP_DEST" "Name=Pookie Paste" "desktop entry has Name=Pookie Paste"
+assert_file_contains_exact_line "$POOKIE_DESKTOP_DEST" "Exec=pookie-paste --toggle" "desktop entry has Exec=pookie-paste --toggle"
+assert_file_contains_exact_line "$POOKIE_DESKTOP_DEST" "Icon=io.github.riyanj220.PookiePaste" "desktop entry has Icon=io.github.riyanj220.PookiePaste"
+assert_file_contains_exact_line "$POOKIE_DESKTOP_DEST" "StartupWMClass=io.github.riyanj220.PookiePaste" "desktop entry has StartupWMClass=io.github.riyanj220.PookiePaste"
+
+assert_file_contains_exact_line "$POOKIE_AUTOSTART_DEST" "Exec=pookie-paste" "autostart entry has Exec=pookie-paste"
+assert_file_contains_exact_line "$POOKIE_AUTOSTART_DEST" "NoDisplay=true" "autostart entry has NoDisplay=true"
+
+assert_icons_installed
+
+assert_directory_exists "$POOKIE_DATA_DIR" "application data directory created"
+assert_directory_exists "$POOKIE_STATE_DIR" "application state directory created"
+assert_directory_exists "$POOKIE_CONFIG_DIR" "application config directory created"
+assert_file_exists "$POOKIE_START_LOG" "startup log created"
+
+# --------------------------------------------------
+# Phase 3: Runtime readiness & IPC validation
+# --------------------------------------------------
 echo
-echo "Verifying fresh installation..."
-
-assert_executable_exists \
-    "$POOKIE_DAEMON" \
-    "daemon binary installed"
-
-assert_executable_exists \
-    "$POOKIE_UI" \
-    "UI binary installed"
-
-assert_file_exists \
-    "$POOKIE_DESKTOP" \
-    "desktop entry installed"
-
-assert_file_exists \
-    "$POOKIE_AUTOSTART" \
-    "autostart entry installed"
-
-assert_directory_exists \
-    "$POOKIE_DATA_DIR" \
-    "application data directory created"
-
-assert_directory_exists \
-    "$POOKIE_STATE_DIR" \
-    "application state directory created"
-
-assert_file_exists \
-    "$POOKIE_START_LOG" \
-    "startup log created"
+echo "Phase 3 — Runtime readiness & IPC validation"
 
 if ! wait_for_daemon 10; then
     fail "Pookie Paste daemon did not remain running after installation."
 fi
+pass "daemon process is running"
 
-pass "daemon is running"
+assert_file_exists "$POOKIE_DATABASE" "SQLite database created on startup"
+assert_file_exists "$POOKIE_CONFIG_FILE" "default configuration bootstrapped on startup"
+assert_socket_exists "$POOKIE_SOCKET" "IPC socket active"
+assert_valid_shortcut_status "$POOKIE_DAEMON_DEST"
 
-assert_file_exists \
-    "$POOKIE_DATABASE" \
-    "SQLite database created"
-
-assert_socket_exists \
-    "$POOKIE_SOCKET" \
-    "IPC socket created"
-
+# --------------------------------------------------
+# Phase 4: Persistence sentinels placement
+# --------------------------------------------------
 echo
-echo "--------------------------------------------------"
-echo "STEP 2 — Standard uninstall"
-echo "--------------------------------------------------"
+echo "Phase 4 — Persistence sentinels placement"
+
+DATA_SENTINEL="${POOKIE_DATA_DIR}/.smoke-data-sentinel"
+STATE_SENTINEL="${POOKIE_STATE_DIR}/.smoke-state-sentinel"
+CONFIG_SENTINEL="${POOKIE_CONFIG_DIR}/.smoke-config-sentinel"
+
+touch "$DATA_SENTINEL"
+touch "$STATE_SENTINEL"
+touch "$CONFIG_SENTINEL"
+
+pass "sentinel files placed in data, state, and config directories"
+
+# --------------------------------------------------
+# Phase 5: Standard uninstall (via root wrapper)
+# --------------------------------------------------
 echo
+echo "Phase 5 — Standard uninstall (delegation via root uninstall.sh)"
 
-"${PROJECT_ROOT}/scripts/uninstall.sh"
+"${PROJECT_ROOT}/uninstall.sh"
 
-echo
-echo "Verifying standard uninstall..."
-
-assert_path_missing \
-    "$POOKIE_DAEMON" \
-    "daemon binary removed"
-
-assert_path_missing \
-    "$POOKIE_UI" \
-    "UI binary removed"
-
-assert_path_missing \
-    "$POOKIE_DESKTOP" \
-    "desktop entry removed"
-
-assert_path_missing \
-    "$POOKIE_AUTOSTART" \
-    "autostart entry removed"
+assert_path_missing "$POOKIE_DAEMON_DEST" "daemon binary removed"
+assert_path_missing "$POOKIE_UI_DEST" "UI binary removed"
+assert_path_missing "$POOKIE_DESKTOP_DEST" "desktop entry removed"
+assert_path_missing "$POOKIE_AUTOSTART_DEST" "autostart entry removed"
+assert_icons_missing
 
 if pookie_running; then
     fail "Pookie Paste daemon is still running after uninstall."
 fi
+pass "daemon process stopped"
 
-pass "daemon stopped"
+assert_file_exists "$POOKIE_DATABASE" "database preserved after standard uninstall"
+assert_file_exists "$POOKIE_CONFIG_FILE" "config.toml preserved after standard uninstall"
+assert_directory_exists "$POOKIE_DATA_DIR" "data directory preserved after standard uninstall"
+assert_directory_exists "$POOKIE_STATE_DIR" "state directory preserved after standard uninstall"
+assert_directory_exists "$POOKIE_CONFIG_DIR" "config directory preserved after standard uninstall"
+assert_file_exists "$DATA_SENTINEL" "data sentinel preserved"
+assert_file_exists "$STATE_SENTINEL" "state sentinel preserved"
+assert_file_exists "$CONFIG_SENTINEL" "config sentinel preserved"
 
-assert_file_exists \
-    "$POOKIE_DATABASE" \
-    "database preserved after uninstall"
-
-assert_directory_exists \
-    "$POOKIE_STATE_DIR" \
-    "application state preserved after uninstall"
-
+# --------------------------------------------------
+# Phase 6: Reinstallation
+# --------------------------------------------------
 echo
-echo "--------------------------------------------------"
-echo "STEP 3 — Reinstallation"
-echo "--------------------------------------------------"
-echo
+echo "Phase 6 — Reinstallation & persistence verification"
 
 if [[ "$FROM_SOURCE" == true ]]; then
     "${PROJECT_ROOT}/scripts/install.sh" \
@@ -548,79 +561,78 @@ else
         --version "$REQUESTED_VERSION"
 fi
 
-echo
-echo "Verifying reinstallation..."
-
-assert_executable_exists \
-    "$POOKIE_DAEMON" \
-    "daemon binary reinstalled"
-
-assert_executable_exists \
-    "$POOKIE_UI" \
-    "UI binary reinstalled"
-
-assert_file_exists \
-    "$POOKIE_DATABASE" \
-    "existing database preserved across reinstall"
+assert_executable_exists "$POOKIE_DAEMON_DEST" "daemon binary reinstalled"
+assert_executable_exists "$POOKIE_UI_DEST" "UI binary reinstalled"
+assert_file_exists "$POOKIE_DESKTOP_DEST" "desktop entry restored"
+assert_file_exists "$POOKIE_AUTOSTART_DEST" "autostart entry restored"
+assert_icons_installed
 
 if ! wait_for_daemon 10; then
-    fail "Pookie Paste daemon did not remain running after reinstallation."
+    fail "Pookie Paste daemon did not become active after reinstallation."
 fi
+pass "daemon process active after reinstall"
 
-pass "daemon running after reinstall"
+assert_socket_exists "$POOKIE_SOCKET" "IPC socket active after reinstall"
+assert_file_exists "$POOKIE_DATABASE" "database intact across reinstall"
+assert_file_exists "$POOKIE_CONFIG_FILE" "config.toml intact across reinstall"
+assert_file_exists "$DATA_SENTINEL" "data sentinel intact across reinstall"
+assert_file_exists "$STATE_SENTINEL" "state sentinel intact across reinstall"
+assert_file_exists "$CONFIG_SENTINEL" "config sentinel intact across reinstall"
+assert_valid_shortcut_status "$POOKIE_DAEMON_DEST"
 
-assert_socket_exists \
-    "$POOKIE_SOCKET" \
-    "IPC socket restored after reinstall"
-
+# --------------------------------------------------
+# Phase 7: Purge uninstall (via root wrapper --purge)
+# --------------------------------------------------
 echo
-echo "--------------------------------------------------"
-echo "STEP 4 — Purge uninstall"
-echo "--------------------------------------------------"
-echo
+echo "Phase 7 — Purge uninstall (delegation via root uninstall.sh --purge)"
 
-"${PROJECT_ROOT}/scripts/uninstall.sh" \
+"${PROJECT_ROOT}/uninstall.sh" \
     --purge
 
-echo
-echo "Verifying purge..."
-
-assert_path_missing \
-    "$POOKIE_DAEMON" \
-    "daemon binary removed by purge"
-
-assert_path_missing \
-    "$POOKIE_UI" \
-    "UI binary removed by purge"
-
-assert_path_missing \
-    "$POOKIE_DATA_DIR" \
-    "application data removed by purge"
-
-assert_path_missing \
-    "$POOKIE_STATE_DIR" \
-    "application state removed by purge"
+assert_path_missing "$POOKIE_DAEMON_DEST" "daemon binary removed by purge"
+assert_path_missing "$POOKIE_UI_DEST" "UI binary removed by purge"
+assert_path_missing "$POOKIE_DESKTOP_DEST" "desktop entry removed by purge"
+assert_path_missing "$POOKIE_AUTOSTART_DEST" "autostart entry removed by purge"
+assert_icons_missing
 
 if pookie_running; then
     fail "Pookie Paste daemon is still running after purge."
 fi
+pass "daemon process stopped by purge"
 
-pass "daemon stopped after purge"
+assert_path_missing "$POOKIE_DATA_DIR" "data directory removed by purge"
+assert_path_missing "$POOKIE_STATE_DIR" "state directory removed by purge"
+assert_path_missing "$POOKIE_CONFIG_DIR" "config directory removed by purge"
+assert_path_missing "$DATA_SENTINEL" "data sentinel removed by purge"
+assert_path_missing "$STATE_SENTINEL" "state sentinel removed by purge"
+assert_path_missing "$CONFIG_SENTINEL" "config sentinel removed by purge"
+assert_path_missing "$POOKIE_DATABASE" "database removed by purge"
+assert_path_missing "$POOKIE_CONFIG_FILE" "config.toml removed by purge"
+
+# --------------------------------------------------
+# Phase 8: Idempotent uninstall
+# --------------------------------------------------
+echo
+echo "Phase 8 — Idempotent uninstall verification"
+
+"${PROJECT_ROOT}/scripts/uninstall.sh"
+pass "re-running uninstaller on clean state succeeded without error"
+
+"${PROJECT_ROOT}/scripts/uninstall.sh" --purge
+pass "re-running purge uninstaller on clean state succeeded without error"
 
 echo
 echo "=================================================="
 echo "POOKIE PASTE SMOKE TEST PASSED"
 echo "=================================================="
 echo
-echo "Validated:"
-echo "  fresh installation"
-echo "  daemon startup"
-echo "  IPC socket creation"
-echo "  desktop integration"
-echo "  autostart integration"
-echo "  database creation"
-echo "  standard uninstall"
-echo "  user-data preservation"
-echo "  reinstallation"
-echo "  purge uninstall"
+echo "Validated lifecycle:"
+echo "  Phase 1: Preflight checks & environment isolation"
+echo "  Phase 2: Fresh installation (binaries, desktop, autostart, icons, directories)"
+echo "  Phase 3: Runtime readiness & IPC validation (database, config.toml, porcelain status)"
+echo "  Phase 4: Persistence sentinels placement"
+echo "  Phase 5: Standard uninstall via ./uninstall.sh (artifact removal & data/config preservation)"
+echo "  Phase 6: Reinstallation & persistence verification"
+echo "  Phase 7: Purge uninstall via ./uninstall.sh --purge (complete clean slate)"
+echo "  Phase 8: Idempotent uninstaller verification"
 echo
