@@ -193,3 +193,66 @@ start_pookie() {
     return 1
 }
 
+#
+# Handles post-install onboarding decisions based on authoritative
+# shortcut status parsed in Step 5A.
+#
+handle_pookie_onboarding() {
+    local daemon_path="$1"
+    local status="$2"
+    local shortcut="$3"
+
+    case "$status" in
+        ready)
+            echo "Pookie Paste is ready."
+            echo "Press ${shortcut} to open clipboard history."
+            ;;
+
+        bound_unverified)
+            echo "Pookie Paste is installed."
+            echo "Shortcut binding detected."
+            echo "Press ${shortcut} to test it."
+            ;;
+
+        needs_setup)
+            echo "Pookie Paste is installed."
+
+            if "$daemon_path" --shortcut-setup 2>/dev/null; then
+                echo "Finish shortcut setup in the window that just opened."
+            else
+                echo "Shortcut setup still needs to be completed."
+                echo
+                echo "Could not open the setup window automatically."
+                echo "Open Pookie Paste from your application menu."
+            fi
+            ;;
+
+        conflict)
+            echo "Pookie Paste is installed."
+            echo "${shortcut} is already in use."
+
+            if "$daemon_path" --shortcut-setup 2>/dev/null; then
+                echo "Choose another shortcut in the window that just opened."
+            else
+                echo
+                echo "Could not open the setup window automatically."
+                echo "Open Pookie Paste from your application menu."
+            fi
+            ;;
+
+        unavailable)
+            echo "Pookie Paste is installed, but the global shortcut is unavailable."
+            echo "Open Pookie Paste from your application menu to review shortcut settings."
+            ;;
+
+        *)
+            echo "Warning: Unrecognized shortcut status: ${status}" >&2
+            echo "Open Pookie Paste from your application menu to review shortcut settings."
+            return 1
+            ;;
+    esac
+
+    return 0
+}
+
+

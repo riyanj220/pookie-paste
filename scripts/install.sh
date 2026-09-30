@@ -399,18 +399,15 @@ start_pookie \
     "$POOKIE_DAEMON_DEST" \
     "$POOKIE_STATE_DIR"
 
-echo
-echo "Pookie Paste is ready."
-
 if [[ "$FROM_SOURCE" == false ]]; then
+    echo
     echo "Installed version:"
     echo "  ${POOKIE_RESOLVED_VERSION}"
-    echo
 fi
 
-echo "Press:"
 echo
-echo "    Super+V"
-echo
-echo "to open your clipboard history."
+handle_pookie_onboarding \
+    "$POOKIE_DAEMON_DEST" \
+    "$POOKIE_SHORTCUT_STATUS" \
+    "$POOKIE_SHORTCUT"
 echo
