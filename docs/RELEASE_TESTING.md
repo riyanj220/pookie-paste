@@ -1,475 +1,538 @@
-# Pookie Paste Release Testing
+# Pookie Paste Release Testing Playbook
 
-This document defines the validation process used before publishing a Pookie Paste Linux release.
-
-The goal is to verify installation, startup, clipboard history, direct paste, updates, uninstall behavior, data preservation, and release artifacts on the platforms Pookie Paste currently supports.
-
-Current primary validation targets:
-
-- X11
-- KDE Plasma Wayland
-- Sway
-- Hyprland
+This document defines the release validation process for Pookie Paste Linux releases. It establishes the exact criteria, automated tests, manual platform verifications, packaging checks, and sign-off conditions required before publishing a release.
 
 ---
 
-## 1. Automated Installation Smoke Test
+## 1. Release Validation Principles
 
-Pookie Paste provides:
+1. **Clear Automated vs. Manual Boundary**: Deterministic installation, lifecycle, persistence, schema, and packaging contracts are automated in scripts and CI. Desktop session interactions (physical shortcuts, compositor window management, focus restoration, direct typing/pasting, and visual rendering) require real-session manual validation.
+2. **Platform-Truthful Shortcuts**: Pookie does not assume a single shortcut model across Linux. Shortcut ownership differs across X11 (native grab), KDE Plasma (XDG Desktop Portal), and Sway/Hyprland (compositor-managed keybindings).
+3. **Data Integrity Guarantee**: Standard uninstalls and updates must preserve user clipboard history, images, and configuration. Full removal occurs only upon explicit purge.
+4. **No Phantom Support**: Releases are approved only for desktop platforms and distributions whose runtime compatibility has been directly validated against this playbook.
+
+---
+
+## 2. Release Workflow Sequence
+
+Maintainers should follow this linear sequence when preparing a release:
+
+```mermaid
+flowchart TD
+    A["1. Code Quality & Unit Gates"] --> B["2. Source-Build Smoke Test"]
+    B --> C["3. Real-Session Platform Testing"]
+    C --> D["4. Package Release Artifact & Baseline"]
+    D --> E["5. Tag & Publish Release"]
+    E --> F["6. Published-Release Smoke Test"]
+    F --> G["7. Upgrade & Migration Test"]
+    G --> H["8. Final Release Approval"]
+```
+
+---
+
+## 3. Automated Pre-Release Gates
+
+Before packaging or manual testing, all workspace compilation and static analysis gates must pass:
 
 ```bash
-./scripts/smoke-test-install.sh
+# 1. Format check
+cargo fmt --all -- --check
+
+# 2. Workspace compilation & dependency resolution
+cargo check --workspace --all-targets
+
+# 3. Lints with zero warnings allowed
+cargo clippy --workspace --all-targets -- -D warnings
+
+# 4. Full test suite execution
+cargo test --workspace
 ```
 
-The smoke test validates the generic installation lifecycle in an isolated temporary user environment.
-
-It redirects:
-
-```text
-HOME
-XDG_DATA_HOME
-XDG_CONFIG_HOME
-XDG_STATE_HOME
-```
-
-into a temporary directory.
-
-The real `XDG_RUNTIME_DIR` is preserved so the daemon can still access the current graphical X11 or Wayland session.
-
-This protects the tester's normal Pookie Paste database, image history, and application state.
-
-### Requirements
-
-Run the smoke test:
-
-- On Linux
-- From a graphical X11 or Wayland session
-- With no existing `pookie-paste` daemon running
-
-The smoke test refuses to start while another Pookie Paste daemon is active.
-
----
-
-## 2. Test Source Installation
-
-Before publishing a release, validate the current source tree:
+Ensure git working tree is clean:
 
 ```bash
-./scripts/smoke-test-install.sh   --from-source
+git status --porcelain
 ```
-
-This tests the developer installation path:
-
-```text
-scripts/install.sh --from-source
-```
-
-Use this before creating the final release artifact.
 
 ---
 
-## 3. Test the Published Release
+## 4. Automated Installation Lifecycle (Smoke Test)
 
-After publishing the release, validate the exact version users will install:
+Pookie Paste provides an automated end-to-end installation lifecycle test:
 
 ```bash
-./scripts/smoke-test-install.sh   --version <version>
+./scripts/smoke-test-install.sh --from-source
 ```
 
-Example:
+### 4.1 Environment Isolation Model
+
+The smoke test isolates application data to prevent mutating the tester's personal clipboard history, database, or settings:
+
+* **Redirected Variables**:
+  * `HOME` → temporary sandbox directory
+  * `XDG_DATA_HOME` → `$TEST_HOME/.local/share`
+  * `XDG_CONFIG_HOME` → `$TEST_HOME/.config`
+  * `XDG_STATE_HOME` → `$TEST_HOME/.local/state`
+* **Preserved Runtime**:
+  * Real `XDG_RUNTIME_DIR` is retained so the test daemon connects to the active graphical session (X11 or Wayland socket).
+* **Toolchain Preservation**:
+  * In `--from-source` mode, `CARGO_HOME` and `RUSTUP_HOME` point to the developer's real toolchain so Rust compilation succeeds while `HOME` is redirected.
+* **Compositor Isolation**:
+  * Sets `XDG_CURRENT_DESKTOP="PookieSmokeTest"` to intentionally suppress desktop-specific integrations (e.g., KWin script registration) during generic isolation testing.
+
+### 4.2 The 8-Phase Lifecycle Verification
+
+`scripts/smoke-test-install.sh` validates the following phases sequentially:
+
+1. **Preflight & Environment Isolation**:
+   * Confirms Linux OS and active graphical display (`DISPLAY` or `WAYLAND_DISPLAY`).
+   * Validates `XDG_RUNTIME_DIR`.
+   * Enforces that no host `pookie-paste` daemon is running.
+   * Constructs isolated directory trees.
+2. **Fresh Installation**:
+   * Installs daemon (`~/.local/bin/pookie-paste`) and UI (`~/.local/bin/pookie-paste-ui`).
+   * Installs desktop entry (`~/.local/share/applications/io.github.riyanj220.PookiePaste.desktop`).
+   * Installs autostart entry (`~/.config/autostart/io.github.riyanj220.PookiePaste-autostart.desktop`).
+   * Installs the complete 6-asset Hicolor icon theme (`scalable`, `256x256`, `128x128`, `64x64`, `48x48`, `32x32`).
+   * Verifies required metadata:
+     * `Name=Pookie Paste`
+     * `Exec=pookie-paste --toggle`
+     * `Icon=io.github.riyanj220.PookiePaste`
+     * `StartupWMClass=io.github.riyanj220.PookiePaste`
+     * Autostart: `Exec=pookie-paste`, `NoDisplay=true`.
+3. **Runtime Readiness & IPC Validation**:
+   * Verifies the daemon starts and remains active.
+   * Verifies SQLite database creation (`~/.local/share/pookie-paste/pookie-paste.db`).
+   * Verifies default configuration bootstrapping (`~/.config/pookie-paste/config.toml`).
+   * Verifies Unix domain socket connectivity (`$XDG_RUNTIME_DIR/pookie-paste/pookie.sock`).
+   * Executes `pookie-paste --shortcut-status --porcelain` and verifies the output parses to a recognized status (`ready`, `needs_setup`, `conflict`, `bound_unverified`, `unavailable`) with a non-empty shortcut string.
+4. **Persistence Sentinel Placement**:
+   * Drops sentinel files into data, state, and config directories (`.smoke-data-sentinel`, `.smoke-state-sentinel`, `.smoke-config-sentinel`).
+5. **Standard Uninstall (via root `./uninstall.sh`)**:
+   * Executes the root bootstrap uninstaller.
+   * Verifies daemon process terminates cleanly.
+   * Verifies removal of binaries, desktop entry, autostart entry, and all 6 icon assets.
+   * **Verifies Data Preservation**: Data directory, state directory, config directory, SQLite database, `config.toml`, and all sentinel files remain intact.
+6. **Reinstallation & Persistence Verification**:
+   * Reinstalls the application.
+   * Verifies binaries, desktop entries, and icon assets are restored.
+   * Confirms the daemon starts up and IPC communicates successfully.
+   * Verifies pre-existing database, `config.toml`, and sentinel files survived reinstallation without truncation.
+7. **Purge Uninstall (via root `./uninstall.sh --purge`)**:
+   * Executes the root bootstrap uninstaller with `--purge`.
+   * Verifies daemon termination, removal of binaries, desktop entries, and icon assets.
+   * **Verifies Complete Wipe**: Data directory, state directory, config directory, database, configuration, and sentinels are completely removed.
+8. **Idempotent Uninstall Verification**:
+   * Runs `./scripts/uninstall.sh` and `./scripts/uninstall.sh --purge` against already-cleaned directories to guarantee uninstallation is safely idempotent and exits with status 0.
+
+### 4.3 Debugging Failed Smoke Runs
+
+To preserve the temporary sandbox for post-mortem analysis:
 
 ```bash
-./scripts/smoke-test-install.sh   --version v0.2.0
+./scripts/smoke-test-install.sh --from-source --keep-temp
 ```
 
-To test the latest stable release:
-
-```bash
-./scripts/smoke-test-install.sh
-```
+The script prints the preserved path upon exit (e.g. `/tmp/pookie-paste-smoke.XXXXXX`).
 
 ---
 
-## 4. Preserve the Temporary Environment
+## 5. Post-Install Shortcut Onboarding Contract
 
-For debugging a failed smoke test:
+The installer inspects the runtime daemon via `pookie-paste --shortcut-status --porcelain` to decide its onboarding flow. Maintainers must verify that installer output conforms to the authoritative status table:
 
-```bash
-./scripts/smoke-test-install.sh   --keep-temp
-```
-
-The script prints the temporary test directory when it exits.
-
-Useful paths to inspect include:
-
-```text
-installed binaries
-desktop files
-autostart files
-database
-images/
-application state
-startup logs
-runtime socket
-```
+| Porcelain Status | Human Terminal Message | Action Taken by Installer |
+| :--- | :--- | :--- |
+| `status=ready` | `Pookie Paste is ready. Press <shortcut> to open clipboard history.` | None. Does not open shortcut setup window. |
+| `status=bound_unverified` | `Pookie Paste is installed. Shortcut binding detected. Press <shortcut> to test it.` | None. Does not force setup window. |
+| `status=needs_setup` | `Pookie Paste is installed. Finish shortcut setup in the window that just opened.` | Invokes `pookie-paste --shortcut-setup` to launch the GUI onboarding flow. |
+| `status=conflict` | `Pookie Paste is installed. <shortcut> is already in use. Choose another shortcut in the window that just opened.` | Invokes `pookie-paste --shortcut-setup` to allow the user to select an alternative. |
+| `status=unavailable` | `Pookie Paste is installed, but the global shortcut is unavailable.` | Advises user to open Pookie Paste from the application menu. |
 
 ---
 
-## 5. Automated Smoke-Test Coverage
+## 6. Manual Real-Session Platform Validation
 
-The automated smoke test verifies the generic installation lifecycle.
+The automated smoke test verifies lifecycle mechanics, but cannot press physical keys or interact with real display servers. Maintainers must manually validate each supported platform in a live session.
 
-### Installation
+### 6.1 X11
 
-- Pookie daemon binary is installed
-- Pookie UI binary is installed
-- Desktop entry is installed
-- Autostart entry is installed
-- Application data directory is created
-- Application state directory is created
-- Startup log is created
+X11 utilizes native window system passive key grabs (`XGrabKey`).
 
-### Runtime
-
-- Daemon remains running
-- SQLite database is created
-- IPC Unix socket is created
-
-### Standard Uninstall
-
-- Daemon stops
-- Binaries are removed
-- Desktop entry is removed
-- Autostart entry is removed
-- Application data is preserved
-- Clipboard database is preserved
-- Stored image history is preserved
-- Application state is preserved
-
-### Reinstallation
-
-- Binaries are installed again
-- Existing clipboard history survives
-- Existing image history survives
-- Daemon starts again
-- IPC socket is recreated
-
-### Purge
-
-- Daemon stops
-- Binaries are removed
-- Application data is deleted
-- Stored image files are deleted
-- Application state is deleted
+#### Verification Steps
+1. **Fresh Install & Startup**:
+   * Start the daemon: `pookie-paste`.
+   * Verify native grab succeeds: `pookie-paste --shortcut-status --porcelain` reports `status=ready` and `shortcut=Super+V`.
+2. **Physical Shortcut Activation**:
+   * Press `Super+V`: verify the popup appears near the active cursor or window.
+3. **Application Identity**:
+   * Inspect the running popup with `xprop`:
+     ```bash
+     xprop WM_CLASS _NET_WM_ICON
+     ```
+   * Confirm `WM_CLASS` contains `"io.github.riyanj220.PookiePaste"`.
+   * Confirm `_NET_WM_ICON` is present.
+   * Confirm launcher and dock/taskbar display the official Pookie Paste icon (not a generic executable icon).
+4. **Conflict Handling**:
+   * Bind `Super+V` in another tool or window manager shortcut.
+   * Restart Pookie: verify status surfaces as `status=conflict`.
+5. **Dismissal Policy**:
+   * Open the popup. Click an outside window or desktop surface.
+   * Verify the popup dismisses on focus loss.
 
 ---
 
-## 6. What the Smoke Test Does Not Validate
+### 6.2 KDE Plasma Wayland
 
-The isolated smoke test intentionally does not validate desktop-specific interaction.
+KDE Plasma delegates shortcut handling to the XDG Desktop Portal (`org.freedesktop.portal.GlobalShortcuts`).
 
-The following require real-session testing:
+> [!IMPORTANT]
+> `config.toml` records the user's requested intent. The XDG GlobalShortcuts portal maintains the authoritative effective assignment.
 
-- `Super+V`
-- Popup positioning
-- Popup focus behavior and platform dismissal policy
-- Keyboard and mouse navigation
-- Text activation
-- Image activation
-- Image thumbnail rendering
-- Focus restoration
-- X11 direct paste
-- KDE Plasma Wayland focus capture
-- KDE Plasma Wayland focus restoration
-- KWin helper behavior
-- Portal/EIS direct paste
-- Mixed text/image history behavior
-
-These are covered by the real-session validation below.
-
----
-
-# Real-Session Validation
-
-## X11
-
-Expected capabilities:
-
-```text
-Text capture: supported
-Image capture: supported
-Focus restoration: supported
-Direct paste: supported
-```
-
-Validate:
-
-1. Start Pookie Paste.
-2. Copy text.
-3. Copy an image.
-4. Press `Super+V`.
-5. Confirm mixed text/image history appears correctly.
-6. Confirm image thumbnails render with the correct aspect ratio.
-7. Navigate using keyboard arrows.
-8. Select entries using the mouse.
-9. Activate a text item and confirm:
-   - the original application regains focus
-   - the selected text pastes directly
-10. Activate an image in an image-capable target and confirm:
-   - the original application regains focus
-   - the selected image pastes directly
-11. Confirm activated items move to the most-recent position.
-12. Confirm self-generated clipboard writes do not create duplicate history rows.
-13. Restart Pookie Paste and confirm text and image history still exists.
-14. Confirm the popup can be opened repeatedly after activation without leaving a stale UI process.
-15. Confirm clicking outside the popup window closes it (focus-loss dismissal).
-
-For image testing, use an application that accepts pasted images.
-
-A plain text editor rejecting an image is expected behavior.
+#### Verification Steps
+1. **Unconfigured Initial State**:
+   * Remove previous portal authorization for Pookie Paste in KDE System Settings (Shortcuts).
+   * Run installer or start daemon.
+   * Verify porcelain output: `status=needs_setup`, `shortcut=Super+V`.
+   * Verify UI indicates "No shortcut assigned" with a "[ Set shortcut ]" button.
+2. **Configuring Portal Shortcut**:
+   * Click "[ Set shortcut ]" or trigger `pookie-paste --shortcut-setup`.
+   * In KDE's portal dialog, assign a shortcut (e.g. `Meta+V`).
+   * Verify status updates immediately to `status=ready` and `shortcut=Meta+V`.
+3. **Physical Shortcut & Paste Flow**:
+   * Press `Meta+V`: confirm popup opens.
+   * Activate an entry: verify `pookie-focus` restores target window focus, and direct paste injects via Portal/EIS.
+4. **Live Portal Modifications (ShortcutsChanged)**:
+   * Open KDE System Settings → Shortcuts. Change the shortcut from `Meta+V` to `Meta+Shift+V` without restarting Pookie Paste.
+   * Confirm the daemon receives `ShortcutsChanged` over D-Bus and updates effective status without restart.
+   * Clear the shortcut in System Settings: confirm status returns to `needs_setup` / `Unconfigured`.
+5. **Dismissal Policy**:
+   * Confirm clicking outside the popup dismisses it (focus-loss dismissal).
+6. **Temporary Target Safety Edge Case**:
+   * Open the KDE Application Launcher (Kickoff), press `Meta+V`, then dismiss Kickoff before activating an item in Pookie.
+   * Confirm Pookie safely aborts direct paste rather than injecting keystrokes into an unintended window.
 
 ---
 
-## KDE Plasma Wayland
+### 6.3 Sway (wlroots / i3-ipc)
 
-Expected capabilities:
+Sway manages global bindings directly in `~/.config/sway/config`. Pookie never alters Sway configuration files directly.
 
-```text
-Text capture: supported
-Image capture: supported
-KWin focus helper: supported
-Focus restoration: supported
-Portal/EIS direct paste: supported
-```
-
-Validate:
-
-1. Confirm `pookie-focus` is installed and enabled.
-2. Start Pookie Paste.
-3. Copy text.
-4. Copy an image.
-5. Press `Super+V`.
-6. Confirm mixed text/image history appears correctly.
-7. Confirm image thumbnails render correctly.
-8. Navigate using keyboard and mouse.
-9. Activate text and confirm focus restoration + direct paste.
-10. Activate an image in an image-capable target and confirm focus restoration + direct paste.
-11. Confirm activated items are promoted without creating duplicates.
-12. Restart Pookie Paste and confirm mixed history persists.
-13. Confirm clicking outside the popup window closes it (focus-loss dismissal).
-
-Also validate clipboard-content transitions:
-
-```text
-image → text
-text → image
-image → text → image
-activate old image → copy fresh text
-activate old text → copy fresh image
-```
-
-The daemon must not repeatedly report stale MIME errors such as:
-
-```text
-clipboard payload is empty mime=image/png
-```
-
-If focus restoration cannot confirm the intended target, direct paste must be aborted rather than injected into another application.
+#### Verification Steps
+1. **Conflict Detection**:
+   * Ensure `Mod4+v` is bound to Sway's default `splitv` in `~/.config/sway/config`.
+   * Run `pookie-paste --shortcut-status --porcelain`.
+   * Verify status reports `status=conflict` and provides the diagnostic snippet.
+2. **Configuring Sway Binding**:
+   * Add the canonical snippet to `~/.config/sway/config`:
+     ```sway
+     bindsym Mod4+v exec pookie-paste --toggle
+     ```
+   * Reload Sway: `swaymsg reload`.
+   * Run `pookie-paste --shortcut-status --porcelain`: verify status reports `status=ready`.
+3. **Physical Activation**:
+   * Press `Mod4+v`: verify popup opens.
+   * Activate an item: verify focus restores via Sway IPC, and text pastes via `zwp_virtual_keyboard_v1`.
+4. **Config/Runtime Mismatch**:
+   * If `config.toml` specifies `Super+H` while Sway config has `Mod4+v`, verify Pookie surfaces the discrepancy in the UI settings view rather than falsely claiming the shortcut is synchronized.
+5. **Dismissal Policy**:
+   * Sway uses explicit dismissal. Verify:
+     * Moving the pointer outside the window does **not** close the popup.
+     * Clicking an underlying application does **not** close the popup.
+     * Pressing `Escape` closes the popup.
+     * Clicking the close button (`✕`) closes the popup.
+     * Activating an item closes the popup.
 
 ---
 
-## Known KDE Focus Edge Case
+### 6.4 Hyprland
 
-Temporary Plasma surfaces such as the application launcher can become the active KWin window immediately before `Super+V`.
+Hyprland manages global bindings in `hyprland.conf` or `hyprland.lua`. Pookie queries live bindings via Hyprland IPC (`j/binds`).
 
-If Pookie captures such a temporary target and that target disappears before activation, focus restoration may fail.
-
-Expected safe behavior:
-
-```text
-focus target no longer exists
-→ activation reports paste failure
-→ direct input is not injected into another window
-```
-
-This is currently treated as a focus-selection edge case rather than a release-blocking safety issue, provided the failure remains safe.
-
----
-
-## Sway & Hyprland (wlroots / Tiling Wayland)
-
-Expected capabilities:
-
-```text
-Text capture: supported
-Image capture: supported
-Focus restoration: supported (Sway IPC / Hyprland IPC)
-Direct paste: supported (zwp_virtual_keyboard_v1)
-Popup dismissal: explicit-only (bare focus loss ignored)
-```
-
-Validate popup dismissal policy:
-
-1. Start Pookie Paste.
-2. Open the popup (`Super+V` or `pookie-paste --toggle`).
-3. Move the mouse cursor freely into the popup and back outside: confirm the popup remains open.
-4. Click an underlying application window outside the popup: confirm the popup remains open.
-5. Press `Escape`: confirm the popup closes.
-6. Open the popup and click the header close button (`✕`): confirm the popup closes.
-7. Open the popup, select an item, and activate: confirm the popup activates and closes.
+#### Verification Steps
+1. **Opaque Lua Callback Contract (`bound_unverified`)**:
+   * When using modern Lua configurations (`hl.bind("SUPER + V", ...)`), Hyprland registers an opaque `__lua` dispatcher.
+   * Run `pookie-paste --shortcut-status --porcelain`.
+   * **Verify**: Status is reported as `status=bound_unverified`.
+   * **Contract**: This is treated as valid and operational. The UI must not show error banners or force the onboarding setup window.
+   * Press `Super+V`: confirm the binding launches the popup.
+2. **Standard Hyprlang Binding**:
+   * In `hyprland.conf`:
+     ```hyprlang
+     bind = SUPER, V, exec, pookie-paste --toggle
+     ```
+   * Verify status reports `status=ready`.
+3. **Missing Binding Flow**:
+   * Remove the binding and reload Hyprland: verify status reports `status=needs_setup`.
+4. **Dismissal Policy**:
+   * Hyprland uses explicit dismissal. Verify pointer movement and outside clicks do not close the popup; verify `Escape`, the header close button, or item activation closes it.
 
 ---
 
-# Mixed Content Validation
+## 7. Application Identity & Desktop Integration
 
-Before release, verify this sequence on both X11 and KDE Plasma Wayland:
+Verify that Pookie Paste integrates cleanly into the desktop shell without generic placeholder icons or window grouping defects.
 
-```text
-copy text A
-copy image A
-copy text B
-copy image B
-```
+### 7.1 Asset Verification
+Confirm installed assets in `~/.local/share/icons/hicolor/`:
+* `scalable/apps/io.github.riyanj220.PookiePaste.svg`
+* `256x256/apps/io.github.riyanj220.PookiePaste.png`
+* `128x128/apps/io.github.riyanj220.PookiePaste.png`
+* `64x64/apps/io.github.riyanj220.PookiePaste.png`
+* `48x48/apps/io.github.riyanj220.PookiePaste.png`
+* `32x32/apps/io.github.riyanj220.PookiePaste.png`
 
-Open `Super+V`.
+### 7.2 Desktop & Window Attributes
+* Desktop file: `Icon=io.github.riyanj220.PookiePaste`
+* Window identity: `StartupWMClass=io.github.riyanj220.PookiePaste`
+* Wayland application ID: `io.github.riyanj220.PookiePaste`
+* Embedded window icon: Built directly into the UI binary (`assets/pookie-paste-128.png`).
 
-Expected order:
-
-```text
-image B
-text B
-image A
-text A
-```
-
-Then:
-
-1. Activate `image A`.
-2. Open `Super+V` again.
-3. Confirm `image A` is now the most recent item.
-4. Confirm no duplicate image row was created.
-5. Activate `text A`.
-6. Confirm text activation still works correctly after image activation.
+### 7.3 Visual Inspection
+1. **Application Launcher**: Search for "Pookie Paste" in Kickoff, Rofi, Wofi, or GNOME/XFCE menus. Confirm the official icon renders crisply.
+2. **Taskbar & Dock**: Open the popup or shortcut settings window. Verify the taskbar or dock displays the branded icon, not an generic Wayland/eframe cog or X11 placeholder.
+3. **Window Grouping**: Confirm multiple windows or re-opens group under `io.github.riyanj220.PookiePaste`.
 
 ---
 
-# Persistence Validation
+## 8. Core Clipboard & Activation Validation
 
-Create mixed history containing both text and images.
+Execute this sequence on each supported display server:
 
-Stop and restart Pookie Paste.
+### 8.1 Mixed Content History & Promotion
+1. Copy text entry A (`"Alpha"`).
+2. Copy image entry A (e.g. take a screenshot or copy from an image viewer).
+3. Copy text entry B (`"Beta"`).
+4. Copy image entry B.
+5. Open Pookie Paste (`Super+V`).
+6. Confirm visual order (newest first):
+   1. Image B
+   2. Text B (`"Beta"`)
+   3. Image A
+   4. Text A (`"Alpha"`)
+7. Confirm image thumbnails render with preserved aspect ratios.
+8. Activate Image A into an image-capable target (e.g. GIMP, LibreOffice, or web chat).
+   * Verify Image A pastes directly.
+   * Reopen `Super+V`: verify Image A is promoted to position 1.
+   * Verify no duplicate history entries were created.
+9. Activate Text A into a text editor.
+   * Verify Text A pastes directly.
+   * Reopen `Super+V`: verify Text A is now position 1.
 
-Verify:
+### 8.2 Self-Write Duplicate Suppression
+1. Activate an item from Pookie Paste.
+2. Confirm that writing to the system clipboard during activation does not record a new identical item in the history database.
 
-- SQLite history survives
-- Image files survive
-- Image rows still reference valid files
-- Thumbnails reload
-- Old text items still activate
-- Old image items still activate
+### 8.3 Content Transitions
+Alternate copying between binary image data and UTF-8 text strings:
+```text
+Text → Image → Text → Image
+```
+Check daemon logs (`~/.local/state/pookie-paste/install-start.log` or stderr) to ensure no repeated MIME decoding crashes or unhandled error loops occur.
 
-Expected data layout:
+---
+
+## 9. User State & Persistence Lifecycle
+
+### 9.1 Filesystem Contract
+User state is strictly partitioned across standard XDG locations:
 
 ```text
+$XDG_CONFIG_HOME/pookie-paste/
+└── config.toml
+
 $XDG_DATA_HOME/pookie-paste/
 ├── pookie-paste.db
 └── images/
     └── <uuid>.png
+
+$XDG_STATE_HOME/pookie-paste/
+└── install-start.log
 ```
 
-When `XDG_DATA_HOME` is unset, the normal fallback is:
+### 9.2 Lifecycle Matrix
 
-```text
-~/.local/share/pookie-paste/
-```
+| Operation | Binaries & Desktop Entries | Hicolor Icons | Database & Images | Config (`config.toml`) |
+| :--- | :---: | :---: | :---: | :---: |
+| **Standard Uninstall** | Removed | Removed | **Preserved** | **Preserved** |
+| **Reinstall / Update** | Replaced | Replaced | **Preserved** | **Preserved** |
+| **Purge (`--purge`)** | Removed | Removed | **Deleted** | **Deleted** |
+
+> [!NOTE]
+> Pookie Paste does not manipulate or delete external portal authorization records maintained by desktop portals in system databases.
 
 ---
 
-# Release Artifact Validation
+## 10. Distribution & Release Artifact Validation
 
-Before publishing a release, verify the generated checksum:
+Release packages are generated using:
+
+```bash
+./scripts/package-release.sh <version> [architecture]
+```
+
+### 10.1 Archive Contents Inspection
+Unpack and verify the generated tarball:
+
+```bash
+tar -tzf dist/pookie-paste-<version>-linux-x86_64.tar.gz
+```
+
+The archive must contain exactly:
+
+```text
+pookie-paste-<version>-linux-x86_64/
+├── bin/
+│   ├── pookie-paste
+│   └── pookie-paste-ui
+├── share/
+│   ├── applications/
+│   │   └── io.github.riyanj220.PookiePaste.desktop
+│   ├── autostart/
+│   │   └── io.github.riyanj220.PookiePaste-autostart.desktop
+│   ├── icons/
+│   │   └── hicolor/
+│   │       ├── 128x128/apps/io.github.riyanj220.PookiePaste.png
+│   │       ├── 256x256/apps/io.github.riyanj220.PookiePaste.png
+│   │       ├── 32x32/apps/io.github.riyanj220.PookiePaste.png
+│   │       ├── 48x48/apps/io.github.riyanj220.PookiePaste.png
+│   │       ├── 64x64/apps/io.github.riyanj220.PookiePaste.png
+│   │       └── scalable/apps/io.github.riyanj220.PookiePaste.svg
+│   └── pookie-paste/
+│       └── kwin/
+│           └── pookie-focus/
+├── LICENSE
+├── README.md
+└── RELEASE_VERSION
+```
+
+**Negative Contract**: Runtime-generated files (`config.toml`, `pookie-paste.db`, image cache, sockets) must **never** be included in the release archive.
+
+### 10.2 Checksum Verification
+Verify the generated checksum file:
 
 ```bash
 cd dist
 sha256sum -c SHA256SUMS
 ```
 
-Expected:
-
+Ensure the output confirms:
 ```text
 pookie-paste-<version>-linux-x86_64.tar.gz: OK
 ```
 
-Inspect the archive:
+### 10.3 Dynamic Runtime Compatibility Baseline
+Inspect the compiled binaries inside the extracted package:
 
 ```bash
-tar -tzf   pookie-paste-<version>-linux-x86_64.tar.gz
-```
+cd dist/pookie-paste-<version>-linux-x86_64/bin
 
-The release must contain:
-
-```text
-bin/pookie-paste
-bin/pookie-paste-ui
-
-share/applications/
-share/autostart/
-
-share/pookie-paste/kwin/pookie-focus/
-
-LICENSE
-README.md
-RELEASE_VERSION
-```
-
-Runtime-created clipboard history and image files must not be included in the release archive.
-
----
-
-# Runtime Compatibility
-
-Inspect dynamic dependencies:
-
-```bash
+# Check dynamic linkage
 ldd pookie-paste
 ldd pookie-paste-ui
+
+# Inspect glibc symbol requirements
+objdump -T pookie-paste | grep -o 'GLIBC_[0-9.]*' | sort -V | tail -n 1
+objdump -T pookie-paste-ui | grep -o 'GLIBC_[0-9.]*' | sort -V | tail -n 1
 ```
 
-Inspect required glibc symbol versions:
-
-```bash
-objdump -T pookie-paste   | grep GLIBC_   | sort -V
-
-objdump -T pookie-paste-ui   | grep GLIBC_   | sort -V
-```
-
-Record the highest required glibc version for published binaries.
-
-Do not claim compatibility with distributions older than the verified runtime baseline.
+Confirm that the required GLIBC version does not exceed the target deployment baseline (e.g. GLIBC 2.31 or 2.35 as specified in release requirements).
 
 ---
 
-# Release Approval Checklist
+## 11. Published-Release & Upgrade Testing
 
-Before considering a release validated:
+### 11.1 Published-Release Smoke Test
+Once the GitHub release tag is published, validate the exact downloadable archive:
 
-- [ ] CI passes
-- [ ] Release workflow passes
-- [ ] `cargo check --workspace` passes
-- [ ] `cargo test --workspace` passes
-- [ ] Workspace Clippy passes with warnings denied
-- [ ] Source-install smoke test passes
-- [ ] Published-release smoke test passes
-- [ ] SHA256 verification passes
-- [ ] X11 text + image E2E validation passes (including click-outside dismissal)
-- [ ] KDE Plasma Wayland text + image E2E validation passes (including click-outside dismissal)
-- [ ] Sway / Hyprland popup dismissal validation passes (pointer freedom, outside click ignored, explicit close)
-- [ ] Mixed text/image history behaves correctly
-- [ ] Image activation does not create duplicate history rows
-- [ ] Update preserves database and image history
-- [ ] Standard uninstall preserves application data
-- [ ] Purge removes database, image files, and application state
-- [ ] Runtime/glibc baseline is recorded
-- [ ] README installation instructions match the released behavior
+```bash
+# Test specific published release
+./scripts/smoke-test-install.sh --version <version>
 
-A release should only be described as supported on environments that have actually passed the relevant validation.
+# Test latest published release
+./scripts/smoke-test-install.sh
+```
+
+### 11.2 Upgrade Verification Over Previous Version
+To guarantee that real upgrades do not break live user environments, execute upgrade verification in a dedicated clean user account or test machine (never via the smoke test, which purges the test sandbox upon completion):
+
+1. **Install Previous Published Release**:
+   Install the previous stable release normally:
+   ```bash
+   ./install.sh --version <previous-version>
+   ```
+2. **Populate Representative User State**:
+   * Copy multiple text snippets into clipboard history.
+   * Copy multiple image entries (verify image files are written to `$XDG_DATA_HOME/pookie-paste/images/`).
+   * Configure custom settings and a non-default shortcut intent in `~/.config/pookie-paste/config.toml`.
+3. **Install Candidate Release Over Existing Installation**:
+   Run the candidate release installer directly over the existing environment:
+   ```bash
+   # From candidate release archive:
+   ./install.sh
+
+   # Or from source tree:
+   ./scripts/install.sh --from-source
+   ```
+4. **Verify Upgrade Integrity**:
+   * **Persistence**: SQLite database, image files, `config.toml`, and configured shortcut intent survive intact without truncation or corruption.
+   * **Resource Updates**: Binaries in `~/.local/bin/`, desktop entries in `~/.local/share/applications/`, and icon assets in `~/.local/share/icons/hicolor/` are updated to candidate versions.
+   * **Runtime Readiness**: The daemon restarts cleanly and responds over the IPC socket.
+   * **Functionality**: Existing pre-upgrade text and image entries load properly, render thumbnails accurately, and still activate and paste into target applications without error.
+
+### 11.3 Remote Bootstrap Verification
+Verify that remote one-line installation and uninstallation function properly:
+
+```bash
+# 1. Fresh install
+curl -fsSL https://raw.githubusercontent.com/riyanj220/pookie-paste/main/install.sh | bash
+
+# 2. Update (re-running install)
+curl -fsSL https://raw.githubusercontent.com/riyanj220/pookie-paste/main/install.sh | bash
+
+# 3. Standard remote uninstall
+curl -fsSL https://raw.githubusercontent.com/riyanj220/pookie-paste/main/uninstall.sh | bash
+
+# 4. Full remote purge
+curl -fsSL https://raw.githubusercontent.com/riyanj220/pookie-paste/main/uninstall.sh | bash -s -- --purge
+```
+
+---
+
+## 12. Release Approval Checklist
+
+A release is approved **only** when all checkboxes below are satisfied:
+
+### Automated Pre-Release Gates
+- [ ] `cargo fmt --all -- --check` passes with zero discrepancies.
+- [ ] `cargo check --workspace --all-targets` passes.
+- [ ] `cargo clippy --workspace --all-targets -- -D warnings` passes with zero warnings.
+- [ ] `cargo test --workspace` passes all unit and integration tests.
+- [ ] `./scripts/smoke-test-install.sh --from-source` passes all 8 phases.
+
+### Real-Session Desktop Validation
+- [ ] **X11**: Native key grab functions; click-outside dismisses; `_NET_WM_ICON` & `WM_CLASS` valid.
+- [ ] **KDE Plasma Wayland**: Portal status tracking (`needs_setup` vs `ready`); live `ShortcutsChanged` reflection; `pookie-focus` focus restoration and EIS paste succeed.
+- [ ] **Sway**: Live IPC conflict detection surfaces; snippet binding works; explicit dismissal policy verified.
+- [ ] **Hyprland**: `bound_unverified` handled gracefully without false alarms; Lua and Hyprlang bindings work; explicit dismissal policy verified.
+
+### Identity & UX Integration
+- [ ] Complete Hicolor icon theme installed (`scalable`, `256`, `128`, `64`, `48`, `32`).
+- [ ] Desktop launcher, taskbar, dock, and Alt-Tab display branded icon without generic fallbacks.
+- [ ] Installer onboarding messages conform to the porcelain status matrix.
+
+### Clipboard Core Contracts
+- [ ] Mixed text/image capture orders correctly.
+- [ ] Image thumbnails render with accurate aspect ratios.
+- [ ] Item activation promotes entry to top without duplicate history rows.
+- [ ] Direct paste reliably restores previous window focus before keystroke injection.
+
+### Persistence & Packaging
+- [ ] Standard uninstall preserves database, images, and `config.toml`.
+- [ ] Purge uninstall completely cleans database, images, and `config.toml`.
+- [ ] Release archive contains binaries, desktop entries, autostart, kwin scripts, and hicolor icons.
+- [ ] Release archive contains no runtime databases, configs, or image caches.
+- [ ] `dist/SHA256SUMS` verified against generated packages.
+- [ ] Dynamic library linkage and GLIBC baseline inspected and verified.
+- [ ] Upgrading over the previous stable release preserves database and user settings.
+- [ ] Published release smoke test passes: `./scripts/smoke-test-install.sh --version <version>`.
