@@ -417,6 +417,7 @@ if [[ "$FROM_SOURCE" == true ]]; then
 fi
 
 export XDG_CURRENT_DESKTOP="PookieSmokeTest"
+export POOKIE_SKIP_ONBOARDING=1
 export PATH="${TEST_HOME}/.local/bin:${PATH}"
 
 # shellcheck disable=SC1091

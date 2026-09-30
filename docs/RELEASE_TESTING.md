@@ -77,8 +77,9 @@ The smoke test isolates application data to prevent mutating the tester's person
   * Real `XDG_RUNTIME_DIR` is retained so the test daemon connects to the active graphical session (X11 or Wayland socket).
 * **Toolchain Preservation**:
   * In `--from-source` mode, `CARGO_HOME` and `RUSTUP_HOME` point to the developer's real toolchain so Rust compilation succeeds while `HOME` is redirected.
-* **Compositor Isolation**:
+* **Compositor & Onboarding Isolation**:
   * Sets `XDG_CURRENT_DESKTOP="PookieSmokeTest"` to intentionally suppress desktop-specific integrations (e.g., KWin script registration) during generic isolation testing.
+  * Exports `POOKIE_SKIP_ONBOARDING=1` to suppress launching the interactive GUI shortcut setup window during fresh installation and reinstallation phases.
 
 ### 4.2 The 8-Phase Lifecycle Verification
 

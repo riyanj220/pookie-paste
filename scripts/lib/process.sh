@@ -188,10 +188,17 @@ start_pookie() {
 # Handles post-install onboarding decisions based on authoritative
 # shortcut status parsed in Step 5A.
 #
+# If POOKIE_SKIP_ONBOARDING is set (e.g., during automated smoke tests),
+# interactive onboarding window launches and messages are skipped.
+#
 handle_pookie_onboarding() {
     local daemon_path="$1"
     local status="$2"
     local shortcut="$3"
+
+    if [[ "${POOKIE_SKIP_ONBOARDING:-}" == "1" || "${POOKIE_SKIP_ONBOARDING:-}" == "true" ]]; then
+        return 0
+    fi
 
     case "$status" in
         ready)
