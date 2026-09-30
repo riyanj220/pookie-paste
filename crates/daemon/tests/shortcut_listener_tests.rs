@@ -291,10 +291,11 @@ fn evaluates_bound_shortcuts_when_trigger_description_is_missing() {
     let (effective, outcome) = evaluate_bound_shortcuts(&bound, requested).unwrap();
     assert_eq!(effective, None);
     match outcome {
-        ShortcutRegistrationOutcome::Active { description } => {
+        ShortcutRegistrationOutcome::Unconfigured { description } => {
             assert!(description.contains("Super+V"));
+            assert!(description.contains("not assigned"));
         }
-        _ => panic!("expected active registration outcome"),
+        _ => panic!("expected unconfigured registration outcome"),
     }
 }
 
@@ -312,10 +313,11 @@ fn evaluates_bound_shortcuts_when_trigger_description_is_empty() {
     let (effective, outcome) = evaluate_bound_shortcuts(&bound, requested).unwrap();
     assert_eq!(effective, None);
     match outcome {
-        ShortcutRegistrationOutcome::Active { description } => {
+        ShortcutRegistrationOutcome::Unconfigured { description } => {
             assert!(description.contains("Super+V"));
+            assert!(description.contains("not assigned"));
         }
-        _ => panic!("expected active registration outcome"),
+        _ => panic!("expected unconfigured registration outcome"),
     }
 }
 
@@ -1456,7 +1458,7 @@ async fn shortcuts_changed_updates_effective_shortcut_and_status() {
         .expect("event sender wired");
     sender
         .send(BackendEvent::ShortcutsChanged {
-            effective_shortcut: "Ctrl+Shift+P".to_string(),
+            effective_shortcut: Some("Ctrl+Shift+P".to_string()),
         })
         .unwrap();
     listener.wake();
@@ -1472,6 +1474,28 @@ async fn shortcuts_changed_updates_effective_shortcut_and_status() {
     let status = listener.status();
     assert_eq!(status.effective_shortcut.as_deref(), Some("Ctrl+Shift+P"));
     assert!(matches!(status.state, ipc::IpcShortcutState::Active { .. }));
+
+    // Now simulate KDE removing the shortcut
+    sender
+        .send(BackendEvent::ShortcutsChanged {
+            effective_shortcut: None,
+        })
+        .unwrap();
+    listener.wake();
+
+    for _ in 0..20 {
+        if listener.status().effective_shortcut.is_none() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    let status = listener.status();
+    assert_eq!(status.effective_shortcut, None);
+    assert!(matches!(
+        status.state,
+        ipc::IpcShortcutState::Unconfigured { .. }
+    ));
 }
 
 #[tokio::test]
@@ -1539,7 +1563,7 @@ async fn repeated_configure_portal_calls_do_not_create_duplicate_listeners() {
         .expect("event sender wired");
     sender
         .send(BackendEvent::ShortcutsChanged {
-            effective_shortcut: "Alt+F8".to_string(),
+            effective_shortcut: Some("Alt+F8".to_string()),
         })
         .unwrap();
     listener.wake();

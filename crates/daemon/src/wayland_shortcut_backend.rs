@@ -285,35 +285,30 @@ impl WaylandShortcutSession {
             }
 
             let shortcuts = decode_shortcuts_vec(raw_shortcuts);
-            let effective = shortcuts
-                .into_iter()
-                .find(|s| s.id == CLIPBOARD_HISTORY_SHORTCUT_ID)
-                .and_then(|s| s.trigger_description)
-                .filter(|t| !t.trim().is_empty());
-
-            let effective = match effective {
-                Some(eff) => Some(eff),
-                None => {
-                    if let Ok(bound) =
-                        list_shortcuts(&self.connection, &self.session_handle.as_ref()).await
-                    {
-                        bound
-                            .into_iter()
-                            .find(|s| s.id == CLIPBOARD_HISTORY_SHORTCUT_ID)
-                            .and_then(|s| s.trigger_description)
-                            .filter(|t| !t.trim().is_empty())
-                    } else {
-                        None
-                    }
-                }
+            let resolution = if let Some(res) = resolve_shortcuts_changed_from_signal(&shortcuts) {
+                res
+            } else {
+                let fallback =
+                    list_shortcuts(&self.connection, &self.session_handle.as_ref()).await;
+                resolve_shortcuts_changed_from_fallback(fallback)
             };
 
-            if let Some(new_trigger) = effective {
-                info!(trigger = %new_trigger, "received portal ShortcutsChanged notification");
-                let _ = event_sender.send(BackendEvent::ShortcutsChanged {
-                    effective_shortcut: new_trigger,
-                });
-                let _ = wake_sender.send(Err(ShortcutError::Interrupted));
+            match resolution {
+                ShortcutsChangedResolution::Authoritative(effective) => {
+                    info!(
+                        effective = ?effective,
+                        "received portal ShortcutsChanged notification"
+                    );
+                    let _ = event_sender.send(BackendEvent::ShortcutsChanged {
+                        effective_shortcut: effective,
+                    });
+                    let _ = wake_sender.send(Err(ShortcutError::Interrupted));
+                }
+                ShortcutsChangedResolution::Inconclusive => {
+                    debug!(
+                        "ShortcutsChanged omitted clipboard-history and fallback ListShortcuts failed; preserving current state"
+                    );
+                }
             }
         }
 
@@ -687,16 +682,20 @@ impl ShortcutBackend for WaylandShortcutBackend {
         }
 
         // ListShortcuts unsupported or failed: preserve existing effective trigger
-        let description = match &self.effective_trigger {
+        match &self.effective_trigger {
             Some(trigger) => {
-                format!("XDG Desktop Portal global shortcut for {trigger} (requested {shortcut})")
+                let description = format!(
+                    "XDG Desktop Portal global shortcut for {trigger} (requested {shortcut})"
+                );
+                Ok(ShortcutRegistrationOutcome::Active { description })
             }
             None => {
-                format!("XDG Desktop Portal global shortcut (requested {shortcut})")
+                let description = format!(
+                    "XDG Desktop Portal global shortcut not assigned (requested {shortcut})"
+                );
+                Ok(ShortcutRegistrationOutcome::Unconfigured { description })
             }
-        };
-
-        Ok(ShortcutRegistrationOutcome::Active { description })
+        }
     }
 
     fn wake(&self) -> Result<(), ShortcutError> {
@@ -1027,35 +1026,33 @@ pub fn evaluate_bound_shortcuts(
         .filter(|s| !s.is_empty())
         .map(ToString::to_string);
 
-    match &effective_trigger {
+    match effective_trigger {
         Some(trigger) => {
             info!(
                 effective = %trigger,
                 requested = %requested,
                 "portal global shortcut active"
             );
+            let description =
+                format!("XDG Desktop Portal global shortcut for {trigger} (requested {requested})");
+            Ok((
+                Some(trigger),
+                ShortcutRegistrationOutcome::Active { description },
+            ))
         }
         None => {
             info!(
                 requested = %requested,
-                "portal global shortcut active (effective trigger description not provided by portal)"
+                "portal global shortcut unconfigured (no effective trigger assigned by portal)"
             );
+            let description =
+                format!("XDG Desktop Portal global shortcut not assigned (requested {requested})");
+            Ok((
+                None,
+                ShortcutRegistrationOutcome::Unconfigured { description },
+            ))
         }
     }
-
-    let description = match &effective_trigger {
-        Some(trigger) => {
-            format!("XDG Desktop Portal global shortcut for {trigger} (requested {requested})")
-        }
-        None => {
-            format!("XDG Desktop Portal global shortcut (requested {requested})")
-        }
-    };
-
-    Ok((
-        effective_trigger,
-        ShortcutRegistrationOutcome::Active { description },
-    ))
 }
 
 async fn list_shortcuts(
@@ -1113,6 +1110,66 @@ async fn list_shortcuts(
 
     check_portal_response("GlobalShortcuts ListShortcuts", response)?;
     decode_shortcuts_result(results, "GlobalShortcuts ListShortcuts")
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ShortcutsChangedResolution {
+    /// Authoritative new trigger state (Some(trigger) if assigned, None if removed/unconfigured).
+    Authoritative(Option<String>),
+    /// Shortcut was absent from the signal and fallback query failed; preserve existing state.
+    Inconclusive,
+}
+
+pub(crate) fn resolve_shortcuts_changed_from_signal(
+    signal_shortcuts: &[BoundShortcut],
+) -> Option<ShortcutsChangedResolution> {
+    signal_shortcuts
+        .iter()
+        .find(|s| s.id == CLIPBOARD_HISTORY_SHORTCUT_ID)
+        .map(|entry| {
+            let trigger = entry
+                .trigger_description
+                .as_deref()
+                .map(str::trim)
+                .filter(|t| !t.is_empty())
+                .map(str::to_string);
+            ShortcutsChangedResolution::Authoritative(trigger)
+        })
+}
+
+pub(crate) fn resolve_shortcuts_changed_from_fallback(
+    fallback_result: Result<Vec<BoundShortcut>, ShortcutError>,
+) -> ShortcutsChangedResolution {
+    match fallback_result {
+        Ok(bound) => {
+            let trigger = bound
+                .into_iter()
+                .find(|s| s.id == CLIPBOARD_HISTORY_SHORTCUT_ID)
+                .and_then(|s| s.trigger_description)
+                .map(|t| t.trim().to_string())
+                .filter(|t| !t.is_empty());
+            ShortcutsChangedResolution::Authoritative(trigger)
+        }
+        Err(err) => {
+            debug!(
+                error = %err,
+                "ShortcutsChanged signal omitted clipboard-history and fallback ListShortcuts failed; preserving current state"
+            );
+            ShortcutsChangedResolution::Inconclusive
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn resolve_shortcuts_changed(
+    signal_shortcuts: &[BoundShortcut],
+    fallback_query: impl FnOnce() -> Result<Vec<BoundShortcut>, ShortcutError>,
+) -> ShortcutsChangedResolution {
+    if let Some(resolution) = resolve_shortcuts_changed_from_signal(signal_shortcuts) {
+        resolution
+    } else {
+        resolve_shortcuts_changed_from_fallback(fallback_query())
+    }
 }
 
 async fn configure_shortcuts(
@@ -1553,5 +1610,170 @@ mod tests {
             check_portal_response("test", 99),
             Err(ShortcutError::Failed(_)),
         ));
+    }
+
+    #[test]
+    fn evaluates_bound_shortcut_with_effective_trigger_as_active() {
+        let bound = vec![BoundShortcut {
+            id: CLIPBOARD_HISTORY_SHORTCUT_ID.to_string(),
+            trigger_description: Some("Meta+V".to_string()),
+        }];
+        let (effective, outcome) = evaluate_bound_shortcuts(&bound, Shortcut::super_v()).unwrap();
+        assert_eq!(effective.as_deref(), Some("Meta+V"));
+        assert!(matches!(
+            &outcome,
+            ShortcutRegistrationOutcome::Active { description }
+                if description.contains("Meta+V")
+        ));
+    }
+
+    #[test]
+    fn evaluates_bound_shortcut_without_trigger_as_unconfigured() {
+        let bound = vec![BoundShortcut {
+            id: CLIPBOARD_HISTORY_SHORTCUT_ID.to_string(),
+            trigger_description: None,
+        }];
+        let (effective, outcome) = evaluate_bound_shortcuts(&bound, Shortcut::super_v()).unwrap();
+        assert_eq!(effective, None);
+        assert!(matches!(
+            &outcome,
+            ShortcutRegistrationOutcome::Unconfigured { description }
+                if description.contains("not assigned")
+        ));
+    }
+
+    #[test]
+    fn evaluates_bound_shortcut_with_empty_trigger_as_unconfigured() {
+        let bound = vec![BoundShortcut {
+            id: CLIPBOARD_HISTORY_SHORTCUT_ID.to_string(),
+            trigger_description: Some("".to_string()),
+        }];
+        let (effective, outcome) = evaluate_bound_shortcuts(&bound, Shortcut::super_v()).unwrap();
+        assert_eq!(effective, None);
+        assert!(matches!(
+            outcome,
+            ShortcutRegistrationOutcome::Unconfigured { .. }
+        ));
+    }
+
+    #[test]
+    fn evaluates_bound_shortcut_with_whitespace_trigger_as_unconfigured() {
+        let bound = vec![BoundShortcut {
+            id: CLIPBOARD_HISTORY_SHORTCUT_ID.to_string(),
+            trigger_description: Some("   ".to_string()),
+        }];
+        let (effective, outcome) = evaluate_bound_shortcuts(&bound, Shortcut::super_v()).unwrap();
+        assert_eq!(effective, None);
+        assert!(matches!(
+            outcome,
+            ShortcutRegistrationOutcome::Unconfigured { .. }
+        ));
+    }
+
+    #[test]
+    fn evaluates_missing_shortcut_id_as_unavailable() {
+        let bound = vec![BoundShortcut {
+            id: "other-shortcut".to_string(),
+            trigger_description: Some("Meta+V".to_string()),
+        }];
+        let result = evaluate_bound_shortcuts(&bound, Shortcut::super_v());
+        assert!(matches!(result, Err(ShortcutError::Unavailable)));
+    }
+
+    #[test]
+    fn shortcuts_changed_explicit_signal_trigger_resolves_to_authoritative_trigger() {
+        let signal = vec![BoundShortcut {
+            id: CLIPBOARD_HISTORY_SHORTCUT_ID.to_string(),
+            trigger_description: Some("Meta+V".to_string()),
+        }];
+        let res =
+            resolve_shortcuts_changed(&signal, || panic!("fallback query must not be called"));
+        assert_eq!(
+            res,
+            ShortcutsChangedResolution::Authoritative(Some("Meta+V".to_string()))
+        );
+    }
+
+    #[test]
+    fn shortcuts_changed_explicit_signal_removal_resolves_to_authoritative_none() {
+        let signal_none = vec![BoundShortcut {
+            id: CLIPBOARD_HISTORY_SHORTCUT_ID.to_string(),
+            trigger_description: None,
+        }];
+        let res =
+            resolve_shortcuts_changed(&signal_none, || panic!("fallback query must not be called"));
+        assert_eq!(res, ShortcutsChangedResolution::Authoritative(None));
+
+        let signal_empty = vec![BoundShortcut {
+            id: CLIPBOARD_HISTORY_SHORTCUT_ID.to_string(),
+            trigger_description: Some("".to_string()),
+        }];
+        let res = resolve_shortcuts_changed(&signal_empty, || {
+            panic!("fallback query must not be called")
+        });
+        assert_eq!(res, ShortcutsChangedResolution::Authoritative(None));
+
+        let signal_whitespace = vec![BoundShortcut {
+            id: CLIPBOARD_HISTORY_SHORTCUT_ID.to_string(),
+            trigger_description: Some("   ".to_string()),
+        }];
+        let res = resolve_shortcuts_changed(&signal_whitespace, || {
+            panic!("fallback query must not be called")
+        });
+        assert_eq!(res, ShortcutsChangedResolution::Authoritative(None));
+    }
+
+    #[test]
+    fn shortcuts_changed_fallback_confirms_trigger() {
+        let signal = vec![];
+        let fallback = || {
+            Ok(vec![BoundShortcut {
+                id: CLIPBOARD_HISTORY_SHORTCUT_ID.to_string(),
+                trigger_description: Some("Ctrl+Shift+V".to_string()),
+            }])
+        };
+        let res = resolve_shortcuts_changed(&signal, fallback);
+        assert_eq!(
+            res,
+            ShortcutsChangedResolution::Authoritative(Some("Ctrl+Shift+V".to_string()))
+        );
+    }
+
+    #[test]
+    fn shortcuts_changed_fallback_confirms_no_trigger() {
+        let signal = vec![];
+
+        // Case 1: entry present in list_shortcuts with None trigger
+        let fallback_none = || {
+            Ok(vec![BoundShortcut {
+                id: CLIPBOARD_HISTORY_SHORTCUT_ID.to_string(),
+                trigger_description: None,
+            }])
+        };
+        let res = resolve_shortcuts_changed(&signal, fallback_none);
+        assert_eq!(res, ShortcutsChangedResolution::Authoritative(None));
+
+        // Case 2: entry present in list_shortcuts with empty/whitespace trigger
+        let fallback_whitespace = || {
+            Ok(vec![BoundShortcut {
+                id: CLIPBOARD_HISTORY_SHORTCUT_ID.to_string(),
+                trigger_description: Some("  ".to_string()),
+            }])
+        };
+        let res = resolve_shortcuts_changed(&signal, fallback_whitespace);
+        assert_eq!(res, ShortcutsChangedResolution::Authoritative(None));
+
+        // Case 3: entry absent from list_shortcuts
+        let fallback_empty_list = || Ok(vec![]);
+        let res = resolve_shortcuts_changed(&signal, fallback_empty_list);
+        assert_eq!(res, ShortcutsChangedResolution::Authoritative(None));
+    }
+
+    #[test]
+    fn shortcuts_changed_fallback_failure_is_inconclusive() {
+        let signal = vec![];
+        let fallback_err = || Err(ShortcutError::Failed("D-Bus query failed".to_string()));
+        let res = resolve_shortcuts_changed(&signal, fallback_err);
+        assert_eq!(res, ShortcutsChangedResolution::Inconclusive);
     }
 }

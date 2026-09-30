@@ -438,6 +438,10 @@ pub fn shortcut_status_to_onboarding_status(
                 shortcut,
             }
         }
+        IpcShortcutState::Unconfigured { .. } => OnboardingShortcutResult {
+            status: OnboardingShortcutStatus::NeedsSetup,
+            shortcut: &status.configured_shortcut,
+        },
         IpcShortcutState::CompositorManaged { binding_status, .. } => {
             let onboarding_status = match binding_status {
                 IpcCompositorBindingStatus::Verified => OnboardingShortcutStatus::Ready,
@@ -516,6 +520,13 @@ pub fn format_shortcut_status_with_header(header: &str, status: &ShortcutStatusI
                 out.push_str(&format!("Effective Shortcut  : {}\n", effective));
             }
             out.push_str(&format!("Details             : {}\n", description));
+        }
+        IpcShortcutState::Unconfigured { description } => {
+            out.push_str("Status              : Unconfigured\n");
+            out.push_str(&format!("Details             : {}\n", description));
+            out.push_str(
+                "Action Required     : Configure a global shortcut in your desktop environment.\n",
+            );
         }
         IpcShortcutState::CompositorManaged {
             binding_status,
@@ -976,6 +987,56 @@ mod tests {
             format_shortcut_status_porcelain(&status),
             "status=unavailable\nshortcut=Super+V\n"
         );
+    }
+
+    #[test]
+    fn maps_portal_unconfigured_to_needs_setup() {
+        let status = ShortcutStatusInfo {
+            configured_shortcut: "Super+V".to_string(),
+            backend_name: Some("Wayland portal global shortcut".to_string()),
+            capability: Some(IpcShortcutCapability::Portal),
+            effective_shortcut: None,
+            state: IpcShortcutState::Unconfigured {
+                description: "XDG Desktop Portal global shortcut not assigned (requested Super+V)"
+                    .to_string(),
+            },
+        };
+        let result = shortcut_status_to_onboarding_status(&status);
+        assert_eq!(result.status, OnboardingShortcutStatus::NeedsSetup);
+        assert_eq!(result.shortcut, "Super+V");
+        assert_eq!(
+            format_shortcut_status_porcelain(&status),
+            "status=needs_setup\nshortcut=Super+V\n"
+        );
+        let human = format_shortcut_status(&status);
+        assert!(human.contains("Status              : Unconfigured"));
+        assert!(human.contains(
+            "Action Required     : Configure a global shortcut in your desktop environment."
+        ));
+    }
+
+    #[test]
+    fn maps_portal_active_with_effective_shortcut_to_ready() {
+        let status = ShortcutStatusInfo {
+            configured_shortcut: "Super+V".to_string(),
+            backend_name: Some("Wayland portal global shortcut".to_string()),
+            capability: Some(IpcShortcutCapability::Portal),
+            effective_shortcut: Some("Meta+V".to_string()),
+            state: IpcShortcutState::Active {
+                description: "XDG Desktop Portal global shortcut for Meta+V (requested Super+V)"
+                    .to_string(),
+            },
+        };
+        let result = shortcut_status_to_onboarding_status(&status);
+        assert_eq!(result.status, OnboardingShortcutStatus::Ready);
+        assert_eq!(result.shortcut, "Meta+V");
+        assert_eq!(
+            format_shortcut_status_porcelain(&status),
+            "status=ready\nshortcut=Meta+V\n"
+        );
+        let human = format_shortcut_status(&status);
+        assert!(human.contains("Status              : Active"));
+        assert!(human.contains("Effective Shortcut  : Meta+V"));
     }
 
     #[test]

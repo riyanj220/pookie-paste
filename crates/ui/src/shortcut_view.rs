@@ -59,6 +59,7 @@ pub fn attention_banner_text(status: &ShortcutStatusInfo) -> Option<&'static str
             binding_status: IpcCompositorBindingStatus::Conflict,
             ..
         } => Some("Shortcut conflict detected in compositor"),
+        IpcShortcutState::Unconfigured { .. } => Some("No global shortcut is assigned"),
         IpcShortcutState::Conflict { .. } => Some("Shortcut is already in use"),
         IpcShortcutState::Failed { .. } => Some("Shortcut configuration failed"),
         IpcShortcutState::Unavailable { .. } => Some("Global shortcut is currently unavailable"),
@@ -474,16 +475,68 @@ fn render_portal_section(
     palette: UiPalette,
     action: &mut ShortcutViewAction,
 ) {
-    let display_shortcut = status
+    let has_effective = status
         .effective_shortcut
         .as_deref()
-        .unwrap_or(&status.configured_shortcut);
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .is_some();
 
-    if render_current_shortcut_row(ui, "Current shortcut", display_shortcut, palette) {
-        *action = ShortcutViewAction::ConfigurePortal;
+    if has_effective {
+        let display_shortcut = status.effective_shortcut.as_deref().unwrap();
+        if render_current_shortcut_row(ui, "Current shortcut", display_shortcut, palette) {
+            *action = ShortcutViewAction::ConfigurePortal;
+        }
+    } else {
+        render_unconfigured_portal_row(ui, palette, action);
     }
 
     render_status_notice(ui, status);
+}
+
+fn render_unconfigured_portal_row(
+    ui: &mut egui::Ui,
+    palette: UiPalette,
+    action: &mut ShortcutViewAction,
+) {
+    egui::Frame::new()
+        .fill(palette.row_background)
+        .stroke(egui::Stroke::new(1.0, palette.border))
+        .corner_radius(ui_style::ROW_CORNER_RADIUS)
+        .inner_margin(egui::Margin::symmetric(10, 8))
+        .show(ui, |ui| {
+            ui.set_min_height(36.0);
+            ui.horizontal(|ui| {
+                ui.vertical(|ui| {
+                    ui.label(
+                        egui::RichText::new("Global shortcut")
+                            .size(ui_style::BODY_TEXT_SIZE - 2.0)
+                            .color(palette.text_secondary),
+                    );
+                    ui.label(
+                        egui::RichText::new("No shortcut assigned")
+                            .size(ui_style::BODY_TEXT_SIZE)
+                            .color(palette.text_secondary)
+                            .italics(),
+                    );
+                });
+
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let set_btn = egui::Button::new(
+                        egui::RichText::new("Set shortcut")
+                            .size(ui_style::BODY_TEXT_SIZE - 1.0)
+                            .color(palette.accent),
+                    );
+                    if ui
+                        .add(set_btn)
+                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                        .clicked()
+                    {
+                        *action = ShortcutViewAction::ConfigurePortal;
+                    }
+                });
+            });
+        });
 }
 
 fn render_sway_section(
@@ -1539,6 +1592,14 @@ mod tests {
                 description: "active".to_string()
             })),
             None
+        );
+
+        // Unconfigured -> warning
+        assert_eq!(
+            attention_banner_text(&make_status(IpcShortcutState::Unconfigured {
+                description: "not assigned".to_string()
+            })),
+            Some("No global shortcut is assigned")
         );
     }
 }

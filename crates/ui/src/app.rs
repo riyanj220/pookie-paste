@@ -825,7 +825,7 @@ impl PookieApp {
 
         let needs_active_recheck = match &self.shortcut_status {
             Some(status) => {
-                status.capability == Some(ipc::IpcShortcutCapability::CompositorManaged)
+                (status.capability == Some(ipc::IpcShortcutCapability::CompositorManaged)
                     && matches!(
                         status.state,
                         ipc::IpcShortcutState::CompositorManaged {
@@ -833,7 +833,9 @@ impl PookieApp {
                                 | ipc::IpcCompositorBindingStatus::Conflict,
                             ..
                         }
-                    )
+                    ))
+                    || (status.capability == Some(ipc::IpcShortcutCapability::Portal)
+                        && matches!(status.state, ipc::IpcShortcutState::Unconfigured { .. }))
             }
             None => false,
         };

@@ -491,6 +491,12 @@ fn apply_outcome_to_status<B: ShortcutBackend>(
                 },
             )
         }
+        ShortcutRegistrationOutcome::Unconfigured { description } => (
+            None,
+            IpcShortcutState::Unconfigured {
+                description: description.clone(),
+            },
+        ),
         ShortcutRegistrationOutcome::CompositorManaged {
             binding_snippet,
             status,
@@ -671,17 +677,26 @@ fn process_backend_event<B: ShortcutBackend>(
     match event {
         BackendEvent::ShortcutsChanged { effective_shortcut } => {
             info!(
-                effective = %effective_shortcut,
+                effective = ?effective_shortcut,
                 "desktop portal global shortcut updated"
             );
-            backend.set_effective_trigger(Some(effective_shortcut.clone()));
+            backend.set_effective_trigger(effective_shortcut.clone());
             if let Ok(mut lock) = status.write() {
-                lock.effective_shortcut = Some(effective_shortcut.clone());
-                lock.state = IpcShortcutState::Active {
-                    description: format!(
-                        "Desktop portal global shortcut active ({effective_shortcut})"
-                    ),
-                };
+                lock.effective_shortcut = effective_shortcut.clone();
+                match effective_shortcut {
+                    Some(trigger) => {
+                        lock.state = IpcShortcutState::Active {
+                            description: format!(
+                                "Desktop portal global shortcut active ({trigger})"
+                            ),
+                        };
+                    }
+                    None => {
+                        lock.state = IpcShortcutState::Unconfigured {
+                            description: "Desktop portal global shortcut not assigned".to_string(),
+                        };
+                    }
+                }
             }
         }
     }
