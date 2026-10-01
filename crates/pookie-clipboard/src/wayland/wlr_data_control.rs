@@ -158,13 +158,25 @@ impl WaylandState {
                                 );
                             }
                         } else {
-                            tracing::error!(
-                                error = %error,
-                                mime = %requested_mime,
-                                "failed reading WLR clipboard payload"
-                            );
                             if !is_last {
+                                tracing::debug!(
+                                    error = %error,
+                                    mime = %requested_mime,
+                                    "candidate WLR clipboard representation failed; trying fallback representation"
+                                );
                                 continue;
+                            } else if *kind == mime::ClipboardMimeKind::FileList {
+                                tracing::debug!(
+                                    error = %error,
+                                    mime = %requested_mime,
+                                    "WLR clipboard file-list evaluation yielded no supported image and no fallback was offered"
+                                );
+                            } else {
+                                tracing::error!(
+                                    error = %error,
+                                    mime = %requested_mime,
+                                    "failed reading WLR clipboard payload"
+                                );
                             }
                         }
                     }

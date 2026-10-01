@@ -190,9 +190,65 @@ pub fn canonicalize_image(encoded: &[u8], mime_type: &str) -> Result<Vec<u8>, Im
     let format = image_format_for_mime(mime_type)
         .ok_or_else(|| ImageCodecError::UnsupportedMimeType(mime_type.to_string()))?;
 
+    canonicalize_image_format(encoded, format)
+}
+
+///
+/// Check if an `image::ImageFormat` is among Pookie's supported formats.
+///
+pub(crate) fn is_supported_image_format(format: ImageFormat) -> bool {
+    matches!(
+        format,
+        ImageFormat::Png
+            | ImageFormat::Jpeg
+            | ImageFormat::WebP
+            | ImageFormat::Bmp
+            | ImageFormat::Gif
+    )
+}
+
+///
+/// Convert an encoded image of known format into Pookie's canonical representation.
+///
+/// Canonical representation:
+///
+/// ```text
+/// PNG-encoded RGBA8 bytes
+/// ```
+///
+pub(crate) fn canonicalize_image_format(
+    encoded: &[u8],
+    format: ImageFormat,
+) -> Result<Vec<u8>, ImageCodecError> {
+    if encoded.is_empty() {
+        return Err(ImageCodecError::EmptyInput);
+    }
+
+    if !is_supported_image_format(format) {
+        return Err(ImageCodecError::UnsupportedMimeType(format!("{format:?}")));
+    }
+
     let decoded = decode_encoded_image(encoded, format)?;
 
     encode_canonical_png(decoded.to_rgba8())
+}
+
+///
+/// Detect the image format from raw bytes and convert into Pookie's
+/// canonical representation.
+///
+pub(crate) fn canonicalize_detected_image(encoded: &[u8]) -> Result<Vec<u8>, ImageCodecError> {
+    if encoded.is_empty() {
+        return Err(ImageCodecError::EmptyInput);
+    }
+
+    let format = ImageReader::new(Cursor::new(encoded))
+        .with_guessed_format()
+        .map_err(|error| ImageCodecError::DecodeFailed(error.to_string()))?
+        .format()
+        .ok_or_else(|| ImageCodecError::UnsupportedMimeType("unknown/undetected".to_string()))?;
+
+    canonicalize_image_format(encoded, format)
 }
 
 ///
@@ -409,8 +465,9 @@ mod tests {
     use image::{DynamicImage, ImageFormat, ImageReader, Rgba, RgbaImage};
 
     use super::{
-        ImageCodecError, MAX_IMAGE_DIMENSION, MAX_IMAGE_PIXELS, canonicalize_image,
-        canonicalize_rgba, decode_canonical_png_to_rgba, is_supported_image_mime,
+        ImageCodecError, MAX_IMAGE_DIMENSION, MAX_IMAGE_PIXELS, canonicalize_detected_image,
+        canonicalize_image, canonicalize_image_format, canonicalize_rgba,
+        decode_canonical_png_to_rgba, is_supported_image_format, is_supported_image_mime,
         preferred_image_mime, validate_dimensions,
     };
 
@@ -648,5 +705,61 @@ mod tests {
             preferred_image_mime(&offered,),
             Some("IMAGE/PNG; charset=binary"),
         );
+    }
+
+    #[test]
+    fn identifies_supported_image_formats() {
+        assert!(is_supported_image_format(ImageFormat::Png));
+        assert!(is_supported_image_format(ImageFormat::Jpeg));
+        assert!(is_supported_image_format(ImageFormat::WebP));
+        assert!(is_supported_image_format(ImageFormat::Bmp));
+        assert!(is_supported_image_format(ImageFormat::Gif));
+        assert!(!is_supported_image_format(ImageFormat::Tiff));
+    }
+
+    #[test]
+    fn canonicalizes_all_supported_formats_by_format_type() {
+        for format in [
+            ImageFormat::Png,
+            ImageFormat::Jpeg,
+            ImageFormat::WebP,
+            ImageFormat::Bmp,
+            ImageFormat::Gif,
+        ] {
+            let bytes = encode_test_image(format);
+            let canonical = canonicalize_image_format(&bytes, format)
+                .unwrap_or_else(|err| panic!("failed for format {format:?}: {err}"));
+            let (width, height, _) = decode_canonical_png_to_rgba(&canonical).unwrap();
+            assert_eq!(width, 4);
+            assert_eq!(height, 3);
+        }
+    }
+
+    #[test]
+    fn canonicalizes_detected_image_bytes() {
+        for format in [
+            ImageFormat::Png,
+            ImageFormat::Jpeg,
+            ImageFormat::WebP,
+            ImageFormat::Bmp,
+            ImageFormat::Gif,
+        ] {
+            let bytes = encode_test_image(format);
+            let canonical = canonicalize_detected_image(&bytes)
+                .unwrap_or_else(|err| panic!("detection failed for format {format:?}: {err}"));
+            let (width, height, _) = decode_canonical_png_to_rgba(&canonical).unwrap();
+            assert_eq!(width, 4);
+            assert_eq!(height, 3);
+        }
+    }
+
+    #[test]
+    fn canonicalize_detected_image_rejects_empty_and_garbage() {
+        assert_eq!(
+            canonicalize_detected_image(&[]),
+            Err(ImageCodecError::EmptyInput)
+        );
+        let garbage = b"not an image at all";
+        assert!(canonicalize_detected_image(garbage).is_err());
     }
 }

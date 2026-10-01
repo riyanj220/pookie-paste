@@ -81,6 +81,15 @@ fn decode_clipboard_payload(
 
             Ok(ClipboardContent::Image(canonical))
         }
+
+        ClipboardMimeKind::FileList => {
+            let canonical =
+                crate::file_image::canonicalize_single_local_file_uri(&bytes).map_err(|error| {
+                    format!("failed resolving Wayland clipboard file-list image: {error}")
+                })?;
+
+            Ok(ClipboardContent::Image(canonical))
+        }
     }
 }
 
@@ -169,5 +178,80 @@ mod tests {
         assert!(content_is_empty(&ClipboardContent::Text(String::new(),),));
 
         assert!(content_is_empty(&ClipboardContent::Image(Vec::new(),),));
+    }
+
+    #[test]
+    fn decodes_and_canonicalizes_file_list_image_payload() {
+        use std::io::Write;
+
+        let unique = format!("pookie_reader_test_{}", std::process::id());
+        let temp_dir = std::env::temp_dir().join(unique);
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let image_path = temp_dir.join("test.png");
+        let rgba = vec![
+            255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255,
+        ];
+        let png = canonicalize_rgba(2, 2, &rgba).unwrap();
+        let mut f = std::fs::File::create(&image_path).unwrap();
+        f.write_all(&png).unwrap();
+        drop(f);
+
+        let uri_payload = format!("file://{}\r\n", image_path.to_str().unwrap()).into_bytes();
+        let content =
+            decode_clipboard_payload(uri_payload, "text/uri-list", ClipboardMimeKind::FileList)
+                .expect("file-list decode failed");
+
+        let ClipboardContent::Image(canonical) = content else {
+            panic!("expected image content");
+        };
+
+        let (width, height, _) = decode_canonical_png_to_rgba(&canonical).unwrap();
+        assert_eq!(width, 2);
+        assert_eq!(height, 2);
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn file_list_unsupported_non_image_fails_cleanly() {
+        use std::io::Write;
+
+        let unique = format!("pookie_reader_non_img_{}", std::process::id());
+        let temp_dir = std::env::temp_dir().join(unique);
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let doc_path = temp_dir.join("document.pdf");
+        let mut f = std::fs::File::create(&doc_path).unwrap();
+        f.write_all(b"%PDF-1.4 fake pdf data").unwrap();
+        drop(f);
+
+        let uri_payload = format!("file://{}\r\n", doc_path.to_str().unwrap()).into_bytes();
+        let result =
+            decode_clipboard_payload(uri_payload, "text/uri-list", ClipboardMimeKind::FileList);
+        assert!(result.is_err(), "non-image file must fail decoding");
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn file_list_multiple_uris_fails_cleanly() {
+        let uri_payload = b"file:///tmp/1.png\r\nfile:///tmp/2.png\r\n".to_vec();
+        let result =
+            decode_clipboard_payload(uri_payload, "text/uri-list", ClipboardMimeKind::FileList);
+        assert!(result.is_err(), "multiple URIs must fail decoding");
+    }
+
+    #[test]
+    fn literal_path_under_text_plain_yields_text_content() {
+        let payload = b"/home/user/photo.png".to_vec();
+        let content = decode_clipboard_payload(payload, "text/plain", ClipboardMimeKind::Text)
+            .expect("literal path text decode failed");
+        assert_eq!(
+            content,
+            ClipboardContent::Text("/home/user/photo.png".to_string())
+        );
     }
 }

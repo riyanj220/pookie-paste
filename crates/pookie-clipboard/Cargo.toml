@@ -50,6 +50,8 @@ nix = {
     ]
 }
 
+libc = "0.2"
+
 wayland-scanner = "0.31"
 
 wl-clipboard-rs = "0.9.3"

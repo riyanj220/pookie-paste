@@ -160,13 +160,25 @@ impl ExtDataControlState {
                                 );
                             }
                         } else {
-                            tracing::error!(
-                                error = %error,
-                                mime = %requested_mime,
-                                "failed reading EXT clipboard payload"
-                            );
                             if !is_last {
+                                tracing::debug!(
+                                    error = %error,
+                                    mime = %requested_mime,
+                                    "candidate EXT clipboard representation failed; trying fallback representation"
+                                );
                                 continue;
+                            } else if *kind == mime::ClipboardMimeKind::FileList {
+                                tracing::debug!(
+                                    error = %error,
+                                    mime = %requested_mime,
+                                    "EXT clipboard file-list evaluation yielded no supported image and no fallback was offered"
+                                );
+                            } else {
+                                tracing::error!(
+                                    error = %error,
+                                    mime = %requested_mime,
+                                    "failed reading EXT clipboard payload"
+                                );
                             }
                         }
                     }

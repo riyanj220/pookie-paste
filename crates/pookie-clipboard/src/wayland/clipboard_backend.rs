@@ -105,12 +105,56 @@ impl ClipboardBackend for WaylandClipboard {
 
             tracing::debug!(
                 mime_type = %actual_mime,
-                encoded_bytes =
-                canonical.len(),
-                            "Wayland clipboard image read"
+                encoded_bytes = canonical.len(),
+                "Wayland clipboard image read"
             );
 
             return Ok(ClipboardContent::Image(canonical));
+        }
+
+        if offered
+            .iter()
+            .any(|mime| mime == super::mime::URI_LIST_MIME_TYPE)
+        {
+            let uri_result = get_contents(
+                ClipboardType::Regular,
+                Seat::Unspecified,
+                PasteMimeType::Specific(super::mime::URI_LIST_MIME_TYPE),
+            )
+            .map_err(|error| ClipboardError::ReadFailed(error.to_string()))
+            .and_then(|(pipe, _)| self.read_pipe_bytes(pipe))
+            .and_then(|bytes| {
+                crate::file_image::canonicalize_single_local_file_uri(&bytes).map_err(|error| {
+                    ClipboardError::ReadFailed(format!(
+                        "failed resolving Wayland clipboard file-list image: {error}"
+                    ))
+                })
+            });
+
+            match uri_result {
+                Ok(canonical) => {
+                    tracing::debug!(
+                        encoded_bytes = canonical.len(),
+                        "Wayland clipboard file-list image read"
+                    );
+
+                    return Ok(ClipboardContent::Image(canonical));
+                }
+
+                Err(error) => {
+                    tracing::debug!(
+                        error = %error,
+                        "Wayland clipboard URI-list resolution failed; evaluating text fallback"
+                    );
+
+                    if !offered
+                        .iter()
+                        .any(|mime| super::mime::is_supported_text_mime(mime))
+                    {
+                        return Err(error);
+                    }
+                }
+            }
         }
 
         self.read().map(ClipboardContent::Text)

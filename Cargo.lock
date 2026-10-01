@@ -2683,6 +2683,7 @@ dependencies = [
  "chrono",
  "futures-util",
  "image",
+ "libc",
  "nix",
  "tokio",
  "tracing",

@@ -17,7 +17,9 @@ mod backend;
 mod content;
 mod error;
 mod event;
+pub(crate) mod file_image;
 pub mod image_codec;
+pub(crate) mod uri_list;
 mod watcher;
 
 pub mod wayland;
