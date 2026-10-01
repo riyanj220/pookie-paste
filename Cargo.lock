@@ -2694,6 +2694,7 @@ dependencies = [
  "wayland-protocols-wlr",
  "wayland-scanner",
  "wl-clipboard-rs",
+ "x11rb 0.13.2",
 ]
 
 [[package]]

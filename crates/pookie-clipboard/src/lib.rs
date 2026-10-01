@@ -25,6 +25,7 @@ mod watcher;
 pub mod wayland;
 
 pub mod x11;
+pub(crate) mod x11_targets;
 pub mod x11_watcher;
 
 pub use backend::ClipboardBackend;

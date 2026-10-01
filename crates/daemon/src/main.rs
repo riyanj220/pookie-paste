@@ -9,9 +9,10 @@ use std::sync::Arc;
 
 use tokio::sync::Mutex;
 
-use tracing::{info, warn};
+use tracing::{debug, error, info, warn};
 
-use pookie_core::{ClipboardEvent, ClipboardProcessor};
+use pookie_clipboard::ClipboardContent;
+use pookie_core::{ClipboardEvent, ClipboardPolicy, ClipboardProcessor};
 
 use history::{ClipboardHistoryService, HistoryConfig};
 
@@ -185,6 +186,17 @@ async fn main() -> anyhow::Result<()> {
                             event.id
                         );
 
+                        let (kind, byte_len) = match &event.content {
+                            ClipboardContent::Text(text) => ("Text", text.len()),
+                            ClipboardContent::Image(image) => ("Image", image.len()),
+                        };
+
+                        debug!(
+                            kind,
+                            bytes = byte_len,
+                            "clipboard event details"
+                        );
+
                         /*
                          * Both text and image clipboard
                          * writes performed by Pookie produce
@@ -194,45 +206,82 @@ async fn main() -> anyhow::Result<()> {
                          * content fingerprint before sending
                          * the event through processing/history.
                          */
-                        if clipboard_state
-                            .is_self_write(
-                                &event.content,
-                            )
-                            {
-                                info!(
-                                    "ignoring self-generated clipboard event"
+                        let is_self = clipboard_state.is_self_write(&event.content);
+                        debug!(
+                            matched = is_self,
+                            "clipboard event self-write check"
+                        );
+
+                        if is_self {
+                            info!(
+                                "ignoring self-generated clipboard event"
+                            );
+
+                            continue;
+                        }
+
+                        let core_event = ClipboardEvent {
+                            content: event.content,
+                            created_at: event.created_at,
+                        };
+
+                        match processor.process(core_event) {
+                            Some(item) => {
+                                debug!(
+                                    kind,
+                                    bytes = byte_len,
+                                    "clipboard processor accepted"
                                 );
 
-                                continue;
+                                info!(
+                                    "Clipboard item created: {:?}",
+                                    item.id
+                                );
+
+                                if let Err(error) = history_service.save(item).await {
+                                    error!(
+                                        error = %error,
+                                        "failed saving clipboard image"
+                                    );
+                                    return Err(error.into());
+                                }
+
+                                info!(
+                                    "Clipboard item saved"
+                                );
                             }
 
-                            let core_event =
-                            ClipboardEvent {
-                                content:
-                                event.content,
+                            None => {
+                                let reason = if byte_len == 0 {
+                                    "content is empty"
+                                } else {
+                                    match kind {
+                                        "Text" => {
+                                            if byte_len > ClipboardPolicy::MAX_TEXT_SIZE {
+                                                "text exceeds maximum size"
+                                            } else {
+                                                "policy rejected text"
+                                            }
+                                        }
+                                        "Image" => {
+                                            if byte_len > ClipboardPolicy::MAX_IMAGE_SIZE {
+                                                "image exceeds maximum size"
+                                            } else {
+                                                "policy rejected image"
+                                            }
+                                        }
+                                        _ => "policy rejected content",
+                                    }
+                                };
 
-                                created_at:
-                                event.created_at,
-                            };
-
-                            if let Some(item) =
-                                processor.process(
-                                    core_event,
-                                )
-                                {
-                                    info!(
-                                        "Clipboard item created: {:?}",
-                                        item.id
-                                    );
-
-                                    history_service
-                                    .save(item)
-                                    .await?;
-
-                                    info!(
-                                        "Clipboard item saved"
-                                    );
-                                }
+                                debug!(
+                                    kind,
+                                    bytes = byte_len,
+                                    reason,
+                                    "clipboard processor rejected"
+                                );
+                            }
+                        }
                     }
 
                     None => {

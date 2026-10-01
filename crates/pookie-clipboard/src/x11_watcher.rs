@@ -34,13 +34,26 @@ impl ClipboardWatcher for X11ClipboardWatcher {
             loop {
                 interval.tick().await;
 
-                let current = match clipboard.read_content() {
-                    Ok(value) => value,
+                let clipboard_clone = Arc::clone(&clipboard);
+                let current_result =
+                    tokio::task::spawn_blocking(move || clipboard_clone.read_content()).await;
 
-                    Err(error) => {
+                let current = match current_result {
+                    Ok(Ok(value)) => value,
+
+                    Ok(Err(error)) => {
                         tracing::debug!(
                             error = ?error,
                             "failed reading X11 clipboard"
+                        );
+
+                        continue;
+                    }
+
+                    Err(join_error) => {
+                        tracing::error!(
+                            error = %join_error,
+                            "X11 clipboard read task panicked or cancelled"
                         );
 
                         continue;
