@@ -11,7 +11,7 @@ use super::mime::ClipboardMimeKind;
  * policy.
  *
  * The canonical ClipboardPolicy remains responsible for the
- * normal 1 MiB text / 10 MiB image limits after processing.
+ * normal 1 MiB text / 32 MiB image limits after processing.
  *
  * This higher ceiling merely prevents an untrusted clipboard
  * owner from making Pookie allocate an unbounded buffer while

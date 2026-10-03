@@ -20,7 +20,7 @@ fn has_text_size_limit() {
 
 #[test]
 fn has_image_size_limit() {
-    assert_eq!(ClipboardPolicy::MAX_IMAGE_SIZE, 10 * 1024 * 1024);
+    assert_eq!(ClipboardPolicy::MAX_IMAGE_SIZE, 32 * 1024 * 1024);
 }
 
 #[test]
@@ -125,4 +125,19 @@ fn rejects_empty_image() {
     };
 
     assert!(!ClipboardPolicy::accept(&metadata));
+}
+
+#[test]
+fn accepts_known_high_resolution_photo_canonical_png_size() {
+    // 12.2 MP photo (e.g. 3024x4032 JPEG) whose Fast canonical PNG is ~11.05 MiB (11,587,151 bytes),
+    // which previously exceeded the 10 MiB limit but is safely within the 32 MiB ceiling.
+    let metadata = ContentMetadata {
+        content_type: ContentType::Image,
+
+        size: 11_587_151,
+
+        is_empty: false,
+    };
+
+    assert!(ClipboardPolicy::accept(&metadata));
 }

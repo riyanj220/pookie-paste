@@ -21,7 +21,7 @@ use x11rb::rust_connection::RustConnection;
 /// - 64 KiB allows exceptionally long paths while strictly bounding memory consumption
 ///   and instantly rejecting malformed or hostile X11 property payloads.
 /// - Completely distinct from the 32 MiB local image source-file read ceiling and
-///   the 10 MiB canonical PNG history ceiling.
+///   the 32 MiB canonical PNG history ceiling.
 ///
 pub const MAX_X11_URI_LIST_BYTES: u32 = 64 * 1024;
 

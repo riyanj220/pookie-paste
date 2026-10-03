@@ -143,7 +143,7 @@ Every accepted clipboard image is decoded and converted to a single canonical fo
   * Maximum image dimensions: **16,384 × 16,384 px** (`MAX_IMAGE_DIMENSION`).
   * Maximum decoded pixel count: **40,000,000 pixels** (`MAX_IMAGE_PIXELS`, ~8K resolution ceiling).
   * Decoder memory allocation limit: **256 MiB** (`MAX_DECODE_ALLOCATION`).
-* **Policy Limit**: Maximum compressed payload size of **10 MiB** (`MAX_IMAGE_SIZE = 10 * 1024 * 1024` bytes).
+* **Policy Limit**: Maximum compressed payload size of **32 MiB** (`MAX_IMAGE_SIZE = 32 * 1024 * 1024` bytes).
 * **Architectural Rationale for Canonicalization**:
   1. **Consistent Internal Representation**: Canonicalization provides Pookie with one consistent internal format (PNG-encoded RGBA8 bytes) for the decoded pixel content it received. This simplifies content hashing, deduplication comparisons, disk persistence, and UI preview rendering. (Note: Because lossy encodings such as JPEG or lossy WebP decode to slightly different pixel values, visually equivalent images copied from different lossy sources are not guaranteed to yield identical hashes).
   2. **Predictable Persistence**: The filesystem store only manages a single format (`.png`).

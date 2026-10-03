@@ -18,8 +18,8 @@ use crate::uri_list::{self, UriListError};
 ///   decoder allocation ceiling (`MAX_DECODE_ALLOCATION`).
 /// - Comfortably bounds I/O and memory consumption, instantly rejecting large
 ///   media files (videos, disk images, archives, database files).
-/// - Deliberately distinct from `ClipboardPolicy::MAX_IMAGE_SIZE` (10 MiB),
-///   which governs the final compressed canonical PNG stored in SQLite / history.
+/// - Harmonized with `ClipboardPolicy::MAX_IMAGE_SIZE` (32 MiB),
+///   which governs the final compressed canonical PNG stored in history.
 ///
 pub const MAX_LOCAL_IMAGE_FILE_BYTES: u64 = 32 * 1024 * 1024;
 
