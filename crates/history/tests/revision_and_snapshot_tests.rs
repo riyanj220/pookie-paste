@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use chrono::Utc;
-use history::{ClipboardHistoryService, HistoryConfig};
+use history::{ClipboardHistoryService, HistoryConfig, HistorySaveOutcome};
 use pookie_clipboard::{ClipboardContent, canonicalize_rgba};
 use pookie_core::ClipboardItem;
 use storage::{Database, ImageStore, StorageRepository};
@@ -90,7 +90,9 @@ async fn text_mutations_advance_revision() {
 
     // 1. Insert new text
     let item1 = create_text_item("first copy");
-    service.save(item1).await.expect("save text failed");
+    let id1 = item1.id.to_string();
+    let outcome1 = service.save(item1).await.expect("save text failed");
+    assert_eq!(outcome1, HistorySaveOutcome::Inserted { id: id1.clone() });
     let rev_after_save = service.current_revision();
     assert!(
         rev_after_save > initial_rev,
@@ -99,11 +101,13 @@ async fn text_mutations_advance_revision() {
 
     // 2. Duplicate text recopy (promotion)
     let item1_recopy = create_text_item("first copy");
-    let active_id = item1_recopy.id.to_string();
-    service
+    let recopy_id = item1_recopy.id.to_string();
+    let outcome2 = service
         .save(item1_recopy)
         .await
         .expect("recopy save failed");
+    assert_eq!(outcome2, HistorySaveOutcome::Promoted { id: id1.clone() });
+    assert_ne!(recopy_id, id1, "candidate UUID is distinct and discarded");
     let rev_after_recopy = service.current_revision();
     assert!(
         rev_after_recopy > rev_after_save,
@@ -111,7 +115,7 @@ async fn text_mutations_advance_revision() {
     );
 
     // 3. Pin item
-    let pin_result = service.pin(&active_id).await.expect("pin failed");
+    let pin_result = service.pin(&id1).await.expect("pin failed");
     assert!(pin_result);
     let rev_after_pin = service.current_revision();
     assert!(
@@ -120,7 +124,7 @@ async fn text_mutations_advance_revision() {
     );
 
     // Pinning again (no-op) must not advance revision
-    let pin_again = service.pin(&active_id).await.expect("second pin failed");
+    let pin_again = service.pin(&id1).await.expect("second pin failed");
     assert!(!pin_again);
     assert_eq!(
         service.current_revision(),
@@ -130,7 +134,7 @@ async fn text_mutations_advance_revision() {
 
     // 4. Toggle pin
     let toggled = service
-        .toggle_pin(&active_id)
+        .toggle_pin(&id1)
         .await
         .expect("toggle pin failed")
         .expect("item not found");
@@ -142,7 +146,7 @@ async fn text_mutations_advance_revision() {
     );
 
     // 5. Delete item
-    let deleted = service.delete(&active_id).await.expect("delete failed");
+    let deleted = service.delete(&id1).await.expect("delete failed");
     assert!(deleted);
     let rev_after_delete = service.current_revision();
     assert!(
@@ -151,10 +155,7 @@ async fn text_mutations_advance_revision() {
     );
 
     // Deleting non-existent ID must not advance revision
-    let delete_again = service
-        .delete(&active_id)
-        .await
-        .expect("delete again failed");
+    let delete_again = service.delete(&id1).await.expect("delete again failed");
     assert!(!delete_again);
     assert_eq!(
         service.current_revision(),
@@ -171,18 +172,67 @@ async fn image_mutations_advance_revision() {
     // 1. Save canonical image
     let img_id = Uuid::new_v4();
     let item = create_image_item(img_id, 255, 0, 0);
-    service.save(item).await.expect("save image failed");
+    let outcome1 = service.save(item).await.expect("save image failed");
+    assert_eq!(
+        outcome1,
+        HistorySaveOutcome::Inserted {
+            id: img_id.to_string(),
+        }
+    );
     let rev1 = service.current_revision();
     assert!(rev1 > initial_rev, "image save must advance revision");
 
     // 2. Duplicate image recopy (promotion)
-    let duplicate = create_image_item(Uuid::new_v4(), 255, 0, 0);
-    service
+    let candidate_img_id = Uuid::new_v4();
+    let duplicate = create_image_item(candidate_img_id, 255, 0, 0);
+    let outcome2 = service
         .save(duplicate)
         .await
         .expect("save duplicate failed");
+    assert_eq!(
+        outcome2,
+        HistorySaveOutcome::Promoted {
+            id: img_id.to_string(),
+        }
+    );
     let rev2 = service.current_revision();
     assert!(rev2 > rev1, "duplicate image recopy must advance revision");
+}
+
+#[tokio::test]
+async fn missing_file_image_repair_returns_inserted() {
+    let (service, temp) = create_test_service().await;
+    let img_id1 = Uuid::new_v4();
+    let item1 = create_image_item(img_id1, 12, 34, 56);
+    let outcome1 = service.save(item1).await.expect("save image 1 failed");
+    assert_eq!(
+        outcome1,
+        HistorySaveOutcome::Inserted {
+            id: img_id1.to_string()
+        }
+    );
+
+    // Delete backing file from disk to simulate missing/orphaned image file
+    let file_path = temp.path.join("images").join(format!("{img_id1}.png"));
+    assert!(file_path.exists());
+    std::fs::remove_file(&file_path).expect("failed deleting image file");
+
+    // Recopy same image content with candidate ID 2
+    let img_id2 = Uuid::new_v4();
+    let item2 = create_image_item(img_id2, 12, 34, 56);
+    let outcome2 = service.save(item2).await.expect("save image 2 failed");
+
+    // Old entity was replaced/repaired, so outcome MUST be Inserted with img_id2, NOT Promoted
+    assert_eq!(
+        outcome2,
+        HistorySaveOutcome::Inserted {
+            id: img_id2.to_string()
+        }
+    );
+
+    let items = service.get_all().await.expect("get_all failed");
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].id, img_id2.to_string());
 }
 
 #[tokio::test]

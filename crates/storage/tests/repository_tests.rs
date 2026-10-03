@@ -440,3 +440,15 @@ async fn get_oldest_excludes_pinned_items_for_eviction_safety() {
         vec!["item-2-mid-unpinned", "item-3-new-unpinned"]
     );
 }
+
+#[tokio::test]
+async fn update_created_at_returns_false_for_nonexistent_item() {
+    let repository = create_repository().await;
+
+    let updated = repository
+        .update_created_at("nonexistent-item-id", "2026-08-31T10:00:00Z")
+        .await
+        .expect("update_created_at failed");
+
+    assert!(!updated);
+}

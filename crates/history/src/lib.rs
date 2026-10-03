@@ -8,4 +8,4 @@ pub mod service;
 pub use config::HistoryConfig;
 pub use error::HistoryError;
 pub use notifier::HistoryRevisionNotifier;
-pub use service::ClipboardHistoryService;
+pub use service::{ClipboardHistoryService, HistorySaveOutcome};

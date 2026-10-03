@@ -9,6 +9,12 @@ use crate::error::HistoryError;
 use crate::mapper::{to_stored_image_item, to_stored_text_item};
 use crate::notifier::HistoryRevisionNotifier;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HistorySaveOutcome {
+    Inserted { id: String },
+    Promoted { id: String },
+}
+
 pub struct ClipboardHistoryService {
     repository: StorageRepository,
 
@@ -46,7 +52,7 @@ impl ClipboardHistoryService {
         self
     }
 
-    pub async fn save(&self, item: ClipboardItem) -> Result<(), HistoryError> {
+    pub async fn save(&self, item: ClipboardItem) -> Result<HistorySaveOutcome, HistoryError> {
         let ClipboardItem {
             id,
             content,
@@ -67,16 +73,20 @@ impl ClipboardHistoryService {
         text: String,
         hash: String,
         created_at: chrono::DateTime<chrono::Utc>,
-    ) -> Result<(), HistoryError> {
-        let mut pinned_at = None;
-
+    ) -> Result<HistorySaveOutcome, HistoryError> {
         if let Some(existing) = self.repository.find_by_hash_and_type(&hash, "text").await? {
-            pinned_at = existing.pinned_at;
-            self.repository.delete_by_id(&existing.id).await?;
+            let updated = self
+                .repository
+                .update_created_at(&existing.id, &created_at.to_rfc3339())
+                .await?;
+
+            if updated {
+                self.notifier.advance();
+                return Ok(HistorySaveOutcome::Promoted { id: existing.id });
+            }
         }
 
-        let mut stored_item = to_stored_text_item(id, text, hash, created_at);
-        stored_item.pinned_at = pinned_at;
+        let stored_item = to_stored_text_item(id, text, hash, created_at);
 
         self.repository.insert(&stored_item).await?;
 
@@ -86,7 +96,7 @@ impl ClipboardHistoryService {
 
         enforce_result?;
 
-        Ok(())
+        Ok(HistorySaveOutcome::Inserted { id: id.to_string() })
     }
 
     async fn save_image(
@@ -95,7 +105,7 @@ impl ClipboardHistoryService {
         image: CanonicalImage,
         hash: String,
         created_at: chrono::DateTime<chrono::Utc>,
-    ) -> Result<(), HistoryError> {
+    ) -> Result<HistorySaveOutcome, HistoryError> {
         let mut pinned_at = None;
 
         /*
@@ -121,30 +131,29 @@ impl ClipboardHistoryService {
 
                     if updated {
                         self.notifier.advance();
+                        return Ok(HistorySaveOutcome::Promoted { id: existing.id });
                     }
+                } else {
+                    pinned_at = existing.pinned_at;
 
-                    return Ok(());
-                }
+                    /*
+                     * The database row is malformed or its image
+                     * file disappeared.
+                     *
+                     * Remove the stale row and allow this fresh
+                     * clipboard event to repair it.
+                     */
+                    self.repository.delete_by_id(&existing.id).await?;
 
-                pinned_at = existing.pinned_at;
-
-                /*
-                 * The database row is malformed or its image
-                 * file disappeared.
-                 *
-                 * Remove the stale row and allow this fresh
-                 * clipboard event to repair it.
-                 */
-                self.repository.delete_by_id(&existing.id).await?;
-
-                if let Some(file_path) = existing.file_path.as_deref()
-                    && let Err(cleanup_err) = image_store.delete_image(file_path).await
-                {
-                    tracing::warn!(
-                        %cleanup_err,
-                        stale_file = file_path,
-                        "failed removing stale image file during repair; startup reconciliation will reclaim it"
-                    );
+                    if let Some(file_path) = existing.file_path.as_deref()
+                        && let Err(cleanup_err) = image_store.delete_image(file_path).await
+                    {
+                        tracing::warn!(
+                            %cleanup_err,
+                            stale_file = file_path,
+                            "failed removing stale image file during repair; startup reconciliation will reclaim it"
+                        );
+                    }
                 }
             } else {
                 pinned_at = existing.pinned_at;
@@ -178,7 +187,7 @@ impl ClipboardHistoryService {
 
             enforce_result?;
 
-            return Ok(());
+            return Ok(HistorySaveOutcome::Inserted { id: id.to_string() });
         };
 
         let item_id = id.to_string();
@@ -209,7 +218,7 @@ impl ClipboardHistoryService {
 
         enforce_result?;
 
-        Ok(())
+        Ok(HistorySaveOutcome::Inserted { id: item_id })
     }
 
     async fn enforce_limit(&self) -> Result<(), HistoryError> {

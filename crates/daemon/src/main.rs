@@ -14,7 +14,7 @@ use tracing::{debug, error, info, warn};
 use pookie_clipboard::ClipboardContent;
 use pookie_core::{ClipboardEvent, ClipboardPolicy, ClipboardProcessor};
 
-use history::{ClipboardHistoryService, HistoryConfig};
+use history::{ClipboardHistoryService, HistoryConfig, HistorySaveOutcome};
 
 use storage::{Database, ImageStore};
 
@@ -233,22 +233,32 @@ async fn main() -> anyhow::Result<()> {
                                     "clipboard processor accepted"
                                 );
 
-                                info!(
-                                    "Clipboard item created: {:?}",
-                                    item.id
-                                );
+                                match history_service.save(item).await {
+                                    Ok(HistorySaveOutcome::Inserted { id }) => {
+                                        info!(
+                                            id = %id,
+                                            kind,
+                                            "history item inserted"
+                                        );
+                                    }
 
-                                if let Err(error) = history_service.save(item).await {
-                                    error!(
-                                        error = %error,
-                                        "failed saving clipboard image"
-                                    );
-                                    return Err(error.into());
+                                    Ok(HistorySaveOutcome::Promoted { id }) => {
+                                        info!(
+                                            id = %id,
+                                            kind,
+                                            "existing history item promoted"
+                                        );
+                                    }
+
+                                    Err(error) => {
+                                        error!(
+                                            error = %error,
+                                            kind,
+                                            "failed saving clipboard item to history"
+                                        );
+                                        return Err(error.into());
+                                    }
                                 }
-
-                                info!(
-                                    "Clipboard item saved"
-                                );
                             }
 
                             None => {
