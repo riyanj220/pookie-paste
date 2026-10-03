@@ -120,8 +120,8 @@ fn test_x11_image_round_trip() {
         panic!("expected image clipboard content");
     };
 
-    let (width, height, actual_rgba) =
-        decode_canonical_png_to_rgba(&actual_png).expect("failed decoding X11 round-trip image");
+    let (width, height, actual_rgba) = decode_canonical_png_to_rgba(actual_png.png_bytes())
+        .expect("failed decoding X11 round-trip image");
 
     assert_eq!(width, 2);
     assert_eq!(height, 2);

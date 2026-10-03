@@ -3,7 +3,7 @@ use std::fs::{File, OpenOptions};
 use std::io::Read;
 use std::path::Path;
 
-use crate::image_codec::{self, ImageCodecError};
+use crate::image_codec::{self, CanonicalImage, ImageCodecError};
 use crate::uri_list::{self, UriListError};
 
 ///
@@ -117,7 +117,7 @@ impl From<ImageCodecError> for FileImageError {
 ///
 pub(crate) fn canonicalize_single_local_file_uri(
     payload: &[u8],
-) -> Result<Vec<u8>, FileImageError> {
+) -> Result<CanonicalImage, FileImageError> {
     let path = uri_list::parse_single_local_file_uri(payload)?;
     read_and_canonicalize_file(&path)
 }
@@ -125,7 +125,7 @@ pub(crate) fn canonicalize_single_local_file_uri(
 ///
 /// Safely read a local file from disk and convert it into Pookie's canonical PNG.
 ///
-pub(crate) fn read_and_canonicalize_file(path: &Path) -> Result<Vec<u8>, FileImageError> {
+pub(crate) fn read_and_canonicalize_file(path: &Path) -> Result<CanonicalImage, FileImageError> {
     read_and_canonicalize_file_with_ceiling(path, MAX_LOCAL_IMAGE_FILE_BYTES)
 }
 
@@ -135,7 +135,7 @@ pub(crate) fn read_and_canonicalize_file(path: &Path) -> Result<Vec<u8>, FileIma
 pub(crate) fn read_and_canonicalize_file_with_ceiling(
     path: &Path,
     max_bytes: u64,
-) -> Result<Vec<u8>, FileImageError> {
+) -> Result<CanonicalImage, FileImageError> {
     let bytes = read_local_file_safely(path, max_bytes)?;
 
     image_codec::canonicalize_detected_image(&bytes).map_err(|error| match error {
@@ -280,7 +280,7 @@ mod tests {
         let path = create_test_image_file(&dir, "sample.png", ImageFormat::Png);
 
         let canonical = read_and_canonicalize_file(&path).expect("canonicalization failed");
-        let (width, height, _) = decode_canonical_png_to_rgba(&canonical).unwrap();
+        let (width, height, _) = decode_canonical_png_to_rgba(canonical.png_bytes()).unwrap();
         assert_eq!(width, 8);
         assert_eq!(height, 6);
     }
@@ -291,7 +291,7 @@ mod tests {
         let path = create_test_image_file(&dir, "sample.jpg", ImageFormat::Jpeg);
 
         let canonical = read_and_canonicalize_file(&path).expect("canonicalization failed");
-        let (width, height, _) = decode_canonical_png_to_rgba(&canonical).unwrap();
+        let (width, height, _) = decode_canonical_png_to_rgba(canonical.png_bytes()).unwrap();
         assert_eq!(width, 8);
         assert_eq!(height, 6);
     }
@@ -302,7 +302,7 @@ mod tests {
         let path = create_test_image_file(&dir, "sample.webp", ImageFormat::WebP);
 
         let canonical = read_and_canonicalize_file(&path).expect("canonicalization failed");
-        let (width, height, _) = decode_canonical_png_to_rgba(&canonical).unwrap();
+        let (width, height, _) = decode_canonical_png_to_rgba(canonical.png_bytes()).unwrap();
         assert_eq!(width, 8);
         assert_eq!(height, 6);
     }
@@ -313,7 +313,7 @@ mod tests {
         let path = create_test_image_file(&dir, "sample.bmp", ImageFormat::Bmp);
 
         let canonical = read_and_canonicalize_file(&path).expect("canonicalization failed");
-        let (width, height, _) = decode_canonical_png_to_rgba(&canonical).unwrap();
+        let (width, height, _) = decode_canonical_png_to_rgba(canonical.png_bytes()).unwrap();
         assert_eq!(width, 8);
         assert_eq!(height, 6);
     }
@@ -324,7 +324,7 @@ mod tests {
         let path = create_test_image_file(&dir, "sample.gif", ImageFormat::Gif);
 
         let canonical = read_and_canonicalize_file(&path).expect("canonicalization failed");
-        let (width, height, _) = decode_canonical_png_to_rgba(&canonical).unwrap();
+        let (width, height, _) = decode_canonical_png_to_rgba(canonical.png_bytes()).unwrap();
         assert_eq!(width, 8);
         assert_eq!(height, 6);
     }
@@ -335,7 +335,7 @@ mod tests {
         let path = create_test_image_file(&dir, "image_without_extension", ImageFormat::Png);
 
         let canonical = read_and_canonicalize_file(&path).expect("canonicalization failed");
-        let (width, height, _) = decode_canonical_png_to_rgba(&canonical).unwrap();
+        let (width, height, _) = decode_canonical_png_to_rgba(canonical.png_bytes()).unwrap();
         assert_eq!(width, 8);
         assert_eq!(height, 6);
     }
@@ -431,7 +431,7 @@ mod tests {
 
         let canonical = canonicalize_single_local_file_uri(uri_payload.as_bytes())
             .expect("pipeline failed from URI");
-        let (width, height, _) = decode_canonical_png_to_rgba(&canonical).unwrap();
+        let (width, height, _) = decode_canonical_png_to_rgba(canonical.png_bytes()).unwrap();
         assert_eq!(width, 8);
         assert_eq!(height, 6);
     }

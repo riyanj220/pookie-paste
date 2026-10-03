@@ -172,7 +172,7 @@ impl ClipboardBackend for WaylandClipboard {
                  * Wayland therefore only needs to expose
                  * image/png on writeback.
                  */
-                let source = Source::Bytes(canonical_png.clone().into());
+                let source = Source::Bytes(Box::from(canonical_png.png_bytes()));
 
                 Options::new()
                     .copy(source, CopyMimeType::Specific("image/png".to_string()))

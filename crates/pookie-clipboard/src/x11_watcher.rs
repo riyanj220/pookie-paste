@@ -104,7 +104,7 @@ fn content_is_empty(content: &ClipboardContent) -> bool {
 mod tests {
     use super::content_is_empty;
 
-    use crate::ClipboardContent;
+    use crate::{CanonicalImage, ClipboardContent, ImageIdentity};
 
     #[test]
     fn empty_text_is_empty_content() {
@@ -120,11 +120,14 @@ mod tests {
 
     #[test]
     fn empty_image_is_empty_content() {
-        assert!(content_is_empty(&ClipboardContent::Image(Vec::new(),),));
+        assert!(content_is_empty(&ClipboardContent::Image(
+            CanonicalImage::new(Vec::new(), ImageIdentity::from_bytes([0; 32]))
+        ),));
     }
 
     #[test]
     fn non_empty_image_is_not_empty_content() {
-        assert!(!content_is_empty(&ClipboardContent::Image(vec![1, 2, 3],),));
+        let canonical = crate::canonicalize_rgba(1, 1, &[255, 0, 0, 255]).expect("canonical image");
+        assert!(!content_is_empty(&ClipboardContent::Image(canonical)));
     }
 }

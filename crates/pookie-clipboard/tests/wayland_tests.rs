@@ -112,7 +112,7 @@ fn test_wayland_image_round_trip() {
         panic!("expected Wayland image clipboard content");
     };
 
-    let (width, height, actual_rgba) = decode_canonical_png_to_rgba(&actual_png)
+    let (width, height, actual_rgba) = decode_canonical_png_to_rgba(actual_png.png_bytes())
         .expect("failed decoding Wayland round-trip image");
 
     assert_eq!(width, 2);

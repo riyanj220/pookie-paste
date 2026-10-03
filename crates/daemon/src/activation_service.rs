@@ -1048,7 +1048,10 @@ mod tests {
         let item = ClipboardItem {
             id: uuid::Uuid::new_v4(),
 
-            content: ClipboardContent::Image(vec![1, 2, 3, 4]),
+            content: ClipboardContent::Image(
+                pookie_clipboard::canonicalize_rgba(1, 1, &[255, 0, 0, 255])
+                    .expect("canonical image failed"),
+            ),
 
             hash: "unsupported-image".to_string(),
 

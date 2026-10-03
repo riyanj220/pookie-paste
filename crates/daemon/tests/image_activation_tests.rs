@@ -13,7 +13,9 @@ use daemon::paste_backend::{PasteBackend, PasteCapability, PasteError};
 
 use history::{ClipboardHistoryService, HistoryConfig};
 
-use pookie_clipboard::{ClipboardBackend, ClipboardContent, ClipboardError, canonicalize_rgba};
+use pookie_clipboard::{
+    CanonicalImage, ClipboardBackend, ClipboardContent, ClipboardError, canonicalize_rgba,
+};
 
 use pookie_core::ClipboardItem;
 
@@ -158,7 +160,7 @@ async fn create_history_service() -> (Arc<ClipboardHistoryService>, ImageStore, 
     (Arc::new(service), image_store, directory)
 }
 
-fn canonical_test_image() -> Vec<u8> {
+fn canonical_test_image() -> CanonicalImage {
     /*
      * 2×2:
      *
@@ -177,7 +179,7 @@ fn canonical_test_image() -> Vec<u8> {
 
 fn image_item(
     id: uuid::Uuid,
-    image: Vec<u8>,
+    image: CanonicalImage,
     created_at: chrono::DateTime<chrono::Utc>,
 ) -> ClipboardItem {
     ClipboardItem {

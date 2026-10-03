@@ -217,8 +217,8 @@ impl ClipboardBackend for X11Clipboard {
             ClipboardContent::Text(text) => self.write(text),
 
             ClipboardContent::Image(canonical_png) => {
-                let (width, height, rgba) =
-                    decode_canonical_png_to_rgba(canonical_png).map_err(|error| {
+                let (width, height, rgba) = decode_canonical_png_to_rgba(canonical_png.png_bytes())
+                    .map_err(|error| {
                         ClipboardError::WriteFailed(format!(
                             "failed decoding canonical image for X11 clipboard: {error}"
                         ))

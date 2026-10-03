@@ -34,9 +34,10 @@ pub use error::ClipboardError;
 pub use event::ClipboardEvent;
 
 pub use image_codec::{
-    ImageCodecError, MAX_DECODE_ALLOCATION, MAX_IMAGE_DIMENSION, MAX_IMAGE_PIXELS,
-    SUPPORTED_IMAGE_MIME_TYPES, canonicalize_image, canonicalize_rgba,
-    decode_canonical_png_to_rgba, is_supported_image_mime, preferred_image_mime,
+    CanonicalImage, ImageCodecError, ImageIdentity, MAX_DECODE_ALLOCATION, MAX_IMAGE_DIMENSION,
+    MAX_IMAGE_PIXELS, RGBA_V1_DOMAIN_SEPARATOR, SUPPORTED_IMAGE_MIME_TYPES, canonicalize_image,
+    canonicalize_rgba, compute_image_identity, decode_canonical_png_to_rgba,
+    is_supported_image_mime, preferred_image_mime,
 };
 
 pub use watcher::ClipboardWatcher;

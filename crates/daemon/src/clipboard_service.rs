@@ -139,6 +139,12 @@ mod tests {
         ClipboardService::new(backend, Arc::new(ClipboardState::default()))
     }
 
+    use pookie_clipboard::{CanonicalImage, canonicalize_rgba};
+
+    fn test_image(seed: u8) -> CanonicalImage {
+        canonicalize_rgba(1, 1, &[seed, seed, seed, 255]).expect("canonical image")
+    }
+
     #[test]
     fn read_returns_current_text_clipboard_content() {
         let backend = FakeClipboardBackend::text("hello");
@@ -152,7 +158,7 @@ mod tests {
 
     #[test]
     fn read_returns_current_image_clipboard_content() {
-        let image = vec![1, 2, 3, 4];
+        let image = test_image(1);
 
         let backend = FakeClipboardBackend::new(ClipboardContent::Image(image.clone()));
 
@@ -205,7 +211,7 @@ mod tests {
 
         let mut service = create_service(backend);
 
-        let image = vec![1, 2, 3, 4];
+        let image = test_image(1);
 
         service
             .write(ClipboardContent::Image(image.clone()))
@@ -239,7 +245,7 @@ mod tests {
 
         let mut service = ClipboardService::new(backend, Arc::clone(&state));
 
-        let content = ClipboardContent::Image(vec![1, 2, 3, 4]);
+        let content = ClipboardContent::Image(test_image(1));
 
         service
             .write(content.clone())
@@ -258,7 +264,7 @@ mod tests {
 
         let mut service = ClipboardService::new(backend, Arc::clone(&state));
 
-        let content = ClipboardContent::Image(vec![9, 8, 7]);
+        let content = ClipboardContent::Image(test_image(2));
 
         assert!(service.write(content.clone(),).is_err());
 

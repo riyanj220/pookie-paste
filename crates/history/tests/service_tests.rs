@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use history::{ClipboardHistoryService, HistoryConfig};
-use pookie_clipboard::ClipboardContent;
+use pookie_clipboard::{ClipboardContent, canonicalize_rgba};
 use pookie_core::ClipboardItem;
 use storage::{Database, StorageRepository, StoredClipboardItem};
 
@@ -873,11 +873,11 @@ async fn preserves_pinned_state_on_duplicate_image_save() {
     let service = ClipboardHistoryService::new(repository, HistoryConfig { max_items: 30 })
         .with_image_store(image_store);
 
-    let png_bytes = vec![137, 80, 78, 71, 13, 10, 26, 10]; // PNG header bytes
+    let canonical = canonicalize_rgba(1, 1, &[255, 0, 0, 255]).expect("canonical image failed");
     let id_a = uuid::Uuid::new_v4();
     let item_a = ClipboardItem {
         id: id_a,
-        content: ClipboardContent::Image(png_bytes.clone()),
+        content: ClipboardContent::Image(canonical.clone()),
         hash: "same-image-hash".to_string(),
         created_at: Utc::now(),
     };
@@ -893,7 +893,7 @@ async fn preserves_pinned_state_on_duplicate_image_save() {
     let id_b = uuid::Uuid::new_v4();
     let item_b = ClipboardItem {
         id: id_b,
-        content: ClipboardContent::Image(png_bytes),
+        content: ClipboardContent::Image(canonical),
         hash: "same-image-hash".to_string(),
         created_at: Utc::now() + chrono::Duration::seconds(5),
     };

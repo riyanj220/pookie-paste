@@ -120,7 +120,10 @@ fn content_is_empty(content: &ClipboardContent) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use crate::{ClipboardContent, canonicalize_rgba, decode_canonical_png_to_rgba};
+    use crate::{
+        CanonicalImage, ClipboardContent, ImageIdentity, canonicalize_rgba,
+        decode_canonical_png_to_rgba,
+    };
 
     use super::{ClipboardMimeKind, content_is_empty, decode_clipboard_payload};
 
@@ -149,15 +152,16 @@ mod tests {
 
         let png = canonicalize_rgba(2, 2, &rgba).expect("failed creating test PNG");
 
-        let content = decode_clipboard_payload(png, "image/png", ClipboardMimeKind::Image)
-            .expect("image decode failed");
+        let content =
+            decode_clipboard_payload(png.into_png_bytes(), "image/png", ClipboardMimeKind::Image)
+                .expect("image decode failed");
 
         let ClipboardContent::Image(canonical) = content else {
             panic!("expected image content");
         };
 
-        let (width, height, decoded) =
-            decode_canonical_png_to_rgba(&canonical).expect("canonical PNG decode failed");
+        let (width, height, decoded) = decode_canonical_png_to_rgba(canonical.png_bytes())
+            .expect("canonical PNG decode failed");
 
         assert_eq!(width, 2);
 
@@ -177,7 +181,9 @@ mod tests {
     fn detects_empty_content() {
         assert!(content_is_empty(&ClipboardContent::Text(String::new(),),));
 
-        assert!(content_is_empty(&ClipboardContent::Image(Vec::new(),),));
+        assert!(content_is_empty(&ClipboardContent::Image(
+            CanonicalImage::new(Vec::new(), ImageIdentity::from_bytes([0; 32]))
+        ),));
     }
 
     #[test]
@@ -195,7 +201,7 @@ mod tests {
         ];
         let png = canonicalize_rgba(2, 2, &rgba).unwrap();
         let mut f = std::fs::File::create(&image_path).unwrap();
-        f.write_all(&png).unwrap();
+        f.write_all(png.png_bytes()).unwrap();
         drop(f);
 
         let uri_payload = format!("file://{}\r\n", image_path.to_str().unwrap()).into_bytes();
@@ -207,7 +213,7 @@ mod tests {
             panic!("expected image content");
         };
 
-        let (width, height, _) = decode_canonical_png_to_rgba(&canonical).unwrap();
+        let (width, height, _) = decode_canonical_png_to_rgba(canonical.png_bytes()).unwrap();
         assert_eq!(width, 2);
         assert_eq!(height, 2);
 

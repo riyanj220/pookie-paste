@@ -14,6 +14,9 @@ uuid = {
 
 arboard = "3"
 
+sha2 = "0.10"
+hex = "0.4"
+
 x11rb = {
     version = "0.13",
     features = ["xfixes"],

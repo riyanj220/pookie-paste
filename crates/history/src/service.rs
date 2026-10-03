@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use pookie_clipboard::ClipboardContent;
+use pookie_clipboard::{CanonicalImage, ClipboardContent};
 use pookie_core::ClipboardItem;
 use storage::{ImageStore, StorageRepository, StoredClipboardItem};
 
@@ -76,17 +76,17 @@ impl ClipboardHistoryService {
     async fn save_image(
         &self,
         id: uuid::Uuid,
-        image: Vec<u8>,
+        image: CanonicalImage,
         hash: String,
         created_at: chrono::DateTime<chrono::Utc>,
     ) -> Result<(), HistoryError> {
         let mut pinned_at = None;
 
         /*
-         * A duplicate image already has exactly the same
-         * canonical PNG bytes.
+         * Matching rgba-v1 identity means identical dimensions and
+         * RGBA pixels.
          *
-         * Reuse its owned file and simply move the existing
+         * Reuse the existing owned file and simply move the existing
          * history row to the most-recent position.
          */
         if let Some(existing) = self
@@ -152,7 +152,7 @@ impl ClipboardHistoryService {
 
         let item_id = id.to_string();
 
-        let file_path = image_store.write_image(&item_id, &image).await?;
+        let file_path = image_store.write_image(&item_id, image.png_bytes()).await?;
 
         let mut stored_item = to_stored_image_item(id, Some(file_path.clone()), hash, created_at);
         stored_item.pinned_at = pinned_at;
