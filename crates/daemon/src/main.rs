@@ -108,7 +108,7 @@ async fn main() -> anyhow::Result<()> {
 
     info!("clipboard backend: {}", backend.name());
 
-    let mut clipboard_events = clipboard_watcher::start(&backend)?;
+    let (_clipboard_watcher_session, mut clipboard_events) = clipboard_watcher::start(&backend)?;
 
     let clipboard_service = Arc::new(Mutex::new(ClipboardService::new(
         backend,
@@ -398,6 +398,7 @@ async fn main() -> anyhow::Result<()> {
     info!("shutting down Pookie services");
 
     activation_service.shutdown();
+    drop(_clipboard_watcher_session);
 
     info!("Pookie daemon stopped");
 

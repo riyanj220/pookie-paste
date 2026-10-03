@@ -1,10 +1,11 @@
+use std::collections::VecDeque;
 use std::fmt;
 use std::time::Duration;
 
 use x11rb::connection::Connection;
 use x11rb::errors::{ConnectError, ConnectionError, ReplyError, ReplyOrIdError};
 use x11rb::protocol::Event;
-use x11rb::protocol::xfixes::{ConnectionExt as _, SelectionEventMask};
+use x11rb::protocol::xfixes::{ConnectionExt as _, SelectionEvent, SelectionEventMask};
 use x11rb::protocol::xproto::{
     Atom, AtomEnum, ConnectionExt as _, CreateWindowAux, Window, WindowClass,
 };
@@ -183,6 +184,8 @@ impl GenerationTracker {
 
     pub fn notify_clipboard_change(&mut self) {
         self.generation = self.generation.wrapping_add(1);
+        self.cached_generation = 0;
+        self.cached_capabilities = None;
     }
 
     pub fn get_cached(&self) -> Option<TargetCapabilities> {
@@ -291,6 +294,7 @@ pub struct KnownAtoms {
     pub image_gif: Atom,
     pub incr: Atom,
     pub pookie_selection: Atom,
+    pub timestamp: Atom,
 }
 
 impl KnownAtoms {
@@ -308,6 +312,7 @@ impl KnownAtoms {
         let image_gif = conn.intern_atom(false, b"image/gif")?.reply()?.atom;
         let incr = conn.intern_atom(false, b"INCR")?.reply()?.atom;
         let pookie_selection = conn.intern_atom(false, b"_POOKIE_SELECTION")?.reply()?.atom;
+        let timestamp = conn.intern_atom(false, b"TIMESTAMP")?.reply()?.atom;
 
         Ok(Self {
             clipboard,
@@ -323,6 +328,7 @@ impl KnownAtoms {
             image_gif,
             incr,
             pookie_selection,
+            timestamp,
         })
     }
 
@@ -437,6 +443,41 @@ impl X11TargetReader {
 
     ///
     /// Query target capabilities for the current CLIPBOARD owner.
+    pub fn xfixes_active(&self) -> bool {
+        self.xfixes_active
+    }
+
+    pub fn connection_fd(&self) -> std::os::fd::RawFd {
+        use std::os::unix::io::AsRawFd;
+        self.conn.stream().as_raw_fd()
+    }
+
+    pub fn poll_for_event(&self) -> Result<Option<Event>, X11SelectionError> {
+        Ok(self.conn.poll_for_event()?)
+    }
+
+    pub fn get_selection_owner(&self) -> Result<Window, X11SelectionError> {
+        let reply = self
+            .conn
+            .get_selection_owner(self.atoms.clipboard)?
+            .reply()?;
+        Ok(reply.owner)
+    }
+
+    pub fn atoms(&self) -> &KnownAtoms {
+        &self.atoms
+    }
+
+    pub fn invalidate(&mut self) {
+        self.tracker.invalidate();
+    }
+
+    pub fn notify_clipboard_change(&mut self) {
+        self.tracker.notify_clipboard_change();
+    }
+
+    ///
+    /// Query target capabilities for the current CLIPBOARD owner.
     ///
     /// Returns:
     /// - `Ok(Some(capabilities))` if an owner is present.
@@ -445,6 +486,7 @@ impl X11TargetReader {
     ///
     pub fn get_target_capabilities(
         &mut self,
+        pending_events: &mut VecDeque<Event>,
     ) -> Result<Option<TargetCapabilities>, X11SelectionError> {
         let owner = self
             .conn
@@ -458,14 +500,32 @@ impl X11TargetReader {
         }
 
         if self.xfixes_active {
-            self.drain_xfixes_events()?;
+            self.drain_xfixes_events_into(pending_events)?;
 
             if let Some(cached) = self.tracker.get_cached() {
+                tracing::debug!(
+                    generation = self.tracker.generation(),
+                    has_direct_image = cached.has_direct_image,
+                    has_uri_list = cached.has_uri_list,
+                    has_text = cached.has_text,
+                    "target capabilities cache hit"
+                );
                 return Ok(Some(cached));
             }
         }
 
-        let capabilities = self.query_targets_from_owner()?;
+        tracing::debug!(
+            generation = self.tracker.generation(),
+            "target capabilities cache miss; querying targets from owner"
+        );
+        let capabilities = self.query_targets_from_owner(pending_events)?;
+        tracing::debug!(
+            generation = self.tracker.generation(),
+            has_direct_image = capabilities.has_direct_image,
+            has_uri_list = capabilities.has_uri_list,
+            has_text = capabilities.has_text,
+            "target capabilities queried from owner"
+        );
 
         if self.xfixes_active {
             self.tracker.update_cache(capabilities);
@@ -477,7 +537,10 @@ impl X11TargetReader {
     ///
     /// Read the `text/uri-list` payload from the current CLIPBOARD owner.
     ///
-    pub fn read_uri_list_payload(&mut self) -> Result<Vec<u8>, X11SelectionError> {
+    pub fn read_uri_list_payload(
+        &mut self,
+        pending_events: &mut VecDeque<Event>,
+    ) -> Result<Vec<u8>, X11SelectionError> {
         let _ = self
             .conn
             .delete_property(self.requestor, self.atoms.pookie_selection);
@@ -493,7 +556,11 @@ impl X11TargetReader {
         self.conn.flush()?;
 
         let prop = self
-            .wait_for_selection_notify(self.atoms.text_uri_list, Duration::from_millis(100))?
+            .wait_for_selection_notify(
+                self.atoms.text_uri_list,
+                Duration::from_millis(100),
+                pending_events,
+            )?
             .ok_or(X11SelectionError::ConversionRefused)?;
 
         let reply = self
@@ -520,7 +587,58 @@ impl X11TargetReader {
         Ok(reply.value)
     }
 
-    fn query_targets_from_owner(&mut self) -> Result<TargetCapabilities, X11SelectionError> {
+    ///
+    /// Read the ICCCM `TIMESTAMP` target from the current CLIPBOARD owner.
+    ///
+    /// Returns:
+    /// - `Ok(Some(timestamp))` if the owner successfully converts TIMESTAMP.
+    /// - `Ok(None)` if the owner refuses conversion or payload is invalid.
+    /// - `Err(error)` on X11 protocol communication failure.
+    ///
+    pub fn read_selection_timestamp(
+        &mut self,
+        pending_events: &mut VecDeque<Event>,
+    ) -> Result<Option<u32>, X11SelectionError> {
+        let _ = self
+            .conn
+            .delete_property(self.requestor, self.atoms.pookie_selection);
+        let _ = self.conn.flush();
+
+        self.conn.convert_selection(
+            self.requestor,
+            self.atoms.clipboard,
+            self.atoms.timestamp,
+            self.atoms.pookie_selection,
+            x11rb::CURRENT_TIME,
+        )?;
+        self.conn.flush()?;
+
+        let prop = match self.wait_for_selection_notify(
+            self.atoms.timestamp,
+            Duration::from_millis(100),
+            pending_events,
+        )? {
+            Some(prop) => prop,
+            None => return Ok(None),
+        };
+
+        let reply = self
+            .conn
+            .get_property(true, self.requestor, prop, AtomEnum::ANY, 0, 1)?
+            .reply()?;
+
+        if reply.format != 32 || reply.value_len < 1 {
+            return Ok(None);
+        }
+
+        let timestamp = reply.value32().and_then(|mut iter| iter.next());
+        Ok(timestamp)
+    }
+
+    fn query_targets_from_owner(
+        &mut self,
+        pending_events: &mut VecDeque<Event>,
+    ) -> Result<TargetCapabilities, X11SelectionError> {
         let _ = self
             .conn
             .delete_property(self.requestor, self.atoms.pookie_selection);
@@ -536,7 +654,11 @@ impl X11TargetReader {
         self.conn.flush()?;
 
         let prop = self
-            .wait_for_selection_notify(self.atoms.targets, Duration::from_millis(100))?
+            .wait_for_selection_notify(
+                self.atoms.targets,
+                Duration::from_millis(100),
+                pending_events,
+            )?
             .ok_or(X11SelectionError::ConversionRefused)?;
 
         let reply = self
@@ -560,17 +682,23 @@ impl X11TargetReader {
         Ok(TargetCapabilities::from_atoms(&atoms, &self.atoms))
     }
 
-    fn drain_xfixes_events(&mut self) -> Result<(), X11SelectionError> {
+    fn drain_xfixes_events_into(
+        &mut self,
+        pending_events: &mut VecDeque<Event>,
+    ) -> Result<(), X11SelectionError> {
         while let Some(event) = self.conn.poll_for_event()? {
             if let Event::XfixesSelectionNotify(notify) = event
                 && notify.selection == self.atoms.clipboard
             {
-                self.tracker.notify_clipboard_change();
                 tracing::debug!(
-                    generation = self.tracker.generation(),
                     owner = notify.owner,
-                    "XFixesSelectionNotify received; generation updated"
+                    subtype = ?notify.subtype,
+                    "XFixesSelectionNotify received during drain; invalidating cache and queuing"
                 );
+                self.tracker.invalidate();
+                if notify.subtype == SelectionEvent::SET_SELECTION_OWNER {
+                    pending_events.push_back(Event::XfixesSelectionNotify(notify));
+                }
             }
         }
 
@@ -581,6 +709,7 @@ impl X11TargetReader {
         &mut self,
         expected_target: Atom,
         timeout: Duration,
+        pending_events: &mut VecDeque<Event>,
     ) -> Result<Option<Atom>, X11SelectionError> {
         let start = std::time::Instant::now();
         let poll_interval = Duration::from_millis(5);
@@ -617,12 +746,15 @@ impl X11TargetReader {
                     Event::XfixesSelectionNotify(notify)
                         if notify.selection == self.atoms.clipboard =>
                     {
-                        self.tracker.notify_clipboard_change();
                         tracing::debug!(
-                            generation = self.tracker.generation(),
                             owner = notify.owner,
-                            "XFixesSelectionNotify received during conversion wait; generation updated"
+                            subtype = ?notify.subtype,
+                            "XFixesSelectionNotify received during conversion wait; invalidating cache and queuing"
                         );
+                        self.tracker.invalidate();
+                        if notify.subtype == SelectionEvent::SET_SELECTION_OWNER {
+                            pending_events.push_back(Event::XfixesSelectionNotify(notify));
+                        }
                     }
 
                     _ => {}
@@ -666,6 +798,7 @@ mod tests {
             image_gif: 11,
             incr: 12,
             pookie_selection: 13,
+            timestamp: 14,
         }
     }
 
@@ -878,5 +1011,68 @@ mod tests {
             result,
             Err(X11SelectionError::OversizedPayload { .. })
         ));
+    }
+
+    #[test]
+    fn known_atoms_interns_timestamp_target() {
+        let known = mock_atoms();
+        assert_eq!(known.timestamp, 14);
+    }
+
+    #[test]
+    fn generation_tracker_differentiates_set_owner_and_invalidation() {
+        let mut tracker = GenerationTracker::new();
+        assert_eq!(tracker.generation(), 1);
+
+        // SetSelectionOwner equivalent: notify change bumps generation
+        tracker.notify_clipboard_change();
+        assert_eq!(tracker.generation(), 2);
+
+        // SelectionWindowDestroy / SelectionClientClose equivalent: invalidate clears cache without bumping generation
+        let caps = TargetCapabilities {
+            has_direct_image: false,
+            has_uri_list: true,
+            has_text: true,
+        };
+        tracker.update_cache(caps);
+        assert_eq!(tracker.get_cached(), Some(caps));
+
+        tracker.invalidate();
+        assert_eq!(tracker.get_cached(), None);
+        assert_eq!(tracker.generation(), 2);
+    }
+
+    #[test]
+    fn capability_cache_invalidates_on_notify_clipboard_change() {
+        let mut tracker = GenerationTracker::new();
+
+        // 1. First selection: text-only capabilities cached
+        let text_only = TargetCapabilities {
+            has_direct_image: false,
+            has_uri_list: false,
+            has_text: true,
+        };
+        tracker.update_cache(text_only);
+        assert_eq!(tracker.get_cached(), Some(text_only));
+
+        // 2. Next SetSelectionOwner event arrives: tracker notified
+        tracker.notify_clipboard_change();
+
+        // 3. Capability cache must NOT return stale text-only result
+        assert_eq!(
+            tracker.get_cached(),
+            None,
+            "capability cache must miss after SetSelectionOwner"
+        );
+
+        // 4. Fresh URI-list capabilities cached for new selection
+        let uri_list_and_text = TargetCapabilities {
+            has_direct_image: false,
+            has_uri_list: true,
+            has_text: true,
+        };
+        tracker.update_cache(uri_list_and_text);
+        assert_eq!(tracker.get_cached(), Some(uri_list_and_text));
+        assert!(tracker.get_cached().unwrap().has_uri_list);
     }
 }

@@ -35,63 +35,149 @@ impl X11Clipboard {
         })
     }
 
+    pub fn take_target_reader(&self) -> Option<crate::x11_targets::X11TargetReader> {
+        self.target_reader
+            .lock()
+            .ok()
+            .and_then(|mut guard| guard.take())
+    }
+
     pub fn name(&self) -> &'static str {
         "X11"
     }
+}
 
-    fn read_image_via_arboard(&self) -> Result<ClipboardContent, ClipboardError> {
-        let mut clipboard = self
-            .clipboard
-            .lock()
-            .map_err(|_| ClipboardError::ReadFailed("clipboard lock poisoned".to_string()))?;
+pub(crate) fn read_image_from_arboard(
+    clipboard: &mut arboard::Clipboard,
+) -> Result<ClipboardContent, ClipboardError> {
+    let image = clipboard
+        .get_image()
+        .map_err(|error| ClipboardError::ReadFailed(error.to_string()))?;
 
-        let image = clipboard
-            .get_image()
-            .map_err(|error| ClipboardError::ReadFailed(error.to_string()))?;
+    let width = u32::try_from(image.width).map_err(|_| {
+        ClipboardError::ReadFailed("X11 clipboard image width exceeds supported range".to_string())
+    })?;
 
-        let width = u32::try_from(image.width).map_err(|_| {
-            ClipboardError::ReadFailed(
-                "X11 clipboard image width exceeds supported range".to_string(),
-            )
+    let height = u32::try_from(image.height).map_err(|_| {
+        ClipboardError::ReadFailed("X11 clipboard image height exceeds supported range".to_string())
+    })?;
+
+    let canonical_png =
+        canonicalize_rgba(width, height, image.bytes.as_ref()).map_err(|error| {
+            ClipboardError::ReadFailed(format!(
+                "failed canonicalizing X11 clipboard image: {error}"
+            ))
         })?;
 
-        let height = u32::try_from(image.height).map_err(|_| {
-            ClipboardError::ReadFailed(
-                "X11 clipboard image height exceeds supported range".to_string(),
-            )
-        })?;
+    tracing::debug!(
+        width,
+        height,
+        encoded_bytes = canonical_png.len(),
+        "X11 clipboard image read"
+    );
 
-        let canonical_png =
-            canonicalize_rgba(width, height, image.bytes.as_ref()).map_err(|error| {
-                ClipboardError::ReadFailed(format!(
-                    "failed canonicalizing X11 clipboard image: {error}"
-                ))
-            })?;
+    Ok(ClipboardContent::Image(canonical_png))
+}
 
-        tracing::debug!(
-            width,
-            height,
-            encoded_bytes = canonical_png.len(),
-            "X11 clipboard image read"
-        );
+pub(crate) fn read_text_from_arboard(
+    clipboard: &mut arboard::Clipboard,
+) -> Result<ClipboardContent, ClipboardError> {
+    let text = clipboard
+        .get_text()
+        .map_err(|error| ClipboardError::ReadFailed(error.to_string()))?;
 
-        Ok(ClipboardContent::Image(canonical_png))
+    tracing::debug!(length = text.len(), "X11 clipboard text read");
+
+    Ok(ClipboardContent::Text(text))
+}
+
+///
+/// Shared authoritative X11 clipboard reading strategy.
+///
+/// Invariant: Preserves exact precedence across all callers:
+/// 1. DirectImage (arboard image)
+/// 2. UriList (single local image file via X11TargetReader)
+/// 3. Text (arboard text)
+///
+pub(crate) fn read_x11_content(
+    clipboard: &mut arboard::Clipboard,
+    target_reader: Option<&mut crate::x11_targets::X11TargetReader>,
+    pending_events: &mut std::collections::VecDeque<x11rb::protocol::Event>,
+) -> Result<ClipboardContent, ClipboardError> {
+    // 1. Existing arboard image attempt is always first and authoritative.
+    // This guarantees zero regression for any image format or alias arboard supports.
+    if let Ok(image_content) = read_image_from_arboard(clipboard) {
+        return Ok(image_content);
     }
 
-    fn read_text_via_arboard(&self) -> Result<ClipboardContent, ClipboardError> {
-        let mut clipboard = self
-            .clipboard
-            .lock()
-            .map_err(|_| ClipboardError::ReadFailed("clipboard lock poisoned".to_string()))?;
+    // 2. Direct image was unavailable. Inspect for text/uri-list via X11TargetReader.
+    if let Some(reader) = target_reader {
+        match reader.get_target_capabilities(pending_events) {
+            Ok(Some(caps)) => {
+                // Check text/uri-list when explicitly offered
+                if caps.has_uri_list {
+                    match reader.read_uri_list_payload(pending_events) {
+                        Ok(bytes) => {
+                            match crate::file_image::canonicalize_single_local_file_uri(&bytes) {
+                                Ok(canonical) => {
+                                    tracing::debug!(
+                                        encoded_bytes = canonical.len(),
+                                        "X11 clipboard file-list image read"
+                                    );
+                                    return Ok(ClipboardContent::Image(canonical));
+                                }
+                                Err(error) => {
+                                    tracing::debug!(
+                                        error = %error,
+                                        "X11 clipboard URI-list resolution failed; evaluating text fallback"
+                                    );
+                                }
+                            }
+                        }
+                        Err(error) => {
+                            tracing::debug!(
+                                error = %error,
+                                "X11 clipboard URI-list read failed; evaluating text fallback"
+                            );
+                        }
+                    }
 
-        let text = clipboard
-            .get_text()
-            .map_err(|error| ClipboardError::ReadFailed(error.to_string()))?;
+                    // If URI-list failed and no text target was offered, do NOT fabricate text
+                    if !caps.has_text {
+                        return Err(ClipboardError::ReadFailed(
+                            "X11 URI-list does not contain a supported image and no text fallback was offered"
+                                .to_string(),
+                        ));
+                    }
+                }
 
-        tracing::debug!(length = text.len(), "X11 clipboard text read");
+                // 3. Text fallback
+                if caps.has_text {
+                    return read_text_from_arboard(clipboard);
+                }
 
-        Ok(ClipboardContent::Text(text))
+                return Err(ClipboardError::ReadFailed(
+                    "no supported clipboard target offered".to_string(),
+                ));
+            }
+
+            Ok(None) => {
+                // CLIPBOARD owner is NONE (empty clipboard)
+                return Err(ClipboardError::ReadFailed(
+                    "X11 clipboard is empty".to_string(),
+                ));
+            }
+
+            Err(error) => {
+                tracing::debug!(
+                    error = %error,
+                    "X11 target reader query failed; falling back to arboard text"
+                );
+            }
+        }
     }
+
+    read_text_from_arboard(clipboard)
 }
 
 impl ClipboardBackend for X11Clipboard {
@@ -128,88 +214,22 @@ impl ClipboardBackend for X11Clipboard {
     }
 
     fn read_content(&self) -> Result<ClipboardContent, ClipboardError> {
-        // 1. Existing arboard image attempt is always first and authoritative.
-        // This guarantees zero regression for any image format or alias arboard supports.
-        if let Ok(image_content) = self.read_image_via_arboard() {
-            return Ok(image_content);
-        }
+        let mut clipboard = self
+            .clipboard
+            .lock()
+            .map_err(|_| ClipboardError::ReadFailed("clipboard lock poisoned".to_string()))?;
 
-        // 2. Direct image was unavailable. Inspect for text/uri-list via X11TargetReader.
         let mut target_reader_guard = self
             .target_reader
             .lock()
             .map_err(|_| ClipboardError::ReadFailed("target reader lock poisoned".to_string()))?;
 
-        if let Some(reader) = target_reader_guard.as_mut() {
-            match reader.get_target_capabilities() {
-                Ok(Some(caps)) => {
-                    // Check text/uri-list when explicitly offered
-                    if caps.has_uri_list {
-                        match reader.read_uri_list_payload() {
-                            Ok(bytes) => {
-                                match crate::file_image::canonicalize_single_local_file_uri(&bytes)
-                                {
-                                    Ok(canonical) => {
-                                        tracing::debug!(
-                                            encoded_bytes = canonical.len(),
-                                            "X11 clipboard file-list image read"
-                                        );
-                                        return Ok(ClipboardContent::Image(canonical));
-                                    }
-                                    Err(error) => {
-                                        tracing::debug!(
-                                            error = %error,
-                                            "X11 clipboard URI-list resolution failed; evaluating text fallback"
-                                        );
-                                    }
-                                }
-                            }
-                            Err(error) => {
-                                tracing::debug!(
-                                    error = %error,
-                                    "X11 clipboard URI-list read failed; evaluating text fallback"
-                                );
-                            }
-                        }
-
-                        // If URI-list failed and no text target was offered, do NOT fabricate text
-                        if !caps.has_text {
-                            return Err(ClipboardError::ReadFailed(
-                                "X11 URI-list does not contain a supported image and no text fallback was offered"
-                                    .to_string(),
-                            ));
-                        }
-                    }
-
-                    // 3. Text fallback
-                    if caps.has_text {
-                        drop(target_reader_guard);
-                        return self.read_text_via_arboard();
-                    }
-
-                    return Err(ClipboardError::ReadFailed(
-                        "no supported clipboard target offered".to_string(),
-                    ));
-                }
-
-                Ok(None) => {
-                    // CLIPBOARD owner is NONE (empty clipboard)
-                    return Err(ClipboardError::ReadFailed(
-                        "X11 clipboard is empty".to_string(),
-                    ));
-                }
-
-                Err(error) => {
-                    tracing::debug!(
-                        error = %error,
-                        "X11 target reader query failed; falling back to arboard text"
-                    );
-                }
-            }
-        }
-
-        drop(target_reader_guard);
-        self.read_text_via_arboard()
+        let mut pending_events = std::collections::VecDeque::new();
+        read_x11_content(
+            &mut clipboard,
+            target_reader_guard.as_mut(),
+            &mut pending_events,
+        )
     }
 
     fn write_content(&self, content: &ClipboardContent) -> Result<(), ClipboardError> {
