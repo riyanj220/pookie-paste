@@ -14,7 +14,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map_err(|error| format!("IPC request failed: {error:?}"))?;
 
     match response {
-        IpcResponse::History { items } => {
+        IpcResponse::History { items, .. } => {
             println!("History items: {}", items.len());
 
             for item in items {

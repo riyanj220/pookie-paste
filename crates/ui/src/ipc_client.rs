@@ -6,7 +6,7 @@ pub async fn connect() -> Result<IpcClient, std::io::Error> {
     IpcClient::connect(&path).await
 }
 
-pub async fn get_history() -> Result<Vec<HistoryItem>, String> {
+pub async fn get_history() -> Result<(Vec<HistoryItem>, u64), String> {
     let mut client = connect()
         .await
         .map_err(|error| format!("failed to connect to daemon: {error}"))?;
@@ -17,11 +17,30 @@ pub async fn get_history() -> Result<Vec<HistoryItem>, String> {
         .map_err(|error| format!("failed to request history: {error:?}"))?;
 
     match response {
-        IpcResponse::History { items } => Ok(items),
+        IpcResponse::History { items, revision } => Ok((items, revision)),
 
         IpcResponse::Error { message } => Err(message),
 
         other => Err(format!("unexpected IPC response: {other:?}")),
+    }
+}
+
+pub async fn wait_for_history_change(since_revision: u64) -> Result<IpcResponse, String> {
+    let mut client = connect()
+        .await
+        .map_err(|error| format!("failed to connect to daemon for watch: {error}"))?;
+
+    let response = client
+        .send(&IpcRequest::WaitForHistoryChange { since_revision })
+        .await
+        .map_err(|error| format!("failed to wait for history change: {error:?}"))?;
+
+    match response {
+        IpcResponse::HistoryChanged { .. }
+        | IpcResponse::HistoryUnchanged { .. }
+        | IpcResponse::Error { .. } => Ok(response),
+
+        other => Err(format!("unexpected IPC watch response: {other:?}")),
     }
 }
 

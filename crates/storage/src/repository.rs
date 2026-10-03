@@ -154,7 +154,7 @@ impl StorageRepository {
             "
             UPDATE clipboard_items
             SET pinned_at = ?
-            WHERE id = ?
+            WHERE id = ? AND pinned_at IS NULL
             ",
         )
         .bind(now)
@@ -170,7 +170,7 @@ impl StorageRepository {
             "
             UPDATE clipboard_items
             SET pinned_at = NULL
-            WHERE id = ?
+            WHERE id = ? AND pinned_at IS NOT NULL
             ",
         )
         .bind(id)
