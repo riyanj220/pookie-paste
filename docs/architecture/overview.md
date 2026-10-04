@@ -43,7 +43,7 @@ The codebase enforces strict boundaries so that platform-specific windowing and 
 * **Storage Separation**:
   Structured history metadata and text entries reside in a local SQLite database, whereas raw image bytes are stored as canonical PNG files on the filesystem. Database rows reference images via application-relative paths (`images/<uuid>.png`), keeping stored data independent of user home directories.
 * **IPC Decoupling**:
-  The UI does not access SQLite or clipboard APIs directly. History metadata comes through daemon IPC. Raw image payloads never traverse the socket wire; instead, the UI resolves and loads image preview files locally from the daemon-managed image store on the filesystem using the application-relative path supplied in history metadata (`images/<uuid>.png`), decoding and caching thumbnail textures in GPU memory on demand.
+  The UI does not access SQLite or clipboard APIs directly. History metadata comes through daemon IPC. Raw image payloads never traverse the socket wire; instead, the UI resolves and loads backing image files locally from the daemon-managed image store on the filesystem using the application-relative path supplied in history metadata (`images/<uuid>.png`), decoding and caching thumbnail textures in GPU memory on demand.
 * **Platform Abstraction**:
   Desktop-specific behavior is isolated behind unified Rust traits:
   * `ClipboardBackend` and `ClipboardWatcher` for clipboard I/O and change notifications.
@@ -58,11 +58,11 @@ The codebase enforces strict boundaries so that platform-specific windowing and 
 Pookie Paste is structured into five main functional subsystems, each documented in detail in its respective section:
 
 ### 1. Clipboard Management
-Monitors the system clipboard for new entries, applies content limits and normalization, and canonicalizes all incoming image formats (PNG, JPEG, WebP, BMP, GIF) into canonical PNG-encoded RGBA8 bytes. Includes self-write suppression so that Pookie-initiated clipboard writes do not generate duplicate history items.
+Monitors the system clipboard using event-driven platform watchers (XFixes with fallback polling on X11, data-control protocols on Wayland). Negotiates content formats via strict MIME precedence (direct image → `text/uri-list` → genuine text), canonicalizes accepted images into canonical PNG-encoded RGBA8 payloads, assigns stable typed content identities (`rgba-v1` for images, SHA-256 for text), and suppresses self-writes using typed content fingerprints.
 *Detailed guide: [Clipboard Overview](../clipboard/overview.md)*
 
 ### 2. History & Storage
-Coordinates dual-layer persistence: SQLite for index metadata and text content, and a filesystem store for canonical PNG images. Enforces history limits, deduplication, item pinning, and startup orphan image reconciliation.
+Coordinates dual-layer persistence: SQLite for authoritative metadata, text content, item pinning, and content identities; and an atomic filesystem `ImageStore` for canonical PNG images. Promotes intact duplicates in place (recovering missing backing files from fresh copies if needed), tracks monotonic revisions for live UI updates, reconciles unreferenced images on startup, and runs idempotent background migration of legacy image identities.
 *Detailed guide: [Clipboard Overview](../clipboard/overview.md)*
 
 ### 3. Activation & Direct Paste
@@ -74,7 +74,7 @@ Provides cross-desktop shortcut handling across three distinct paradigms: native
 *Detailed guide: [Shortcuts Overview](../shortcuts/overview.md)*
 
 ### 5. Inter-Process Communication (IPC)
-Provides typed, framed wire communication over local Unix domain stream sockets between the persistent daemon, ephemeral popup UI, and CLI commands. Enforces connection timeouts, frame size limits, and daemon single-instance enforcement through socket probing and binding.
+Provides typed, framed wire communication over local Unix domain stream sockets between the persistent daemon, ephemeral popup UI, and CLI commands. Powers live UI synchronization through initial snapshot loading and revision-driven change notifications (`WaitForHistoryChange`), enforces frame ceilings and read timeouts, and ensures daemon single-instance safety.
 *Detailed guide: [IPC Overview](../ipc/overview.md)*
 
 ---
@@ -85,11 +85,11 @@ The repository is organized as a Cargo workspace with distinct crate boundaries:
 
 | Crate | Responsibility |
 | --- | --- |
-| [`crates/pookie-core`](../../crates/pookie-core) | Core domain types, text normalizer, content hasher (SHA-256), and clipboard policy limits. |
-| [`crates/pookie-clipboard`](../../crates/pookie-clipboard) | Clipboard backend abstractions, X11/Wayland readers and watchers, and canonical image codec. |
+| [`crates/pookie-core`](../../crates/pookie-core) | Core domain types, text normalization, policy enforcement, and content identity routing. |
+| [`crates/pookie-clipboard`](../../crates/pookie-clipboard) | Clipboard backends, event-driven watchers, MIME negotiation, and canonical image codec (`CanonicalImage` / `ImageIdentity`). |
 | [`crates/storage`](../../crates/storage) | SQLite repository, schema migrations, and atomic filesystem `ImageStore`. |
-| [`crates/history`](../../crates/history) | High-level `ClipboardHistoryService`, eviction policy, deduplication, and item pinning. |
-| [`crates/ipc`](../../crates/ipc) | Unix domain socket transport, newline JSON framing codec, and typed protocol messages. |
+| [`crates/history`](../../crates/history) | High-level `ClipboardHistoryService`, eviction policy, in-place duplicate promotion, item pinning, and revision change notification. |
+| [`crates/ipc`](../../crates/ipc) | Unix domain socket transport, newline JSON framing codec, typed protocol messages, and revision watch queries. |
 | [`crates/daemon`](../../crates/daemon) | Main background process, platform resolvers, focus/paste/shortcut backends, and IPC request handler. |
 | [`crates/ui`](../../crates/ui) | Ephemeral popup GUI, egui rendering, input navigation, thumbnail cache, and shortcut view. |
 
