@@ -96,8 +96,8 @@ pub(crate) fn read_text_from_arboard(
 ///
 /// Invariant: Preserves exact precedence across all callers:
 /// 1. DirectImage (arboard image)
-/// 2. UriList (single local image file via X11TargetReader)
-/// 3. Text (arboard text)
+/// 2. UriList (single local image file via X11TargetReader; stops on failure without text fallback)
+/// 3. Text (arboard text; only when text/uri-list is not offered)
 ///
 pub(crate) fn read_x11_content(
     clipboard: &mut arboard::Clipboard,
@@ -114,44 +114,30 @@ pub(crate) fn read_x11_content(
     if let Some(reader) = target_reader {
         match reader.get_target_capabilities(pending_events) {
             Ok(Some(caps)) => {
-                // Check text/uri-list when explicitly offered
+                // If text/uri-list is offered, treat as file-copy operation:
+                // must resolve as image or stop (NO fallback to text).
                 if caps.has_uri_list {
-                    match reader.read_uri_list_payload(pending_events) {
-                        Ok(bytes) => {
-                            match crate::file_image::canonicalize_single_local_file_uri(&bytes) {
-                                Ok(canonical) => {
-                                    tracing::debug!(
-                                        encoded_bytes = canonical.len(),
-                                        "X11 clipboard file-list image read"
-                                    );
-                                    return Ok(ClipboardContent::Image(canonical));
-                                }
-                                Err(error) => {
-                                    tracing::debug!(
-                                        error = %error,
-                                        "X11 clipboard URI-list resolution failed; evaluating text fallback"
-                                    );
-                                }
-                            }
-                        }
-                        Err(error) => {
-                            tracing::debug!(
-                                error = %error,
-                                "X11 clipboard URI-list read failed; evaluating text fallback"
-                            );
-                        }
-                    }
-
-                    // If URI-list failed and no text target was offered, do NOT fabricate text
-                    if !caps.has_text {
-                        return Err(ClipboardError::ReadFailed(
-                            "X11 URI-list does not contain a supported image and no text fallback was offered"
-                                .to_string(),
-                        ));
-                    }
+                    let bytes = reader
+                        .read_uri_list_payload(pending_events)
+                        .map_err(|error| {
+                            ClipboardError::ReadFailed(format!(
+                                "failed reading X11 URI-list payload: {error}"
+                            ))
+                        })?;
+                    let canonical = crate::file_image::canonicalize_single_local_file_uri(&bytes)
+                        .map_err(|error| {
+                        ClipboardError::ReadFailed(format!(
+                            "X11 URI-list does not contain a supported image: {error}"
+                        ))
+                    })?;
+                    tracing::debug!(
+                        encoded_bytes = canonical.len(),
+                        "X11 clipboard file-list image read"
+                    );
+                    return Ok(ClipboardContent::Image(canonical));
                 }
 
-                // 3. Text fallback
+                // 3. Genuine text target (only when URI-list was NOT offered)
                 if caps.has_text {
                     return read_text_from_arboard(clipboard);
                 }
@@ -171,8 +157,11 @@ pub(crate) fn read_x11_content(
             Err(error) => {
                 tracing::debug!(
                     error = %error,
-                    "X11 target reader query failed; falling back to arboard text"
+                    "X11 target reader query failed; failing closed to prevent invalid text fallback"
                 );
+                return Err(ClipboardError::ReadFailed(format!(
+                    "failed querying X11 target capabilities: {error}"
+                )));
             }
         }
     }

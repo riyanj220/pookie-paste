@@ -28,6 +28,9 @@ pub mod x11;
 pub(crate) mod x11_targets;
 pub mod x11_watcher;
 
+#[cfg(test)]
+mod file_manager_semantics_tests;
+
 pub use backend::ClipboardBackend;
 pub use content::ClipboardContent;
 pub use error::ClipboardError;

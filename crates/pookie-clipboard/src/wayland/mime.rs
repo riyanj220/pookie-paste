@@ -44,8 +44,8 @@ pub fn is_supported_clipboard_mime(mime: &str) -> bool {
 ///
 /// Priority:
 /// 1. Direct image representation (image/png, etc.)
-/// 2. Copied local file list (text/uri-list)
-/// 3. Text fallbacks (text/plain, etc.)
+/// 2. Copied local file list (text/uri-list) -> stops on failure without text fallback
+/// 3. Genuine text (text/plain, etc.; only when text/uri-list is not offered)
 ///
 #[allow(dead_code)]
 pub fn preferred_content_mime(offered: &[String]) -> Option<PreferredMime<'_>> {
@@ -71,17 +71,17 @@ pub fn candidate_content_mimes(offered: &[String]) -> Vec<PreferredMime<'_>> {
         }];
     }
 
-    let mut candidates = Vec::new();
-
     if let Some(uri_list_mime) = offered
         .iter()
         .find(|mime| mime.as_str() == URI_LIST_MIME_TYPE)
     {
-        candidates.push(PreferredMime {
+        return vec![PreferredMime {
             mime_type: uri_list_mime.as_str(),
             kind: ClipboardMimeKind::FileList,
-        });
+        }];
     }
+
+    let mut candidates = Vec::new();
 
     for preferred in SUPPORTED_TEXT_MIME_TYPES {
         if let Some(offered_mime) = offered.iter().find(|mime| mime.as_str() == *preferred)
@@ -226,14 +226,25 @@ mod tests {
     }
 
     #[test]
-    fn uri_list_takes_priority_over_text_and_preserves_text_fallback() {
+    fn uri_list_with_text_plain_offered_yields_only_file_list_without_text_fallback() {
         let offered = vec!["text/plain".to_string(), "text/uri-list".to_string()];
 
         let candidates = candidate_content_mimes(&offered);
-        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].mime_type, "text/uri-list");
         assert_eq!(candidates[0].kind, ClipboardMimeKind::FileList);
-        assert_eq!(candidates[1].mime_type, "text/plain");
+    }
+
+    #[test]
+    fn literal_file_path_copied_as_text_only_yields_text_candidate() {
+        let offered = vec![
+            "text/plain;charset=utf-8".to_string(),
+            "text/plain".to_string(),
+        ];
+
+        let candidates = candidate_content_mimes(&offered);
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0].kind, ClipboardMimeKind::Text);
         assert_eq!(candidates[1].kind, ClipboardMimeKind::Text);
     }
 

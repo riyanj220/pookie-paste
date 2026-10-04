@@ -251,13 +251,57 @@ mod tests {
     }
 
     #[test]
+    fn file_list_directory_uri_fails_cleanly() {
+        let unique = format!("pookie_reader_dir_{}", std::process::id());
+        let temp_dir = std::env::temp_dir().join(unique);
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let uri_payload = format!("file://{}\r\n", temp_dir.to_str().unwrap()).into_bytes();
+        let result =
+            decode_clipboard_payload(uri_payload, "text/uri-list", ClipboardMimeKind::FileList);
+        assert!(result.is_err(), "directory URI must fail decoding");
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn file_list_remote_uri_fails_cleanly() {
+        let uri_payload = b"https://example.com/photo.png\r\n".to_vec();
+        let result =
+            decode_clipboard_payload(uri_payload, "text/uri-list", ClipboardMimeKind::FileList);
+        assert!(result.is_err(), "remote URI must fail decoding");
+    }
+
+    #[test]
+    fn file_list_malformed_uri_fails_cleanly() {
+        let uri_payload = b"file://%ZZ/invalid\r\n".to_vec();
+        let result =
+            decode_clipboard_payload(uri_payload, "text/uri-list", ClipboardMimeKind::FileList);
+        assert!(result.is_err(), "malformed URI must fail decoding");
+    }
+
+    #[test]
     fn literal_path_under_text_plain_yields_text_content() {
-        let payload = b"/home/user/photo.png".to_vec();
+        let payload = b"/home/user/file.pdf".to_vec();
         let content = decode_clipboard_payload(payload, "text/plain", ClipboardMimeKind::Text)
             .expect("literal path text decode failed");
         assert_eq!(
             content,
-            ClipboardContent::Text("/home/user/photo.png".to_string())
+            ClipboardContent::Text("/home/user/file.pdf".to_string())
+        );
+    }
+
+    #[test]
+    fn arbitrary_text_under_text_plain_yields_text_content() {
+        let payload = b"Hello, this is normal clipboard text!\nSecond line.".to_vec();
+        let content = decode_clipboard_payload(payload, "text/plain", ClipboardMimeKind::Text)
+            .expect("arbitrary text decode failed");
+        assert_eq!(
+            content,
+            ClipboardContent::Text(
+                "Hello, this is normal clipboard text!\nSecond line.".to_string()
+            )
         );
     }
 }

@@ -144,6 +144,15 @@ impl WaylandState {
                     }
 
                     Err(error) => {
+                        if *kind == mime::ClipboardMimeKind::FileList {
+                            tracing::debug!(
+                                error = %error,
+                                mime = %requested_mime,
+                                "WLR clipboard file-list evaluation yielded no supported image; ignoring event"
+                            );
+                            return;
+                        }
+
                         if error == "clipboard payload is empty" {
                             if !is_last {
                                 tracing::debug!(
@@ -157,27 +166,19 @@ impl WaylandState {
                                     "all compatible WLR clipboard MIME candidates yielded empty payload"
                                 );
                             }
+                        } else if !is_last {
+                            tracing::debug!(
+                                error = %error,
+                                mime = %requested_mime,
+                                "candidate WLR clipboard representation failed; trying fallback representation"
+                            );
+                            continue;
                         } else {
-                            if !is_last {
-                                tracing::debug!(
-                                    error = %error,
-                                    mime = %requested_mime,
-                                    "candidate WLR clipboard representation failed; trying fallback representation"
-                                );
-                                continue;
-                            } else if *kind == mime::ClipboardMimeKind::FileList {
-                                tracing::debug!(
-                                    error = %error,
-                                    mime = %requested_mime,
-                                    "WLR clipboard file-list evaluation yielded no supported image and no fallback was offered"
-                                );
-                            } else {
-                                tracing::error!(
-                                    error = %error,
-                                    mime = %requested_mime,
-                                    "failed reading WLR clipboard payload"
-                                );
-                            }
+                            tracing::error!(
+                                error = %error,
+                                mime = %requested_mime,
+                                "failed reading WLR clipboard payload"
+                            );
                         }
                     }
                 }
