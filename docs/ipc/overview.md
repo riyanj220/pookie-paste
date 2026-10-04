@@ -93,6 +93,7 @@ See [`crates/ipc/src/protocol.rs`](../../crates/ipc/src/protocol.rs) for complet
 pub enum IpcRequest {
     // Clipboard & History
     GetHistory,
+    WaitForHistoryChange { since_revision: u64 },
     ActivateItem { id: String, target_id: Option<IpcFocusTarget> },
     DeleteItem { id: String },
     TogglePinItem { id: String },
@@ -120,7 +121,9 @@ See [`crates/ipc/src/protocol.rs`](../../crates/ipc/src/protocol.rs) for complet
 ```rust
 pub enum IpcResponse {
     Pong,
-    History { items: Vec<HistoryItem> },
+    History { items: Vec<HistoryItem>, revision: u64 },
+    HistoryChanged { revision: u64 },
+    HistoryUnchanged { revision: u64 },
     FocusTarget { target_id: Option<IpcFocusTarget> },
     Activated { outcome: ActivationOutcome },
     Deleted { deleted: bool },
@@ -141,10 +144,40 @@ pub enum IpcResponse {
 Requests fall into distinct operational categories:
 
 ### 1. History Operations
-* **`GetHistory`**: Returns all clipboard history entries as lightweight `HistoryItem` metadata.
-* **`DeleteItem`**: Removes an entry from SQLite storage and cleans up any associated image preview files on disk.
-* **`TogglePinItem`**: Toggles whether an item is pinned to the top of the history list.
-* **`ClearHistory`**: Removes all unpinned entries from SQLite and deletes orphan preview images.
+* **`GetHistory`**: Returns an authoritative snapshot of all clipboard history entries paired with the exact monotonic revision they represent (`IpcResponse::History { items, revision }`). Snapshot consistency is guarded against concurrent revision-changing writes: if a mutation commits while reading SQLite, `get_all_snapshot()` retries automatically until `before_revision == after_revision`.
+* **`WaitForHistoryChange { since_revision }`**: Suspends until the daemon's in-memory history revision differs from `since_revision`, or a bounded timeout expires (default 25 seconds, `DEFAULT_HISTORY_WATCH_TIMEOUT`):
+  * If the daemon's current revision already differs from `since_revision` upon receipt, returns `HistoryChanged { revision }` immediately.
+  * If a revision-advancing mutation commits during the wait, wakes immediately and returns `HistoryChanged { revision: new_rev }`.
+  * If the timeout expires without revision changes, returns `HistoryUnchanged { revision: since_revision }`.
+  * Purely event-driven using Tokio watch channels; does **not** poll the SQLite database. The bounded timeout prevents indefinitely abandoned connections if a client closes without disconnecting cleanly.
+* **`DeleteItem`**: Removes an entry from SQLite storage and cleans up its backing image file on disk. Advances the history revision.
+* **`TogglePinItem`**: Toggles whether an item is pinned to the top of the history list. Advances the history revision.
+* **`ClearHistory`**: Removes all entries from SQLite and deletes their backing image files. Advances the history revision if any items were cleared.
+
+#### Monotonic History Revisions & Live Refresh Contract
+The daemon maintains a strictly positive, monotonic in-memory revision counter managed by `HistoryRevisionNotifier` (starting at 1).
+
+**Revision-Advancing Operations**:
+The revision advances atomically whenever a mutation alters visible history:
+* New text or image insertion (`save_text`, `save_image`)
+* Duplicate item promotion (updating `created_at` in place)
+* Missing-image backing file recovery during duplicate save
+* Item deletion (`DeleteItem`)
+* History clear (`ClearHistory`, when items deleted > 0)
+* Item activation promotion (`promote`)
+* Pin toggling, pinning, or unpinning (`TogglePinItem`, `pin`, `unpin`)
+* Legacy image migration multi-row consolidation (when colliding duplicate rows are merged)
+
+**Non-Advancing Operations**:
+Internal updates that do not alter visible history do **not** advance the revision counter:
+* A legacy migration in-place hash update (converting a legacy 64-hex hash to `rgba-v1` for an individual row without consolidation) does not alter visible items, order, timestamps, or pin status, and intentionally leaves the revision unchanged.
+
+**UI Refresh Loop**:
+Open UI popup instances use an event-driven loop without redundant querying:
+1. The UI sends `GetHistory` and receives `History { items, revision }`.
+2. The UI enters a loop calling `WaitForHistoryChange { since_revision: revision }`.
+3. On `HistoryChanged`: The UI requests a fresh consistent `GetHistory` snapshot, updates view state, and repaints.
+4. On `HistoryUnchanged`: The bounded timeout fired with zero mutations. The UI reissues `WaitForHistoryChange` with zero database queries and zero repaints.
 
 ### 2. Focus & Activation
 * **`CaptureFocusTarget`**: Queried by the UI *before* displaying the popup window. Observational query that samples the platform focus backend and returns an `IpcFocusTarget` (or `None` if unavailable) identifying the window currently holding user focus. Does not alter or store state in the daemon.
@@ -174,9 +207,10 @@ Requests fall into distinct operational categories:
 | Category | Requests | Mutates Disk / DB? | Mutates Runtime State? | Purpose |
 | --- | --- | :---: | :---: | --- |
 | **Passive Read** | `Ping`, `GetHistory`, `GetShortcutStatus` | No | No | Reads in-memory status cache or queries SQLite database. |
+| **Observational Long-Poll** | `WaitForHistoryChange` | No | **No** | Suspends client connection awaiting monotonic revision increment or bounded timeout. |
 | **Observational Query** | `CaptureFocusTarget` | No | **No** | Samples active window from platform focus backend; does not alter daemon state. |
 | **Live Status Refresh** | `RecheckShortcutStatus` | No | **Yes** (in-memory) | Inspects compositor shortcut state and updates in-memory status cache. |
-| **Durable Mutation** | `DeleteItem`, `TogglePinItem`, `ClearHistory`, `SetShortcut` | **Yes** | **Yes** | Updates SQLite database, deletes preview files, or commits `config.toml`. |
+| **Durable Mutation** | `DeleteItem`, `TogglePinItem`, `ClearHistory`, `SetShortcut` | **Yes** | **Yes** | Updates SQLite database, cleans up backing image files, or commits `config.toml`. |
 | **Runtime Control** | `ToggleUi`, `ActivateItem`, `ConfigurePortalShortcut`, `CopyText`, `ReloadConfig` | No (except history promotion) | **Yes** | Spawns UI, injects paste, writes clipboard, or opens portal dialog. |
 
 ---
@@ -211,7 +245,7 @@ The daemon's IPC server ([`crates/daemon/src/ipc_server.rs`](../../crates/daemon
 1. **Accept Loop**: The main listener task runs an infinite loop accepting connections via `server.accept().await`.
 2. **Per-Connection Tasks**: Every accepted connection is spawned into its own independent Tokio green thread (`tokio::spawn`).
 3. **Sequential Stream Processing**: Within a single connection task, requests are processed sequentially in a loop. A client may reuse a single connection for multiple requests or establish a new connection per command.
-4. **Idle Timeout**: Connections that remain idle without sending a request for **30 seconds** (`IPC_READ_TIMEOUT`) are cleanly disconnected.
+4. **Idle Timeout**: Connections that remain idle without sending a request for **30 seconds** (`IPC_READ_TIMEOUT`) are cleanly disconnected. This read timeout wraps only `connection.read_request()`; once a `WaitForHistoryChange` request is received and being handled, it operates outside the 30-second read timeout and is governed by its own 25-second watch timeout (`DEFAULT_HISTORY_WATCH_TIMEOUT`) to prevent indefinitely abandoned waits.
 5. **Shared Daemon State**: Underlying services (`ClipboardHistoryService`, `ClipboardActivationService`, `ReloadCoordinator`, `UiLauncher`) are wrapped in `Arc` references and shared safely across all connection tasks.
 6. **Internal Gate Locks**: Operations requiring strict serialization use dedicated internal gates (e.g. `ReloadCoordinator` serializes reload/recheck calls using an internal `reload_gate` mutex, preventing concurrent config writes).
 
@@ -310,5 +344,6 @@ The Unix domain socket is Pookie Paste's sole mechanism for detecting an already
 | **Socket Path** | XDG runtime directory and fallback resolution | [`crates/ipc/src/socket_path.rs`](../../crates/ipc/src/socket_path.rs) |
 | **Daemon Server Task** | Concurrency, accept loop, and timeout management | [`crates/daemon/src/ipc_server.rs`](../../crates/daemon/src/ipc_server.rs) |
 | **Request Handler** | Dispatching requests to daemon services | [`crates/daemon/src/request_handler.rs`](../../crates/daemon/src/request_handler.rs) |
+| **History Notifier** | Monotonic in-memory revision watch channel and subscriber | [`crates/history/src/notifier.rs`](../../crates/history/src/notifier.rs) |
 | **CLI Client Actions** | Command-line IPC dispatch (`--toggle`, etc.) | [`crates/daemon/src/cli.rs`](../../crates/daemon/src/cli.rs) |
-| **UI IPC Wrapper** | Popup client queries (`get_history`, `activate`) | [`crates/ui/src/ipc_client.rs`](../../crates/ui/src/ipc_client.rs) |
+| **UI IPC Wrapper** | Popup client queries (`get_history`, `wait_for_history_change`, `activate`) | [`crates/ui/src/ipc_client.rs`](../../crates/ui/src/ipc_client.rs) |
