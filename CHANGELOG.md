@@ -6,7 +6,30 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-Development after the `0.3.0` release will be documented here.
+Development after the `0.3.1` release will be documented here.
+
+---
+
+## [0.3.1] - 2026-10-04
+
+This release improves image clipboard handling across X11 and Wayland, including direct capture of copied image files from file managers, live history refresh, and more reliable image deduplication. It also improves X11 clipboard efficiency, large-image responsiveness, and upgrade handling for existing image history.
+
+### Added
+
+- Direct capture of copied single local image files from file managers into clipboard history on X11 and Wayland
+- Live history refresh in the open popup as new clipboard items arrive
+- Live download progress during interactive installer runs
+
+### Changed
+
+- Event-driven X11 clipboard monitoring using XFixes, reducing unnecessary polling while retaining fallback compatibility
+- Image deduplication based on stable pixel identity rather than encoded PNG bytes
+- Faster and more responsive processing of large clipboard images
+- Canonical image size ceiling raised to 32 MiB for larger high-resolution captures
+- Existing image history is upgraded automatically in the background to the new stable image identity format
+- Duplicate text entries are promoted in place instead of being removed and reinserted
+- File-manager copies now only accept a single supported local image; folders, non-image files, multiple files, and remote URIs are ignored instead of being treated as text paths
+- Repeated X11 clipboard copies are handled reliably even when the selection owner does not change
 
 ---
 
