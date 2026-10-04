@@ -1,11 +1,14 @@
 use std::collections::HashSet;
+use std::sync::Arc;
 
-use pookie_clipboard::{CanonicalImage, ClipboardContent};
+use pookie_clipboard::{
+    CanonicalImage, ClipboardContent, compute_image_identity, decode_canonical_png_to_rgba,
+};
 use pookie_core::ClipboardItem;
-use storage::{ImageStore, StorageRepository, StoredClipboardItem};
+use storage::{ImageMigrationOutcome, ImageStore, StorageRepository, StoredClipboardItem};
 
 use crate::config::HistoryConfig;
-use crate::error::HistoryError;
+use crate::error::{CandidateDecodeError, HistoryError};
 use crate::mapper::{to_stored_image_item, to_stored_text_item};
 use crate::notifier::HistoryRevisionNotifier;
 
@@ -13,6 +16,15 @@ use crate::notifier::HistoryRevisionNotifier;
 pub enum HistorySaveOutcome {
     Inserted { id: String },
     Promoted { id: String },
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct MigrationSummary {
+    pub candidates_found: usize,
+    pub updated_in_place: usize,
+    pub consolidated: usize,
+    pub skipped_corrupt_or_missing: usize,
+    pub skipped_stale: usize,
 }
 
 pub struct ClipboardHistoryService {
@@ -23,6 +35,8 @@ pub struct ClipboardHistoryService {
     image_store: Option<ImageStore>,
 
     notifier: HistoryRevisionNotifier,
+
+    image_mutation_gate: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl ClipboardHistoryService {
@@ -32,6 +46,7 @@ impl ClipboardHistoryService {
             config,
             image_store: None,
             notifier: HistoryRevisionNotifier::default(),
+            image_mutation_gate: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
@@ -106,6 +121,8 @@ impl ClipboardHistoryService {
         hash: String,
         created_at: chrono::DateTime<chrono::Utc>,
     ) -> Result<HistorySaveOutcome, HistoryError> {
+        let _guard = self.image_mutation_gate.lock().await;
+
         let mut pinned_at = None;
 
         /*
@@ -475,5 +492,159 @@ impl ClipboardHistoryService {
         }
 
         Ok(())
+    }
+
+    /// Migrate legacy image history rows to versioned rgba-v1 identity.
+    ///
+    /// The migration is background-safe, sequential (concurrency = 1),
+    /// idempotent, and crash-safe. Backing PNG files are decoded to calculate
+    /// their rgba-v1 identity but are never re-encoded or modified.
+    pub async fn migrate_legacy_image_identities(&self) -> Result<MigrationSummary, HistoryError> {
+        let Some(image_store) = self.image_store.as_ref() else {
+            return Ok(MigrationSummary::default());
+        };
+
+        let candidates = self.repository.get_legacy_image_candidates().await?;
+        let mut summary = MigrationSummary {
+            candidates_found: candidates.len(),
+            ..Default::default()
+        };
+
+        for candidate in candidates {
+            let Some(ref file_path) = candidate.file_path else {
+                tracing::warn!(id = %candidate.id, "legacy image candidate has no file_path; skipping");
+                summary.skipped_corrupt_or_missing += 1;
+                continue;
+            };
+
+            let absolute_path = match image_store.resolve_relative_path(file_path) {
+                Ok(p) => p,
+                Err(err) => {
+                    tracing::warn!(id = %candidate.id, %err, "invalid relative image path; skipping");
+                    summary.skipped_corrupt_or_missing += 1;
+                    continue;
+                }
+            };
+
+            // 1. Candidate decode and identity computation outside image_mutation_gate
+            let decode_res = tokio::task::spawn_blocking(move || {
+                let bytes = std::fs::read(&absolute_path).map_err(CandidateDecodeError::Io)?;
+                let (width, height, rgba) =
+                    decode_canonical_png_to_rgba(&bytes).map_err(CandidateDecodeError::Codec)?;
+                let identity = compute_image_identity(width, height, &rgba);
+                Ok::<_, CandidateDecodeError>(identity.to_versioned_string())
+            })
+            .await;
+
+            let target_rgba_v1_hash = match decode_res {
+                Ok(Ok(h)) => h,
+                Ok(Err(err)) => {
+                    tracing::warn!(id = %candidate.id, %err, "failed reading/decoding legacy image; skipping row");
+                    summary.skipped_corrupt_or_missing += 1;
+                    continue;
+                }
+                Err(join_err) => {
+                    tracing::error!(id = %candidate.id, %join_err, "spawn_blocking failed during migration");
+                    summary.skipped_corrupt_or_missing += 1;
+                    continue;
+                }
+            };
+
+            // 2. Acquire image_mutation_gate before querying collision rows
+            let _guard = self.image_mutation_gate.lock().await;
+
+            let colliding_rows = self
+                .repository
+                .find_all_by_hash_and_type(&target_rgba_v1_hash, "image")
+                .await?;
+
+            let mut known_healthy_ids = HashSet::new();
+            // Candidate itself is already verified healthy above
+            known_healthy_ids.insert(candidate.id.clone());
+
+            // 3. Verify colliding row file health while gate is held
+            for colliding in colliding_rows {
+                if colliding.id == candidate.id {
+                    continue;
+                }
+
+                let Some(ref coll_file_path) = colliding.file_path else {
+                    continue;
+                };
+
+                let Ok(coll_abs_path) = image_store.resolve_relative_path(coll_file_path) else {
+                    continue;
+                };
+
+                let target_hash_clone = target_rgba_v1_hash.clone();
+                let verify_res = tokio::task::spawn_blocking(move || {
+                    let bytes = std::fs::read(&coll_abs_path).map_err(CandidateDecodeError::Io)?;
+                    let (width, height, rgba) = decode_canonical_png_to_rgba(&bytes)
+                        .map_err(CandidateDecodeError::Codec)?;
+                    let identity = compute_image_identity(width, height, &rgba);
+                    let computed = identity.to_versioned_string();
+                    if computed != target_hash_clone {
+                        return Err(CandidateDecodeError::IdentityMismatch {
+                            expected: target_hash_clone,
+                            actual: computed,
+                        });
+                    }
+                    Ok::<_, CandidateDecodeError>(())
+                })
+                .await;
+
+                if let Ok(Ok(())) = verify_res {
+                    known_healthy_ids.insert(colliding.id);
+                } else {
+                    tracing::warn!(
+                        id = %colliding.id,
+                        "colliding image backing file is missing, corrupt, or identity mismatched; excluded from healthy set"
+                    );
+                }
+            }
+
+            // 4. Transactional consolidation
+            let outcome = self
+                .repository
+                .consolidate_legacy_image_row(
+                    &candidate.id,
+                    &candidate.content_hash,
+                    &target_rgba_v1_hash,
+                    &known_healthy_ids,
+                )
+                .await?;
+
+            drop(_guard);
+
+            // 5. Post-commit cleanup and selective revision notification
+            match outcome {
+                ImageMigrationOutcome::SkippedStale => {
+                    summary.skipped_stale += 1;
+                }
+                ImageMigrationOutcome::UpdatedInPlace { .. } => {
+                    summary.updated_in_place += 1;
+                    // Hash-only update: do NOT advance revision
+                }
+                ImageMigrationOutcome::Consolidated {
+                    redundant_file_paths,
+                    ..
+                } => {
+                    summary.consolidated += 1;
+                    for redundant_path in redundant_file_paths {
+                        if let Err(cleanup_err) = image_store.delete_image(&redundant_path).await {
+                            tracing::warn!(
+                                %cleanup_err,
+                                file = %redundant_path,
+                                "failed to clean up redundant image file after migration consolidation; startup reconciliation will reclaim it"
+                            );
+                        }
+                    }
+                    // Consolidation alters visible history -> advance revision once
+                    self.notifier.advance();
+                }
+            }
+        }
+
+        Ok(summary)
     }
 }

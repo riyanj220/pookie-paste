@@ -6,6 +6,6 @@ pub mod notifier;
 pub mod service;
 
 pub use config::HistoryConfig;
-pub use error::HistoryError;
+pub use error::{CandidateDecodeError, HistoryError};
 pub use notifier::HistoryRevisionNotifier;
-pub use service::{ClipboardHistoryService, HistorySaveOutcome};
+pub use service::{ClipboardHistoryService, HistorySaveOutcome, MigrationSummary};
