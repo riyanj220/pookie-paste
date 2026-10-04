@@ -964,3 +964,52 @@ async fn migration_rerun_performs_zero_changes() {
     assert_eq!(summary2.skipped_corrupt_or_missing, 0);
     assert_eq!(summary2.skipped_stale, 0);
 }
+
+// 24. Startup reconciliation preserves referenced legacy image while deleting unreferenced orphan
+#[tokio::test]
+async fn reconciliation_preserves_referenced_legacy_image_and_deletes_orphan() {
+    let (service, repository, image_store, _dir) = create_service_with_repo(30).await;
+    let image = test_canonical_image(210);
+    let legacy_hash = "f111111111111111111111111111111111111111111111111111111111111111";
+
+    // 1. Insert a legacy image row referencing images/item-legacy-preserved.png
+    let legacy_file = insert_legacy_row(
+        &repository,
+        &image_store,
+        "item-legacy-preserved",
+        image.png_bytes(),
+        legacy_hash,
+        "2026-10-01T12:00:00Z",
+        None,
+    )
+    .await;
+
+    // 2. Write an orphan image file to disk with NO database row referencing it
+    let orphan_file = image_store
+        .write_image("item-orphan-unreferenced", image.png_bytes())
+        .await
+        .unwrap();
+
+    assert!(image_store.image_exists(&legacy_file).await.unwrap());
+    assert!(image_store.image_exists(&orphan_file).await.unwrap());
+
+    // 3. Run reconciliation (simulates daemon startup reconciliation)
+    let removed = service.reconcile_image_store().await.unwrap();
+    assert_eq!(removed, 1);
+
+    // 4. Assert: Legacy file is preserved, orphan file is deleted
+    assert!(image_store.image_exists(&legacy_file).await.unwrap());
+    assert!(!image_store.image_exists(&orphan_file).await.unwrap());
+
+    // 5. Subsequent migration of the preserved legacy image succeeds
+    let summary = service.migrate_legacy_image_identities().await.unwrap();
+    assert_eq!(summary.candidates_found, 1);
+    assert_eq!(summary.updated_in_place, 1);
+
+    let item = repository
+        .get_by_id("item-legacy-preserved")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(item.content_hash, image.identity().to_versioned_string());
+}

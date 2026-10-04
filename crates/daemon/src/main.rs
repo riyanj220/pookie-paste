@@ -174,6 +174,9 @@ async fn main() -> anyhow::Result<()> {
 
     info!("Pookie daemon running");
 
+    let migration_history = Arc::clone(&history_service);
+    let migration_task = tokio::spawn(run_background_migration(migration_history));
+
     loop {
         tokio::select! {
             event =
@@ -407,10 +410,40 @@ async fn main() -> anyhow::Result<()> {
 
     info!("shutting down Pookie services");
 
+    migration_task.abort();
+    let _ = migration_task.await;
+
     activation_service.shutdown();
     drop(_clipboard_watcher_session);
 
     info!("Pookie daemon stopped");
 
     Ok(())
+}
+
+async fn run_background_migration(history_service: Arc<ClipboardHistoryService>) {
+    tracing::debug!("legacy image identity migration started");
+
+    match history_service.migrate_legacy_image_identities().await {
+        Ok(summary) => {
+            if summary.candidates_found > 0 {
+                info!(
+                    candidates = summary.candidates_found,
+                    updated = summary.updated_in_place,
+                    consolidated = summary.consolidated,
+                    skipped_corrupt = summary.skipped_corrupt_or_missing,
+                    skipped_stale = summary.skipped_stale,
+                    "legacy image identity migration completed"
+                );
+            } else {
+                debug!("legacy image identity migration completed; no legacy candidates found");
+            }
+        }
+        Err(err) => {
+            warn!(
+                error = %err,
+                "legacy image identity migration encountered an error; daemon continuing normally"
+            );
+        }
+    }
 }

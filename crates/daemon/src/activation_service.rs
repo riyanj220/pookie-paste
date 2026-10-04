@@ -105,10 +105,12 @@ where
                  * replaced image file and keeps both X11 and
                  * Wayland writeback paths safe.
                  */
-                let canonical_png =
-                    canonicalize_image(&stored_png, "image/png").map_err(|error| {
-                        anyhow::anyhow!("stored clipboard image is invalid: {error}")
-                    })?;
+                let canonical_png = tokio::task::spawn_blocking(move || {
+                    canonicalize_image(&stored_png, "image/png")
+                })
+                .await
+                .map_err(|join_err| anyhow::anyhow!("image activation worker failed: {join_err}"))?
+                .map_err(|error| anyhow::anyhow!("stored clipboard image is invalid: {error}"))?;
 
                 ClipboardContent::Image(canonical_png)
             }
