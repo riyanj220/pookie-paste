@@ -82,8 +82,8 @@ Before creating and displaying the popup window, the UI process requests `Captur
 
 ### 2. Content Retrieval & Canonicalization
 When the user activates an item (via `Enter` on a selected item or clicking an item card), the UI issues `ActivateItem { id, target_id }` and immediately hides itself (`Visible(false)`). The daemon loads the item from storage:
-* Text items are loaded directly from SQLite.
-* Image items load the canonical PNG bytes from `ImageStore` and re-validate them through `canonicalize_image()` to ensure payload integrity before writeback. If the image file is missing or corrupted, activation terminates with `UnsupportedContent`.
+* Text items are loaded directly from SQLite. If text content is missing, activation terminates with `UnsupportedContent`.
+* Image items load stored canonical PNG bytes from `ImageStore` via `read_image_content()`. If the backing file is missing on disk (`read_image_content` returns `None`), activation returns `ActivationResult::UnsupportedContent`. If stored bytes exist, they are re-validated through `canonicalize_image()` to produce a `CanonicalImage`. Only `canonicalize_image()` is offloaded to `spawn_blocking`; surrounding activation orchestration remains async. If `canonicalize_image()` rejects the stored bytes, activation returns a propagated error and the invalid image is never written to the clipboard.
 
 ### 3. Clipboard Writeback & Suppression Registration
 The daemon writes the content to the desktop clipboard through `ClipboardService`. Upon successful write, `ClipboardService` immediately records a `ClipboardFingerprint` in `ClipboardState`. When the background clipboard watcher subsequently receives the platform clipboard change notification, the fingerprint matches and the event is dropped without entering history.
@@ -123,7 +123,7 @@ The daemon returns an explicit `ActivationOutcome` enum to the caller:
 | **`ClipboardUpdated`** | Item written to clipboard and promoted, but direct paste was not emitted (no focus target was captured, platform is in `ClipboardOnly` mode, or direct paste became unavailable). | Updated & Promoted | No |
 | **`PasteFailed`** | Target focus restoration failed or timed out, or synthetic key emission returned an error. | Updated & Promoted | No |
 | **`NotFound`** | The requested history item ID does not exist in storage (or was deleted). | Unchanged | No |
-| **`UnsupportedContent`** | Stored record contains missing text, missing image file on disk, or corrupted payload. | Unchanged | No |
+| **`UnsupportedContent`** | Stored record contains missing text or missing backing image file on disk. | Unchanged | No |
 
 ---
 

@@ -32,6 +32,7 @@ fn round_trips_text_history_response() {
 
     let response = IpcResponse::History {
         items: vec![item.clone()],
+        revision: 0,
     };
 
     let json = serde_json::to_string(&response).expect("serialization failed");
@@ -54,6 +55,7 @@ fn round_trips_image_history_response_as_reference_only() {
 
     let response = IpcResponse::History {
         items: vec![item.clone()],
+        revision: 0,
     };
 
     let json = serde_json::to_string(&response).expect("serialization failed");
@@ -90,7 +92,10 @@ fn image_history_metadata_frame_is_small() {
     )
     .expect("image item creation failed");
 
-    let response = IpcResponse::History { items: vec![item] };
+    let response = IpcResponse::History {
+        items: vec![item],
+        revision: 0,
+    };
 
     let frame = ipc::encode(&response).expect("IPC encoding failed");
 
@@ -169,4 +174,38 @@ fn history_item_round_trips_with_pinned_at() {
 
     assert_eq!(decoded, item);
     assert_eq!(decoded.pinned_at.as_deref(), Some("2026-09-20T12:00:00Z"));
+}
+
+#[test]
+fn round_trips_wait_for_history_change_request() {
+    let request = IpcRequest::WaitForHistoryChange {
+        since_revision: 123,
+    };
+    let json = serde_json::to_string(&request).expect("serialization failed");
+    assert_eq!(
+        json,
+        r#"{"type":"wait_for_history_change","since_revision":123}"#
+    );
+    let decoded: IpcRequest = serde_json::from_str(&json).expect("deserialization failed");
+    assert_eq!(decoded, request);
+}
+
+#[test]
+fn round_trips_history_changed_and_unchanged_responses() {
+    let changed = IpcResponse::HistoryChanged { revision: 55 };
+    let json_changed = serde_json::to_string(&changed).expect("serialization failed");
+    assert_eq!(json_changed, r#"{"type":"history_changed","revision":55}"#);
+    let decoded_changed: IpcResponse =
+        serde_json::from_str(&json_changed).expect("deserialization failed");
+    assert_eq!(decoded_changed, changed);
+
+    let unchanged = IpcResponse::HistoryUnchanged { revision: 55 };
+    let json_unchanged = serde_json::to_string(&unchanged).expect("serialization failed");
+    assert_eq!(
+        json_unchanged,
+        r#"{"type":"history_unchanged","revision":55}"#
+    );
+    let decoded_unchanged: IpcResponse =
+        serde_json::from_str(&json_unchanged).expect("deserialization failed");
+    assert_eq!(decoded_unchanged, unchanged);
 }

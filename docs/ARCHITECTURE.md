@@ -22,7 +22,7 @@ flowchart TD
         direction TB
         Watcher["Clipboard Watcher (X11 / Wayland ext/wlr)"]
         ClipboardSvc["Clipboard Service & Self-Write Suppression"]
-        Processor["Core Processor (Normalize, Limit, SHA-256)"]
+        Processor["Core Processor (Normalize, Policy, Identity)"]
         HistorySvc["Clipboard History Service"]
         ActivationSvc["Activation Service & Focus Confirmation"]
         ShortcutSvc["Shortcut Listener & Reload Coordinator"]
@@ -58,8 +58,8 @@ flowchart TD
 Pookie Paste is governed by strict architectural invariants across all subsystems:
 
 1. **State Ownership Separation**: The UI contains no durable application state. SQLite records, image files, configuration state, platform handles, and watcher threads are owned strictly by the persistent daemon. The UI retains only transient view state.
-2. **Canonical Image Representation**: All accepted clipboard images are decoded and converted to canonical PNG-encoded RGBA8 bytes upon capture. Hashing, deduplication, filesystem storage, and UI preview rendering operate exclusively on this canonical format.
-3. **Self-Write Suppression**: Pookie-originated clipboard writes record a compact SHA-256 fingerprint in memory. Subsequent platform change notifications matching this fingerprint are discarded once, preventing recursive feedback loops.
+2. **Canonical Image Representation & Pixel Identity**: Accepted clipboard images are decoded and converted to canonical PNG-encoded RGBA8 bytes for filesystem persistence, clipboard transfer, and UI rendering. Images are not identified by PNG byte hashes; stable deduplication and identity derive from decoded RGBA8 pixel bytes (`rgba-v1`). See [Clipboard Overview](clipboard/overview.md) for identity details.
+3. **Self-Write Suppression**: Pookie-originated clipboard writes record a compact typed content fingerprint in memory. Subsequent platform change notifications matching this fingerprint are discarded once, preventing recursive feedback loops.
 4. **Target Confirmation Before Paste**: Pookie never performs synthetic paste injection into an unconfirmed or unverified window. If no focus target was captured (`target = None`), activation halts before paste evaluation and returns `ClipboardUpdated`. If a target is captured but cannot be restored or confirmed, activation returns `PasteFailed`. Keystrokes are emitted only after focus confirmation succeeds.
 5. **Compositor Non-Interference**: In compositor-managed environments (Sway, Hyprland), Pookie never silently modifies external compositor configuration files. Pookie records user intent in `config.toml`, while the compositor retains exclusive ownership over its live bindings.
 6. **Portal Authority**: In desktop portal environments (KDE Plasma Wayland), the portal-reported effective shortcut is authoritative over `config.toml`.
@@ -72,11 +72,11 @@ Pookie Paste is governed by strict architectural invariants across all subsystem
 Detailed technical documentation is organized into modular guides:
 
 ### 1. Clipboard Management
-Monitors the desktop clipboard via X11 polling or Wayland data-control protocols (`ext-data-control-v1`, `zwlr_data_control_v1`). Manages MIME negotiation (prioritizing image representations over text fallbacks), content policy limits, text newline normalization, RGBA8 image canonicalization, and single-use self-write suppression.
+Monitors the desktop clipboard through event-driven platform watchers: XFixes on X11 (with lightweight generation fallback polling) and data-control protocols (`ext-data-control-v1`, `zwlr_data_control_v1`) on Wayland. Enforces strict MIME precedence (`image/*` → `text/uri-list` → genuine text), allowing a single local copied image file to enter history as an `Image` while rejecting generic non-image files. Handles content policy limits, text newline normalization, RGBA8 canonical PNG generation, and single-use self-write suppression using typed content fingerprints.
 *Detailed guide: [**Clipboard Subsystem Overview**](clipboard/overview.md)*
 
 ### 2. History & Storage
-Coordinates dual-layer persistence: SQLite for metadata, full text content, and item pinning; and a filesystem store for canonical PNG images referenced via data-directory-relative paths (`images/<uuid>.png`). Handles capacity eviction, deduplication, item promotion, and startup orphan image cleanup.
+Coordinates dual-layer persistence: SQLite serves as the authoritative store for item metadata, text content, item pinning, and typed content identities (`rgba-v1` for images, SHA-256 for text); `ImageStore` persists canonical PNG files referenced by application-relative paths (`images/<uuid>.png`). Intact duplicates are promoted in place, with missing image backing storage recovered from fresh copies if needed. The subsystem coordinates startup image store reconciliation to clean unreferenced files, maintains monotonic revision tracking so open UI instances refresh via IPC, and executes idempotent background migration of legacy image identities.
 *Detailed guide: [**Clipboard & Storage Overview**](clipboard/overview.md)*
 
 ### 3. Activation, Focus & Direct Paste
@@ -91,7 +91,7 @@ Provides cross-desktop hotkey management supporting four distinct paradigms: nat
 *Platform implementations: [X11](shortcuts/platforms/x11.md) | [KDE Portal](shortcuts/platforms/kde-portal.md) | [Sway](shortcuts/platforms/sway.md) | [Hyprland](shortcuts/platforms/hyprland.md)*
 
 ### 5. Inter-Process Communication (IPC)
-Defines the wire contract connecting the persistent daemon, ephemeral popup UI, and CLI commands. Uses newline-delimited JSON over local Unix domain stream sockets with a 1 MiB frame ceiling, 30-second idle timeouts, typed Serde request/response protocols, and single-instance enforcement through socket probing and binding.
+Defines the wire contract connecting the persistent daemon, ephemeral popup UI, and CLI commands. Uses newline-delimited JSON over local Unix domain stream sockets with a 1 MiB frame ceiling, 30-second read timeouts, typed Serde request/response protocols, and single-instance enforcement through socket probing and binding. Powers UI state synchronization via an initial `GetHistory` snapshot combined with revision-driven `WaitForHistoryChange` long-polling for live updates without redundant history fetching.
 *Detailed guide: [**IPC Subsystem Overview**](ipc/overview.md)*
 
 ---
@@ -118,10 +118,10 @@ The repository is organized into focused, modular crates within a single Cargo w
 
 | Crate | Responsibility | Documentation Reference |
 | --- | --- | --- |
-| [`crates/pookie-core`](../crates/pookie-core) | Domain models, policy limits, text normalization, and content hashing. | [Clipboard Overview](clipboard/overview.md) |
-| [`crates/pookie-clipboard`](../crates/pookie-clipboard) | X11/Wayland clipboard readers, watchers, and canonical image codec. | [Clipboard Overview](clipboard/overview.md) |
+| [`crates/pookie-core`](../crates/pookie-core) | Domain models, policy limits, text normalization, and content identity routing. | [Clipboard Overview](clipboard/overview.md) |
+| [`crates/pookie-clipboard`](../crates/pookie-clipboard) | Clipboard backends, event-driven watchers, MIME negotiation, and canonical image codec (`CanonicalImage`). | [Clipboard Overview](clipboard/overview.md) |
 | [`crates/storage`](../crates/storage) | SQLite repository, schema migrations, and atomic filesystem image store. | [Clipboard Overview](clipboard/overview.md) |
-| [`crates/history`](../crates/history) | High-level history service, deduplication, promotion, and eviction. | [Clipboard Overview](clipboard/overview.md) |
+| [`crates/history`](../crates/history) | High-level history service, in-place duplicate promotion, eviction, and revision change notification. | [Clipboard Overview](clipboard/overview.md) |
 | [`crates/ipc`](../crates/ipc) | Unix domain socket transport, newline JSON codec, and typed protocol. | [IPC Overview](ipc/overview.md) |
 | [`crates/daemon`](../crates/daemon) | Main background process, platform resolvers, backends, and coordinator. | [Runtime Model](architecture/runtime-model.md) |
 | [`crates/ui`](../crates/ui) | Ephemeral popup GUI, egui rendering, input navigation, and thumbnail cache. | [Architecture Overview](architecture/overview.md) |

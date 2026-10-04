@@ -503,7 +503,7 @@ async fn get_history_returns_items_newest_first() {
         .expect("GetHistory request failed");
 
     match response {
-        IpcResponse::History { items } => {
+        IpcResponse::History { items, .. } => {
             assert_eq!(items.len(), 2);
 
             assert_eq!(items[0].text_content.as_deref(), Some("Second"),);
@@ -717,7 +717,7 @@ async fn supports_multiple_requests_on_same_connection() {
         .expect("GetHistory failed");
 
     match history {
-        IpcResponse::History { items } => {
+        IpcResponse::History { items, .. } => {
             assert_eq!(items.len(), 1);
         }
 
@@ -739,7 +739,7 @@ async fn supports_multiple_requests_on_same_connection() {
         .expect("second GetHistory failed");
 
     match history {
-        IpcResponse::History { items } => {
+        IpcResponse::History { items, .. } => {
             assert!(items.is_empty());
         }
 
@@ -769,7 +769,7 @@ async fn toggles_pin_state_through_ipc() {
         .expect("GetHistory failed");
 
     let item_id = match history {
-        IpcResponse::History { items } => {
+        IpcResponse::History { items, .. } => {
             assert_eq!(items.len(), 1);
             assert_eq!(items[0].pinned_at, None);
             assert!(!items[0].is_pinned());
@@ -800,7 +800,7 @@ async fn toggles_pin_state_through_ipc() {
         .expect("second GetHistory failed");
 
     match history {
-        IpcResponse::History { items } => {
+        IpcResponse::History { items, .. } => {
             assert_eq!(items.len(), 1);
             assert!(items[0].pinned_at.is_some());
             assert!(items[0].is_pinned());
@@ -830,7 +830,7 @@ async fn toggles_pin_state_through_ipc() {
         .expect("third GetHistory failed");
 
     match history {
-        IpcResponse::History { items } => {
+        IpcResponse::History { items, .. } => {
             assert_eq!(items.len(), 1);
             assert_eq!(items[0].pinned_at, None);
             assert!(!items[0].is_pinned());
@@ -909,7 +909,7 @@ async fn handles_multiple_clients_concurrently() {
     assert_eq!(first.unwrap(), IpcResponse::Pong,);
 
     match second.unwrap() {
-        IpcResponse::History { items } => {
+        IpcResponse::History { items, .. } => {
             assert_eq!(items.len(), 1);
         }
 
@@ -1273,4 +1273,102 @@ async fn recheck_shortcut_status_ipc_round_trip() {
         }
         other => panic!("expected ShortcutStatus response, got: {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn wait_for_history_change_integration_blocks_and_wakes_on_mutation() {
+    let app = TestIpcApp::start().await;
+    let service = app.history_service();
+    assert_eq!(service.current_revision(), 1);
+
+    let mut watch_client = app.client().await;
+
+    let wait_task = tokio::spawn(async move {
+        watch_client
+            .send(&IpcRequest::WaitForHistoryChange { since_revision: 1 })
+            .await
+            .expect("WaitForHistoryChange failed")
+    });
+
+    tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+
+    // Save item via service (simulating watcher or internal mutation)
+    service
+        .save(test_item("Live update text", "hash-live-test", 1))
+        .await
+        .expect("save failed");
+
+    let response = wait_task.await.expect("wait task failed");
+    assert_eq!(response, IpcResponse::HistoryChanged { revision: 2 });
+
+    // Subsequent GetHistory returns the new item and revision 2
+    let mut data_client = app.client().await;
+    let history = data_client
+        .send(&IpcRequest::GetHistory)
+        .await
+        .expect("GetHistory failed");
+
+    match history {
+        IpcResponse::History { items, revision } => {
+            assert_eq!(revision, 2);
+            assert_eq!(items.len(), 1);
+            assert_eq!(items[0].text_content.as_deref(), Some("Live update text"));
+        }
+        other => panic!("unexpected response: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn wait_for_history_change_integration_returns_immediately_when_stale() {
+    let app = TestIpcApp::start().await;
+    let service = app.history_service();
+    service
+        .save(test_item("Item 1", "hash-1", 1))
+        .await
+        .expect("save failed");
+    assert_eq!(service.current_revision(), 2);
+
+    let mut client = app.client().await;
+
+    // Client passes stale revision 1
+    let response = client
+        .send(&IpcRequest::WaitForHistoryChange { since_revision: 1 })
+        .await
+        .expect("WaitForHistoryChange request failed");
+
+    assert_eq!(response, IpcResponse::HistoryChanged { revision: 2 });
+}
+
+#[tokio::test]
+async fn wait_for_history_change_multiple_clients_wake_simultaneously() {
+    let app = TestIpcApp::start().await;
+    let service = app.history_service();
+
+    let mut client1 = app.client().await;
+    let mut client2 = app.client().await;
+
+    let task1 = tokio::spawn(async move {
+        client1
+            .send(&IpcRequest::WaitForHistoryChange { since_revision: 1 })
+            .await
+            .expect("client1 wait failed")
+    });
+
+    let task2 = tokio::spawn(async move {
+        client2
+            .send(&IpcRequest::WaitForHistoryChange { since_revision: 1 })
+            .await
+            .expect("client2 wait failed")
+    });
+
+    tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+
+    service
+        .save(test_item("Broadcast test", "hash-broadcast", 1))
+        .await
+        .expect("save failed");
+
+    let (res1, res2) = tokio::join!(task1, task2);
+    assert_eq!(res1.unwrap(), IpcResponse::HistoryChanged { revision: 2 });
+    assert_eq!(res2.unwrap(), IpcResponse::HistoryChanged { revision: 2 });
 }

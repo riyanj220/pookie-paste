@@ -1,7 +1,7 @@
 mod clipboard_backend;
 mod clipboard_reader;
 
-mod mime;
+pub(crate) mod mime;
 
 mod watcher;
 

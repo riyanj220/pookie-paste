@@ -105,9 +105,36 @@ impl ClipboardBackend for WaylandClipboard {
 
             tracing::debug!(
                 mime_type = %actual_mime,
-                encoded_bytes =
-                canonical.len(),
-                            "Wayland clipboard image read"
+                encoded_bytes = canonical.len(),
+                "Wayland clipboard image read"
+            );
+
+            return Ok(ClipboardContent::Image(canonical));
+        }
+
+        if offered
+            .iter()
+            .any(|mime| mime == super::mime::URI_LIST_MIME_TYPE)
+        {
+            let (pipe, _) = get_contents(
+                ClipboardType::Regular,
+                Seat::Unspecified,
+                PasteMimeType::Specific(super::mime::URI_LIST_MIME_TYPE),
+            )
+            .map_err(|error| ClipboardError::ReadFailed(error.to_string()))?;
+
+            let bytes = self.read_pipe_bytes(pipe)?;
+
+            let canonical =
+                crate::file_image::canonicalize_single_local_file_uri(&bytes).map_err(|error| {
+                    ClipboardError::ReadFailed(format!(
+                        "failed resolving Wayland clipboard file-list image: {error}"
+                    ))
+                })?;
+
+            tracing::debug!(
+                encoded_bytes = canonical.len(),
+                "Wayland clipboard file-list image read"
             );
 
             return Ok(ClipboardContent::Image(canonical));
@@ -128,7 +155,7 @@ impl ClipboardBackend for WaylandClipboard {
                  * Wayland therefore only needs to expose
                  * image/png on writeback.
                  */
-                let source = Source::Bytes(canonical_png.clone().into());
+                let source = Source::Bytes(Box::from(canonical_png.png_bytes()));
 
                 Options::new()
                     .copy(source, CopyMimeType::Specific("image/png".to_string()))

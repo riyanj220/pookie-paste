@@ -265,6 +265,10 @@ pub enum IpcRequest {
 
     GetHistory,
 
+    WaitForHistoryChange {
+        since_revision: u64,
+    },
+
     CaptureFocusTarget,
 
     ActivateItem {
@@ -310,27 +314,58 @@ pub enum IpcRequest {
 pub enum IpcResponse {
     Pong,
 
-    History { items: Vec<HistoryItem> },
+    History {
+        items: Vec<HistoryItem>,
+        #[serde(default)]
+        revision: u64,
+    },
 
-    FocusTarget { target_id: Option<IpcFocusTarget> },
+    HistoryChanged {
+        revision: u64,
+    },
 
-    Activated { outcome: ActivationOutcome },
+    HistoryUnchanged {
+        revision: u64,
+    },
 
-    Deleted { deleted: bool },
+    FocusTarget {
+        target_id: Option<IpcFocusTarget>,
+    },
 
-    PinToggled { id: String, is_pinned: bool },
+    Activated {
+        outcome: ActivationOutcome,
+    },
 
-    Cleared { count: u64 },
+    Deleted {
+        deleted: bool,
+    },
 
-    UiToggled { launched: bool },
+    PinToggled {
+        id: String,
+        is_pinned: bool,
+    },
 
-    ShortcutStatus { status: ShortcutStatusInfo },
+    Cleared {
+        count: u64,
+    },
 
-    ConfigReloaded { status: ShortcutStatusInfo },
+    UiToggled {
+        launched: bool,
+    },
+
+    ShortcutStatus {
+        status: ShortcutStatusInfo,
+    },
+
+    ConfigReloaded {
+        status: ShortcutStatusInfo,
+    },
 
     TextCopied,
 
-    Error { message: String },
+    Error {
+        message: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -852,5 +887,60 @@ mod tests {
         assert_eq!(encoded, r#"{"type":"text_copied"}"#);
         let decoded: IpcResponse = serde_json::from_str(&encoded).expect("deserialization failed");
         assert_eq!(decoded, response);
+    }
+
+    #[test]
+    fn wait_for_history_change_request_round_trips() {
+        let request = IpcRequest::WaitForHistoryChange { since_revision: 42 };
+        let encoded = serde_json::to_string(&request).expect("serialization failed");
+        assert_eq!(
+            encoded,
+            r#"{"type":"wait_for_history_change","since_revision":42}"#
+        );
+        let decoded: IpcRequest = serde_json::from_str(&encoded).expect("deserialization failed");
+        assert_eq!(decoded, request);
+    }
+
+    #[test]
+    fn history_changed_response_round_trips() {
+        let response = IpcResponse::HistoryChanged { revision: 43 };
+        let encoded = serde_json::to_string(&response).expect("serialization failed");
+        assert_eq!(encoded, r#"{"type":"history_changed","revision":43}"#);
+        let decoded: IpcResponse = serde_json::from_str(&encoded).expect("deserialization failed");
+        assert_eq!(decoded, response);
+    }
+
+    #[test]
+    fn history_unchanged_response_round_trips() {
+        let response = IpcResponse::HistoryUnchanged { revision: 42 };
+        let encoded = serde_json::to_string(&response).expect("serialization failed");
+        assert_eq!(encoded, r#"{"type":"history_unchanged","revision":42}"#);
+        let decoded: IpcResponse = serde_json::from_str(&encoded).expect("deserialization failed");
+        assert_eq!(decoded, response);
+    }
+
+    #[test]
+    fn history_response_with_revision_round_trips() {
+        let response = IpcResponse::History {
+            items: vec![],
+            revision: 10,
+        };
+        let encoded = serde_json::to_string(&response).expect("serialization failed");
+        assert_eq!(encoded, r#"{"type":"history","items":[],"revision":10}"#);
+        let decoded: IpcResponse = serde_json::from_str(&encoded).expect("deserialization failed");
+        assert_eq!(decoded, response);
+    }
+
+    #[test]
+    fn history_response_without_revision_defaults_to_zero() {
+        let json = r#"{"type":"history","items":[]}"#;
+        let decoded: IpcResponse = serde_json::from_str(json).expect("deserialization failed");
+        match decoded {
+            IpcResponse::History { items, revision } => {
+                assert!(items.is_empty());
+                assert_eq!(revision, 0);
+            }
+            other => panic!("unexpected response: {other:?}"),
+        }
     }
 }

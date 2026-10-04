@@ -6,7 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use chrono::{Duration, Utc};
 
 use history::{ClipboardHistoryService, HistoryConfig};
-use pookie_clipboard::ClipboardContent;
+use pookie_clipboard::{CanonicalImage, ClipboardContent, canonicalize_rgba};
 use pookie_core::ClipboardItem;
 use storage::{Database, ImageStore, StorageRepository};
 
@@ -62,18 +62,22 @@ async fn create_service(max_items: usize) -> (ClipboardHistoryService, ImageStor
 fn image_item(
     id: uuid::Uuid,
     hash: &str,
-    bytes: Vec<u8>,
+    image: CanonicalImage,
     created_at: chrono::DateTime<Utc>,
 ) -> ClipboardItem {
     ClipboardItem {
         id,
 
-        content: ClipboardContent::Image(bytes),
+        content: ClipboardContent::Image(image),
 
         hash: hash.to_string(),
 
         created_at,
     }
+}
+
+fn test_canonical_image(seed: u8) -> CanonicalImage {
+    canonicalize_rgba(1, 1, &[seed, seed, seed, 255]).expect("canonical image failed")
 }
 
 #[tokio::test]
@@ -83,7 +87,12 @@ async fn saving_image_creates_owned_file_and_database_reference() {
     let id = uuid::Uuid::new_v4();
 
     service
-        .save(image_item(id, "image-hash", vec![1, 2, 3, 4], Utc::now()))
+        .save(image_item(
+            id,
+            "image-hash",
+            test_canonical_image(1),
+            Utc::now(),
+        ))
         .await
         .expect("image save failed");
 
@@ -113,7 +122,7 @@ async fn saving_image_creates_owned_file_and_database_reference() {
             .read_image(&file_path,)
             .await
             .expect("image read failed",),
-        vec![1, 2, 3, 4],
+        test_canonical_image(1).png_bytes(),
     );
 }
 
@@ -131,7 +140,7 @@ async fn duplicate_image_reuses_existing_owned_file() {
         .save(image_item(
             first_id,
             "duplicate-image-hash",
-            vec![1, 2, 3, 4],
+            test_canonical_image(1),
             base_time,
         ))
         .await
@@ -141,7 +150,7 @@ async fn duplicate_image_reuses_existing_owned_file() {
         .save(image_item(
             second_id,
             "duplicate-image-hash",
-            vec![1, 2, 3, 4],
+            test_canonical_image(1),
             base_time + Duration::seconds(5),
         ))
         .await
@@ -182,7 +191,7 @@ async fn deleting_image_removes_database_row_and_file() {
         .save(image_item(
             id,
             "delete-image-hash",
-            vec![5, 6, 7],
+            test_canonical_image(5),
             Utc::now(),
         ))
         .await
@@ -222,7 +231,12 @@ async fn clear_history_removes_all_image_files() {
     let second_id = uuid::Uuid::new_v4();
 
     service
-        .save(image_item(first_id, "clear-image-a", vec![1], Utc::now()))
+        .save(image_item(
+            first_id,
+            "clear-image-a",
+            test_canonical_image(1),
+            Utc::now(),
+        ))
         .await
         .expect("first image save failed");
 
@@ -230,7 +244,7 @@ async fn clear_history_removes_all_image_files() {
         .save(image_item(
             second_id,
             "clear-image-b",
-            vec![2],
+            test_canonical_image(2),
             Utc::now() + Duration::seconds(1),
         ))
         .await
@@ -263,7 +277,12 @@ async fn history_limit_eviction_removes_old_image_file() {
     let base_time = Utc::now();
 
     service
-        .save(image_item(first_id, "eviction-image-a", vec![1], base_time))
+        .save(image_item(
+            first_id,
+            "eviction-image-a",
+            test_canonical_image(1),
+            base_time,
+        ))
         .await
         .expect("first image save failed");
 
@@ -271,7 +290,7 @@ async fn history_limit_eviction_removes_old_image_file() {
         .save(image_item(
             second_id,
             "eviction-image-b",
-            vec![2],
+            test_canonical_image(2),
             base_time + Duration::seconds(1),
         ))
         .await
@@ -320,7 +339,7 @@ async fn failed_database_insert_rolls_back_new_image_file() {
         .save(image_item(
             shared_id,
             "new-image-hash",
-            vec![9, 9, 9],
+            test_canonical_image(9),
             Utc::now() + Duration::seconds(1),
         ))
         .await;
@@ -381,7 +400,7 @@ async fn reconciliation_keeps_referenced_image_file() {
         .save(image_item(
             id,
             "referenced-image-hash",
-            vec![1, 2, 3],
+            test_canonical_image(1),
             Utc::now(),
         ))
         .await

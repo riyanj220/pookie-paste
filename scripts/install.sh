@@ -110,11 +110,13 @@ cleanup() {
 
 trap cleanup EXIT
 
-echo
-echo "  ┌─ Pookie Paste"
-echo "  │  Clipboard history for Linux"
-echo "  └─"
-echo
+if [[ "${POOKIE_INSTALLER_BOOTSTRAPPED:-0}" != "1" ]]; then
+    echo
+    echo "  ┌─ Pookie Paste"
+    echo "  │  Clipboard history for Linux"
+    echo "  └─"
+    echo
+fi
 
 if [[ "$(uname -s)" != "Linux" ]]; then
     echo "Pookie Paste currently supports Linux only." >&2

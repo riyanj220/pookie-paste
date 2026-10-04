@@ -5,6 +5,7 @@ use image::codecs::png::PngEncoder;
 use image::{
     DynamicImage, ExtendedColorType, ImageEncoder, ImageFormat, ImageReader, Limits, RgbaImage,
 };
+use sha2::{Digest, Sha256};
 
 ///
 /// Maximum width or height accepted from clipboard image input.
@@ -54,6 +55,107 @@ pub const SUPPORTED_IMAGE_MIME_TYPES: &[&str] = &[
     "image/x-ms-bmp",
     "image/gif",
 ];
+
+///
+/// Domain separator for version 1 of Pookie's RGBA pixel identity hashing.
+///
+pub const RGBA_V1_DOMAIN_SEPARATOR: &[u8] = b"pookie-image-rgba-v1\0";
+
+///
+/// Typed 32-byte cryptographic identity for image content.
+///
+/// Computed as:
+/// ```text
+/// SHA256(
+///     b"pookie-image-rgba-v1\0"
+///     || width.to_be_bytes()
+///     || height.to_be_bytes()
+///     || straight RGBA8 row-major bytes
+/// )
+/// ```
+///
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ImageIdentity([u8; 32]);
+
+impl ImageIdentity {
+    #[allow(dead_code)]
+    pub(crate) const fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+
+    pub fn into_bytes(self) -> [u8; 32] {
+        self.0
+    }
+
+    pub fn to_hex(&self) -> String {
+        hex::encode(self.0)
+    }
+
+    pub fn to_versioned_string(&self) -> String {
+        format!("rgba-v1:{}", self.to_hex())
+    }
+}
+
+///
+/// Canonical internal representation of a clipboard image.
+///
+/// Owns the canonical PNG-encoded bytes and the stable `ImageIdentity`
+/// computed from the decoded RGBA pixels before compression.
+///
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CanonicalImage {
+    png_bytes: Vec<u8>,
+    identity: ImageIdentity,
+}
+
+impl CanonicalImage {
+    pub(crate) fn new(png_bytes: Vec<u8>, identity: ImageIdentity) -> Self {
+        Self {
+            png_bytes,
+            identity,
+        }
+    }
+
+    pub fn png_bytes(&self) -> &[u8] {
+        &self.png_bytes
+    }
+
+    pub fn into_png_bytes(self) -> Vec<u8> {
+        self.png_bytes
+    }
+
+    pub fn identity(&self) -> ImageIdentity {
+        self.identity
+    }
+
+    pub fn len(&self) -> usize {
+        self.png_bytes.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.png_bytes.is_empty()
+    }
+}
+
+///
+/// Compute the stable `rgba-v1` identity from raw RGBA8 pixels and dimensions.
+///
+/// Streams straight RGBA8 row-major bytes directly into SHA-256 without
+/// unnecessary buffer copies.
+///
+pub fn compute_image_identity(width: u32, height: u32, rgba: &[u8]) -> ImageIdentity {
+    let mut hasher = Sha256::new();
+    hasher.update(RGBA_V1_DOMAIN_SEPARATOR);
+    hasher.update(width.to_be_bytes());
+    hasher.update(height.to_be_bytes());
+    hasher.update(rgba);
+
+    ImageIdentity(hasher.finalize().into())
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ImageCodecError {
@@ -182,7 +284,10 @@ impl std::error::Error for ImageCodecError {}
 /// PNG-encoded RGBA8 bytes
 /// ```
 ///
-pub fn canonicalize_image(encoded: &[u8], mime_type: &str) -> Result<Vec<u8>, ImageCodecError> {
+pub fn canonicalize_image(
+    encoded: &[u8],
+    mime_type: &str,
+) -> Result<CanonicalImage, ImageCodecError> {
     if encoded.is_empty() {
         return Err(ImageCodecError::EmptyInput);
     }
@@ -190,19 +295,81 @@ pub fn canonicalize_image(encoded: &[u8], mime_type: &str) -> Result<Vec<u8>, Im
     let format = image_format_for_mime(mime_type)
         .ok_or_else(|| ImageCodecError::UnsupportedMimeType(mime_type.to_string()))?;
 
-    let decoded = decode_encoded_image(encoded, format)?;
-
-    encode_canonical_png(decoded.to_rgba8())
+    canonicalize_image_format(encoded, format)
 }
 
 ///
-/// Convert raw RGBA8 pixels into Pookie's canonical PNG.
+/// Check if an `image::ImageFormat` is among Pookie's supported formats.
+///
+pub(crate) fn is_supported_image_format(format: ImageFormat) -> bool {
+    matches!(
+        format,
+        ImageFormat::Png
+            | ImageFormat::Jpeg
+            | ImageFormat::WebP
+            | ImageFormat::Bmp
+            | ImageFormat::Gif
+    )
+}
+
+///
+/// Convert an encoded image of known format into Pookie's canonical representation.
+///
+/// Canonical representation:
+///
+/// ```text
+/// PNG-encoded RGBA8 bytes + ImageIdentity
+/// ```
+///
+pub(crate) fn canonicalize_image_format(
+    encoded: &[u8],
+    format: ImageFormat,
+) -> Result<CanonicalImage, ImageCodecError> {
+    if encoded.is_empty() {
+        return Err(ImageCodecError::EmptyInput);
+    }
+
+    if !is_supported_image_format(format) {
+        return Err(ImageCodecError::UnsupportedMimeType(format!("{format:?}")));
+    }
+
+    let decoded = decode_encoded_image(encoded, format)?;
+
+    encode_canonical_png(decoded.into_rgba8())
+}
+
+///
+/// Detect the image format from raw bytes and convert into Pookie's
+/// canonical representation.
+///
+pub(crate) fn canonicalize_detected_image(
+    encoded: &[u8],
+) -> Result<CanonicalImage, ImageCodecError> {
+    if encoded.is_empty() {
+        return Err(ImageCodecError::EmptyInput);
+    }
+
+    let format = ImageReader::new(Cursor::new(encoded))
+        .with_guessed_format()
+        .map_err(|error| ImageCodecError::DecodeFailed(error.to_string()))?
+        .format()
+        .ok_or_else(|| ImageCodecError::UnsupportedMimeType("unknown/undetected".to_string()))?;
+
+    canonicalize_image_format(encoded, format)
+}
+
+///
+/// Convert raw RGBA8 pixels into Pookie's canonical PNG and ImageIdentity.
 ///
 /// This is primarily used by X11 because `arboard` returns
 /// decoded RGBA pixels rather than the original encoded
 /// clipboard payload.
 ///
-pub fn canonicalize_rgba(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>, ImageCodecError> {
+pub fn canonicalize_rgba(
+    width: u32,
+    height: u32,
+    rgba: &[u8],
+) -> Result<CanonicalImage, ImageCodecError> {
     validate_dimensions(width, height)?;
 
     let expected = u64::from(width)
@@ -224,16 +391,7 @@ pub fn canonicalize_rgba(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>
         });
     }
 
-    let image = RgbaImage::from_raw(width, height, rgba.to_vec()).ok_or(
-        ImageCodecError::InvalidRgbaLength {
-            width,
-            height,
-            expected,
-            actual: rgba.len(),
-        },
-    )?;
-
-    encode_canonical_png(image)
+    canonicalize_rgba_internal(width, height, rgba)
 }
 
 ///
@@ -257,7 +415,7 @@ pub fn decode_canonical_png_to_rgba(
 
     let decoded = decode_encoded_image(encoded, ImageFormat::Png)?;
 
-    let rgba = decoded.to_rgba8();
+    let rgba = decoded.into_rgba8();
 
     let width = rgba.width();
 
@@ -386,32 +544,70 @@ fn validate_dimensions(width: u32, height: u32) -> Result<(), ImageCodecError> {
     Ok(())
 }
 
-fn encode_canonical_png(rgba: RgbaImage) -> Result<Vec<u8>, ImageCodecError> {
+fn encode_canonical_png(rgba: RgbaImage) -> Result<CanonicalImage, ImageCodecError> {
     let width = rgba.width();
 
     let height = rgba.height();
 
+    canonicalize_rgba_internal(width, height, rgba.as_raw())
+}
+
+///
+/// Internal shared canonicalization kernel.
+///
+/// Executes SHA-256 `rgba-v1` identity hashing and Fast+Adaptive PNG
+/// encoding concurrently across scoped threads using `std::thread::scope`
+/// from the exact same immutable borrowed RGBA slice.
+///
+fn canonicalize_rgba_internal(
+    width: u32,
+    height: u32,
+    rgba: &[u8],
+) -> Result<CanonicalImage, ImageCodecError> {
     validate_dimensions(width, height)?;
 
-    let mut output = Vec::new();
+    std::thread::scope(|scope| {
+        let hash_handle = std::thread::Builder::new()
+            .name("pookie-img-hash".to_string())
+            .spawn_scoped(scope, || compute_image_identity(width, height, rgba))
+            .map_err(|error| {
+                ImageCodecError::EncodeFailed(format!(
+                    "failed spawning image identity worker thread: {error}"
+                ))
+            })?;
 
-    PngEncoder::new(&mut output)
-        .write_image(rgba.as_raw(), width, height, ExtendedColorType::Rgba8)
-        .map_err(|error| ImageCodecError::EncodeFailed(error.to_string()))?;
+        let mut output = Vec::new();
+        let encode_res = PngEncoder::new(&mut output)
+            .write_image(rgba, width, height, ExtendedColorType::Rgba8)
+            .map(|()| output);
 
-    Ok(output)
+        let identity_res = hash_handle.join();
+
+        let identity = identity_res.map_err(|_| {
+            ImageCodecError::EncodeFailed(
+                "image identity hashing worker thread panicked".to_string(),
+            )
+        })?;
+
+        let output =
+            encode_res.map_err(|error| ImageCodecError::EncodeFailed(error.to_string()))?;
+
+        Ok(CanonicalImage::new(output, identity))
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use std::io::Cursor;
 
-    use image::{DynamicImage, ImageFormat, ImageReader, Rgba, RgbaImage};
+    use image::{DynamicImage, ImageFormat, ImageReader, Rgb, RgbImage, Rgba, RgbaImage};
 
     use super::{
-        ImageCodecError, MAX_IMAGE_DIMENSION, MAX_IMAGE_PIXELS, canonicalize_image,
-        canonicalize_rgba, decode_canonical_png_to_rgba, is_supported_image_mime,
-        preferred_image_mime, validate_dimensions,
+        ImageCodecError, ImageIdentity, MAX_IMAGE_DIMENSION, MAX_IMAGE_PIXELS,
+        canonicalize_detected_image, canonicalize_image, canonicalize_image_format,
+        canonicalize_rgba, compute_image_identity, decode_canonical_png_to_rgba,
+        is_supported_image_format, is_supported_image_mime, preferred_image_mime,
+        validate_dimensions,
     };
 
     fn sample_image() -> DynamicImage {
@@ -480,9 +676,10 @@ mod tests {
         let canonical =
             canonicalize_image(&source, "image/png").expect("PNG canonicalization failed");
 
-        let decoded = ImageReader::with_format(Cursor::new(&canonical), ImageFormat::Png)
-            .decode()
-            .expect("canonical PNG failed to decode");
+        let decoded =
+            ImageReader::with_format(Cursor::new(canonical.png_bytes()), ImageFormat::Png)
+                .decode()
+                .expect("canonical PNG failed to decode");
 
         assert_eq!(decoded.width(), 4);
 
@@ -498,9 +695,10 @@ mod tests {
         let canonical =
             canonicalize_image(&source, "image/jpeg").expect("JPEG canonicalization failed");
 
-        let decoded = ImageReader::with_format(Cursor::new(&canonical), ImageFormat::Png)
-            .decode()
-            .expect("canonical JPEG-derived PNG failed to decode");
+        let decoded =
+            ImageReader::with_format(Cursor::new(canonical.png_bytes()), ImageFormat::Png)
+                .decode()
+                .expect("canonical JPEG-derived PNG failed to decode");
 
         assert_eq!(decoded.width(), 4);
 
@@ -514,9 +712,10 @@ mod tests {
         let canonical =
             canonicalize_image(&source, "image/webp").expect("WebP canonicalization failed");
 
-        let decoded = ImageReader::with_format(Cursor::new(&canonical), ImageFormat::Png)
-            .decode()
-            .expect("canonical WebP-derived PNG failed to decode");
+        let decoded =
+            ImageReader::with_format(Cursor::new(canonical.png_bytes()), ImageFormat::Png)
+                .decode()
+                .expect("canonical WebP-derived PNG failed to decode");
 
         assert_eq!(decoded.width(), 4);
 
@@ -530,9 +729,10 @@ mod tests {
         let canonical =
             canonicalize_image(&source, "image/bmp").expect("BMP canonicalization failed");
 
-        let decoded = ImageReader::with_format(Cursor::new(&canonical), ImageFormat::Png)
-            .decode()
-            .expect("canonical BMP-derived PNG failed to decode");
+        let decoded =
+            ImageReader::with_format(Cursor::new(canonical.png_bytes()), ImageFormat::Png)
+                .decode()
+                .expect("canonical BMP-derived PNG failed to decode");
 
         assert_eq!(decoded.width(), 4);
 
@@ -546,9 +746,10 @@ mod tests {
         let canonical =
             canonicalize_image(&source, "image/gif").expect("GIF canonicalization failed");
 
-        let decoded = ImageReader::with_format(Cursor::new(&canonical), ImageFormat::Png)
-            .decode()
-            .expect("canonical GIF-derived PNG failed to decode");
+        let decoded =
+            ImageReader::with_format(Cursor::new(canonical.png_bytes()), ImageFormat::Png)
+                .decode()
+                .expect("canonical GIF-derived PNG failed to decode");
 
         assert_eq!(decoded.width(), 4);
 
@@ -562,8 +763,8 @@ mod tests {
         let canonical = canonicalize_rgba(expected.width(), expected.height(), expected.as_raw())
             .expect("RGBA canonicalization failed");
 
-        let (width, height, actual) =
-            decode_canonical_png_to_rgba(&canonical).expect("canonical PNG decode failed");
+        let (width, height, actual) = decode_canonical_png_to_rgba(canonical.png_bytes())
+            .expect("canonical PNG decode failed");
 
         assert_eq!(width, expected.width(),);
 
@@ -595,6 +796,68 @@ mod tests {
             canonicalize_image(&bmp, "image/bmp").expect("BMP canonicalization failed");
 
         assert_eq!(canonical_png, canonical_bmp);
+        assert_eq!(canonical_png.identity(), canonical_bmp.identity());
+    }
+
+    #[test]
+    fn golden_rgba_v1_vector() {
+        let rgba = [
+            255, 0, 0, 255, // (0,0) Red
+            0, 255, 0, 255, // (1,0) Green
+            0, 0, 255, 255, // (0,1) Blue
+            255, 255, 0, 128, // (1,1) Semi-transparent Yellow
+        ];
+        let identity = compute_image_identity(2, 2, &rgba);
+        assert_eq!(
+            identity.to_hex(),
+            "434c6661a2c15303ccca6a7244c78b3e90b558b73da9f3fd22a2f0c1a864a8c4"
+        );
+        assert_eq!(
+            identity.to_versioned_string(),
+            "rgba-v1:434c6661a2c15303ccca6a7244c78b3e90b558b73da9f3fd22a2f0c1a864a8c4"
+        );
+    }
+
+    #[test]
+    fn same_rgba_and_dimensions_produce_same_identity() {
+        let rgba = [10, 20, 30, 255, 40, 50, 60, 255];
+        let id1 = compute_image_identity(2, 1, &rgba);
+        let id2 = compute_image_identity(2, 1, &rgba);
+        assert_eq!(id1, id2);
+    }
+
+    #[test]
+    fn one_pixel_difference_produces_different_identity() {
+        let rgba1 = [10, 20, 30, 255, 40, 50, 60, 255];
+        let rgba2 = [10, 20, 31, 255, 40, 50, 60, 255];
+        let id1 = compute_image_identity(2, 1, &rgba1);
+        let id2 = compute_image_identity(2, 1, &rgba2);
+        assert_ne!(id1, id2);
+    }
+
+    #[test]
+    fn dimension_difference_produces_different_identity() {
+        let rgba = [10, 20, 30, 255, 40, 50, 60, 255];
+        let id_2x1 = compute_image_identity(2, 1, &rgba);
+        let id_1x2 = compute_image_identity(1, 2, &rgba);
+        assert_ne!(id_2x1, id_1x2);
+    }
+
+    #[test]
+    fn same_pixel_content_through_different_canonicalization_inputs_produces_same_identity() {
+        let png = encode_test_image(ImageFormat::Png);
+        let bmp = encode_test_image(ImageFormat::Bmp);
+
+        let canonical_png =
+            canonicalize_image(&png, "image/png").expect("PNG canonicalization failed");
+        let canonical_bmp =
+            canonicalize_image(&bmp, "image/bmp").expect("BMP canonicalization failed");
+
+        assert_eq!(canonical_png.identity(), canonical_bmp.identity());
+        assert_eq!(
+            canonical_png.identity().to_versioned_string(),
+            canonical_bmp.identity().to_versioned_string()
+        );
     }
 
     #[test]
@@ -648,5 +911,171 @@ mod tests {
             preferred_image_mime(&offered,),
             Some("IMAGE/PNG; charset=binary"),
         );
+    }
+
+    #[test]
+    fn identifies_supported_image_formats() {
+        assert!(is_supported_image_format(ImageFormat::Png));
+        assert!(is_supported_image_format(ImageFormat::Jpeg));
+        assert!(is_supported_image_format(ImageFormat::WebP));
+        assert!(is_supported_image_format(ImageFormat::Bmp));
+        assert!(is_supported_image_format(ImageFormat::Gif));
+        assert!(!is_supported_image_format(ImageFormat::Tiff));
+    }
+
+    #[test]
+    fn canonicalizes_all_supported_formats_by_format_type() {
+        for format in [
+            ImageFormat::Png,
+            ImageFormat::Jpeg,
+            ImageFormat::WebP,
+            ImageFormat::Bmp,
+            ImageFormat::Gif,
+        ] {
+            let bytes = encode_test_image(format);
+            let canonical = canonicalize_image_format(&bytes, format)
+                .unwrap_or_else(|err| panic!("failed for format {format:?}: {err}"));
+            let (width, height, _) = decode_canonical_png_to_rgba(canonical.png_bytes()).unwrap();
+            assert_eq!(width, 4);
+            assert_eq!(height, 3);
+        }
+    }
+
+    #[test]
+    fn canonicalizes_detected_image_bytes() {
+        for format in [
+            ImageFormat::Png,
+            ImageFormat::Jpeg,
+            ImageFormat::WebP,
+            ImageFormat::Bmp,
+            ImageFormat::Gif,
+        ] {
+            let bytes = encode_test_image(format);
+            let canonical = canonicalize_detected_image(&bytes)
+                .unwrap_or_else(|err| panic!("detection failed for format {format:?}: {err}"));
+            let (width, height, _) = decode_canonical_png_to_rgba(canonical.png_bytes()).unwrap();
+            assert_eq!(width, 4);
+            assert_eq!(height, 3);
+        }
+    }
+
+    #[test]
+    fn canonicalize_detected_image_rejects_empty_and_garbage() {
+        assert_eq!(
+            canonicalize_detected_image(&[]),
+            Err(ImageCodecError::EmptyInput)
+        );
+        let garbage = b"not an image at all";
+        assert!(canonicalize_detected_image(garbage).is_err());
+    }
+
+    #[test]
+    fn image_identity_methods_and_formatting() {
+        let raw = [
+            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e,
+            0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c,
+            0x1d, 0x1e, 0x1f, 0x20,
+        ];
+        let identity = ImageIdentity::from_bytes(raw);
+        assert_eq!(identity.as_bytes(), &raw);
+        assert_eq!(identity.into_bytes(), raw);
+        assert_eq!(
+            identity.to_hex(),
+            "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
+        );
+        assert_eq!(
+            identity.to_versioned_string(),
+            "rgba-v1:0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
+        );
+    }
+
+    #[test]
+    fn parallel_canonicalization_produces_exact_golden_identity_and_reconstructs_pixels() {
+        let rgba = [
+            255, 0, 0, 255, // (0,0) Red
+            0, 255, 0, 255, // (1,0) Green
+            0, 0, 255, 255, // (0,1) Blue
+            255, 255, 0, 128, // (1,1) Semi-transparent Yellow
+        ];
+        // 1. Golden identity matches sequential computation
+        let golden_id = compute_image_identity(2, 2, &rgba);
+        assert_eq!(
+            golden_id.to_hex(),
+            "434c6661a2c15303ccca6a7244c78b3e90b558b73da9f3fd22a2f0c1a864a8c4"
+        );
+
+        // 2. Parallel canonicalization produces identical identity
+        let canonical = canonicalize_rgba(2, 2, &rgba).expect("canonicalize_rgba failed");
+        assert_eq!(canonical.identity(), golden_id);
+        assert_eq!(
+            canonical.identity().to_hex(),
+            "434c6661a2c15303ccca6a7244c78b3e90b558b73da9f3fd22a2f0c1a864a8c4"
+        );
+
+        // 3. Resulting PNG decodes to the exact original RGBA pixels
+        let (width, height, decoded_rgba) =
+            decode_canonical_png_to_rgba(canonical.png_bytes()).expect("decode PNG failed");
+        assert_eq!(width, 2);
+        assert_eq!(height, 2);
+        assert_eq!(decoded_rgba.as_slice(), &rgba);
+    }
+
+    #[test]
+    fn deterministic_png_repeated_canonicalization_produces_identical_bytes() {
+        let rgba = [
+            12, 34, 56, 255, 78, 90, 123, 200, 210, 220, 230, 180, 11, 22, 33, 255,
+        ];
+
+        let first = canonicalize_rgba(2, 2, &rgba).expect("first canonicalization failed");
+        let second = canonicalize_rgba(2, 2, &rgba).expect("second canonicalization failed");
+
+        assert_eq!(first.identity(), second.identity());
+        assert_eq!(first.png_bytes(), second.png_bytes());
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn into_rgba8_preserves_exact_rgba_pixels() {
+        let original_rgba = RgbaImage::from_fn(3, 2, |x, y| {
+            Rgba([
+                (x * 50) as u8,
+                (y * 80) as u8,
+                ((x + y) * 30) as u8,
+                255 - (x as u8 * 40),
+            ])
+        });
+        let expected_raw = original_rgba.as_raw().clone();
+
+        let dynamic_rgba = DynamicImage::ImageRgba8(original_rgba);
+        let converted = dynamic_rgba.into_rgba8();
+
+        assert_eq!(converted.width(), 3);
+        assert_eq!(converted.height(), 2);
+        assert_eq!(converted.as_raw(), &expected_raw);
+    }
+
+    #[test]
+    fn into_rgba8_converts_rgb_to_exact_rgba_pixels() {
+        let original_rgb = RgbImage::from_fn(3, 2, |x, y| {
+            Rgb([(x * 70) as u8, (y * 90) as u8, ((x + y) * 40) as u8])
+        });
+
+        let dynamic_rgb = DynamicImage::ImageRgb8(original_rgb.clone());
+        let converted = dynamic_rgb.into_rgba8();
+
+        assert_eq!(converted.width(), 3);
+        assert_eq!(converted.height(), 2);
+
+        for y in 0..2 {
+            for x in 0..3 {
+                let rgb_pixel = original_rgb.get_pixel(x, y);
+                let rgba_pixel = converted.get_pixel(x, y);
+                assert_eq!(
+                    rgba_pixel,
+                    &Rgba([rgb_pixel[0], rgb_pixel[1], rgb_pixel[2], 255]),
+                    "pixel at ({x}, {y}) mismatch after into_rgba8 conversion"
+                );
+            }
+        }
     }
 }

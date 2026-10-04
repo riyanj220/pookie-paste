@@ -1,8 +1,16 @@
+use crate::image_codec::CanonicalImage;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClipboardContent {
     Text(String),
 
-    Image(Vec<u8>),
+    Image(CanonicalImage),
+}
+
+impl From<CanonicalImage> for ClipboardContent {
+    fn from(value: CanonicalImage) -> Self {
+        Self::Image(value)
+    }
 }
 
 impl From<String> for ClipboardContent {

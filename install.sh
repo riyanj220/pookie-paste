@@ -188,9 +188,22 @@ mkdir -p "$SOURCE_DIR"
 
 SOURCE_ARCHIVE_URL="${POOKIE_GITHUB_BASE_URL}/archive/refs/tags/${VERSION}.tar.gz"
 
+echo
+echo "  ┌─ Pookie Paste"
+echo "  │  Clipboard history for Linux"
+echo "  └─"
+echo
+
+printf 'Downloading %s...\n' "$VERSION"
+
+CURL_PROGRESS_ARGS=()
+if [[ ! -t 1 || ! -t 2 ]]; then
+    CURL_PROGRESS_ARGS=(--silent)
+fi
+
 curl \
     --fail \
-    --silent \
+    "${CURL_PROGRESS_ARGS[@]}" \
     --location \
     --retry 3 \
     --retry-delay 2 \
@@ -223,9 +236,9 @@ fi
 chmod +x "$INNER_INSTALLER"
 
 if [[ "$FROM_SOURCE" == true ]]; then
-    "$INNER_INSTALLER" \
-        --from-source
+    POOKIE_INSTALLER_BOOTSTRAPPED=1 \
+        "$INNER_INSTALLER" --from-source
 else
-    "$INNER_INSTALLER" \
-        --version "$VERSION"
+    POOKIE_INSTALLER_BOOTSTRAPPED=1 \
+        "$INNER_INSTALLER" --version "$VERSION"
 fi

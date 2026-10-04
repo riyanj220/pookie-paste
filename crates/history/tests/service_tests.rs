@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use chrono::Utc;
-use history::{ClipboardHistoryService, HistoryConfig};
-use pookie_clipboard::ClipboardContent;
+use history::{ClipboardHistoryService, HistoryConfig, HistorySaveOutcome};
+use pookie_clipboard::{ClipboardContent, canonicalize_rgba};
 use pookie_core::ClipboardItem;
 use storage::{Database, StorageRepository, StoredClipboardItem};
 
@@ -842,11 +842,17 @@ async fn preserves_pinned_state_on_duplicate_text_save() {
         created_at: Utc::now() + chrono::Duration::seconds(5),
     };
 
-    service.save(item_b).await.expect("save B failed");
+    let outcome = service.save(item_b).await.expect("save B failed");
+    assert_eq!(
+        outcome,
+        HistorySaveOutcome::Promoted {
+            id: id_a.to_string()
+        }
+    );
 
     let items = service.get_all().await.expect("get_all failed");
     assert_eq!(items.len(), 1);
-    assert_eq!(items[0].id, id_b.to_string());
+    assert_eq!(items[0].id, id_a.to_string());
     assert_eq!(items[0].pinned_at, original_pinned_at);
 }
 
@@ -873,11 +879,11 @@ async fn preserves_pinned_state_on_duplicate_image_save() {
     let service = ClipboardHistoryService::new(repository, HistoryConfig { max_items: 30 })
         .with_image_store(image_store);
 
-    let png_bytes = vec![137, 80, 78, 71, 13, 10, 26, 10]; // PNG header bytes
+    let canonical = canonicalize_rgba(1, 1, &[255, 0, 0, 255]).expect("canonical image failed");
     let id_a = uuid::Uuid::new_v4();
     let item_a = ClipboardItem {
         id: id_a,
-        content: ClipboardContent::Image(png_bytes.clone()),
+        content: ClipboardContent::Image(canonical.clone()),
         hash: "same-image-hash".to_string(),
         created_at: Utc::now(),
     };
@@ -893,7 +899,7 @@ async fn preserves_pinned_state_on_duplicate_image_save() {
     let id_b = uuid::Uuid::new_v4();
     let item_b = ClipboardItem {
         id: id_b,
-        content: ClipboardContent::Image(png_bytes),
+        content: ClipboardContent::Image(canonical),
         hash: "same-image-hash".to_string(),
         created_at: Utc::now() + chrono::Duration::seconds(5),
     };
@@ -1016,4 +1022,270 @@ async fn pin_persists_after_service_restart_simulation() {
         assert_eq!(items[0].id, item_id);
         assert!(items[0].pinned_at.is_some());
     }
+}
+
+#[tokio::test]
+async fn duplicate_text_promotes_existing_row_with_stable_id() {
+    let database = Database::new("sqlite::memory:")
+        .await
+        .expect("database initialization failed");
+    let repository = StorageRepository::new(&database);
+    let service = ClipboardHistoryService::new(repository, HistoryConfig { max_items: 30 });
+
+    let id_a = uuid::Uuid::new_v4();
+    let time_a = Utc::now() - chrono::Duration::seconds(10);
+    let item_a = ClipboardItem {
+        id: id_a,
+        content: ClipboardContent::Text("Stable ID text".to_string()),
+        hash: "hash-stable".to_string(),
+        created_at: time_a,
+    };
+
+    let outcome_a = service.save(item_a).await.expect("save A failed");
+    assert_eq!(
+        outcome_a,
+        HistorySaveOutcome::Inserted {
+            id: id_a.to_string(),
+        }
+    );
+
+    // Recopy same text with different candidate ID and newer timestamp
+    let id_b = uuid::Uuid::new_v4();
+    let time_b = Utc::now();
+    let item_b = ClipboardItem {
+        id: id_b,
+        content: ClipboardContent::Text("Stable ID text".to_string()),
+        hash: "hash-stable".to_string(),
+        created_at: time_b,
+    };
+
+    let outcome_b = service.save(item_b).await.expect("save B failed");
+    assert_eq!(
+        outcome_b,
+        HistorySaveOutcome::Promoted {
+            id: id_a.to_string(),
+        }
+    );
+
+    let items = service.get_all().await.expect("get_all failed");
+    assert_eq!(items.len(), 1, "row count must remain 1");
+    assert_eq!(items[0].id, id_a.to_string(), "original ID must survive");
+    assert_eq!(
+        items[0].created_at,
+        time_b.to_rfc3339(),
+        "created_at must be updated to newer timestamp"
+    );
+}
+
+#[tokio::test]
+async fn duplicate_unpinned_text_moves_to_top_of_unpinned() {
+    let database = Database::new("sqlite::memory:")
+        .await
+        .expect("database initialization failed");
+    let repository = StorageRepository::new(&database);
+    let service = ClipboardHistoryService::new(repository, HistoryConfig { max_items: 30 });
+
+    let id_first = uuid::Uuid::new_v4();
+    let base_time = Utc::now() - chrono::Duration::seconds(20);
+    service
+        .save(ClipboardItem {
+            id: id_first,
+            content: ClipboardContent::Text("first text".to_string()),
+            hash: "hash-first".to_string(),
+            created_at: base_time,
+        })
+        .await
+        .expect("save first");
+
+    let id_second = uuid::Uuid::new_v4();
+    service
+        .save(ClipboardItem {
+            id: id_second,
+            content: ClipboardContent::Text("second text".to_string()),
+            hash: "hash-second".to_string(),
+            created_at: base_time + chrono::Duration::seconds(5),
+        })
+        .await
+        .expect("save second");
+
+    // Before recopy: order is [second, first]
+    let items_before = service.get_all().await.unwrap();
+    assert_eq!(items_before[0].id, id_second.to_string());
+    assert_eq!(items_before[1].id, id_first.to_string());
+
+    // Recopy first text
+    let candidate_id = uuid::Uuid::new_v4();
+    let recopy_outcome = service
+        .save(ClipboardItem {
+            id: candidate_id,
+            content: ClipboardContent::Text("first text".to_string()),
+            hash: "hash-first".to_string(),
+            created_at: Utc::now(),
+        })
+        .await
+        .expect("recopy first");
+
+    assert_eq!(
+        recopy_outcome,
+        HistorySaveOutcome::Promoted {
+            id: id_first.to_string(),
+        }
+    );
+
+    // After recopy: order is now [first, second], and first retains its original ID
+    let items_after = service.get_all().await.unwrap();
+    assert_eq!(items_after.len(), 2);
+    assert_eq!(items_after[0].id, id_first.to_string());
+    assert_eq!(items_after[1].id, id_second.to_string());
+}
+
+#[tokio::test]
+async fn duplicate_pinned_text_preserves_pinned_at_and_does_not_disturb_pinned_order() {
+    let database = Database::new("sqlite::memory:")
+        .await
+        .expect("database initialization failed");
+    let repository = StorageRepository::new(&database);
+    let service = ClipboardHistoryService::new(repository, HistoryConfig { max_items: 30 });
+
+    let id_a = uuid::Uuid::new_v4();
+    let id_a_str = id_a.to_string();
+    service
+        .save(ClipboardItem {
+            id: id_a,
+            content: ClipboardContent::Text("Pinned item A".to_string()),
+            hash: "hash-pinned-a".to_string(),
+            created_at: Utc::now() - chrono::Duration::seconds(30),
+        })
+        .await
+        .expect("save A");
+    service.pin(&id_a_str).await.expect("pin A");
+
+    let item_a_pinned = service.get_by_id(&id_a_str).await.unwrap().unwrap();
+    let original_pinned_at_a = item_a_pinned.pinned_at.expect("A should be pinned");
+
+    // Give a short delay to ensure distinctly newer pinned timestamp for B
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let id_b = uuid::Uuid::new_v4();
+    let id_b_str = id_b.to_string();
+    service
+        .save(ClipboardItem {
+            id: id_b,
+            content: ClipboardContent::Text("Pinned item B".to_string()),
+            hash: "hash-pinned-b".to_string(),
+            created_at: Utc::now() - chrono::Duration::seconds(20),
+        })
+        .await
+        .expect("save B");
+    service.pin(&id_b_str).await.expect("pin B");
+
+    // Add unpinned item C
+    let id_c = uuid::Uuid::new_v4();
+    service
+        .save(ClipboardItem {
+            id: id_c,
+            content: ClipboardContent::Text("Unpinned item C".to_string()),
+            hash: "hash-unpinned-c".to_string(),
+            created_at: Utc::now() - chrono::Duration::seconds(10),
+        })
+        .await
+        .expect("save C");
+
+    // Initial order: [B, A, C] because B was pinned more recently than A
+    let initial_items = service.get_all().await.unwrap();
+    assert_eq!(initial_items.len(), 3);
+    assert_eq!(initial_items[0].id, id_b_str);
+    assert_eq!(initial_items[1].id, id_a_str);
+    assert_eq!(initial_items[2].id, id_c.to_string());
+
+    // Now recopy item A (which was pinned earlier)
+    let candidate_id = uuid::Uuid::new_v4();
+    let outcome = service
+        .save(ClipboardItem {
+            id: candidate_id,
+            content: ClipboardContent::Text("Pinned item A".to_string()),
+            hash: "hash-pinned-a".to_string(),
+            created_at: Utc::now(),
+        })
+        .await
+        .expect("recopy A");
+
+    assert_eq!(
+        outcome,
+        HistorySaveOutcome::Promoted {
+            id: id_a_str.clone(),
+        }
+    );
+
+    // Verify order is STILL [B, A, C]: B's position before A must not be disturbed!
+    let items_after = service.get_all().await.unwrap();
+    assert_eq!(items_after.len(), 3);
+    assert_eq!(
+        items_after[0].id, id_b_str,
+        "B must remain first pinned item"
+    );
+    assert_eq!(
+        items_after[1].id, id_a_str,
+        "A must remain second pinned item"
+    );
+    assert_eq!(items_after[2].id, id_c.to_string(), "C must remain third");
+
+    // A's pinned_at must remain completely unchanged
+    assert_eq!(
+        items_after[1].pinned_at,
+        Some(original_pinned_at_a),
+        "A's pinned_at must not be modified or reset"
+    );
+}
+
+#[tokio::test]
+async fn duplicate_text_falls_back_to_inserted_if_row_deleted_before_update() {
+    let database = Database::new("sqlite::memory:")
+        .await
+        .expect("database initialization failed");
+    let repository = StorageRepository::new(&database);
+    let service = ClipboardHistoryService::new(repository, HistoryConfig { max_items: 30 });
+
+    let id_a = uuid::Uuid::new_v4();
+    let item_a = ClipboardItem {
+        id: id_a,
+        content: ClipboardContent::Text("Concurrent text".to_string()),
+        hash: "hash-concurrent".to_string(),
+        created_at: Utc::now() - chrono::Duration::seconds(10),
+    };
+    service.save(item_a).await.expect("save A failed");
+
+    // Install a BEFORE UPDATE trigger that deletes the existing row before the update can apply.
+    // As a result, update_created_at affects 0 rows and returns false.
+    sqlx::query(
+        "CREATE TRIGGER delete_on_update
+         BEFORE UPDATE ON clipboard_items
+         BEGIN
+             DELETE FROM clipboard_items WHERE id = OLD.id;
+         END;",
+    )
+    .execute(database.pool())
+    .await
+    .expect("failed creating trigger");
+
+    let id_b = uuid::Uuid::new_v4();
+    let item_b = ClipboardItem {
+        id: id_b,
+        content: ClipboardContent::Text("Concurrent text".to_string()),
+        hash: "hash-concurrent".to_string(),
+        created_at: Utc::now(),
+    };
+
+    // Promotion update affects 0 rows, so the service falls back to candidate insertion.
+    let outcome = service.save(item_b).await.expect("save B failed");
+    assert_eq!(
+        outcome,
+        HistorySaveOutcome::Inserted {
+            id: id_b.to_string(),
+        }
+    );
+
+    let items = service.get_all().await.expect("get_all failed");
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].id, id_b.to_string());
 }

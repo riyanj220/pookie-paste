@@ -9,11 +9,12 @@ use std::sync::Arc;
 
 use tokio::sync::Mutex;
 
-use tracing::{info, warn};
+use tracing::{debug, error, info, warn};
 
-use pookie_core::{ClipboardEvent, ClipboardProcessor};
+use pookie_clipboard::ClipboardContent;
+use pookie_core::{ClipboardEvent, ClipboardPolicy, ClipboardProcessor};
 
-use history::{ClipboardHistoryService, HistoryConfig};
+use history::{ClipboardHistoryService, HistoryConfig, HistorySaveOutcome};
 
 use storage::{Database, ImageStore};
 
@@ -107,7 +108,7 @@ async fn main() -> anyhow::Result<()> {
 
     info!("clipboard backend: {}", backend.name());
 
-    let mut clipboard_events = clipboard_watcher::start(&backend)?;
+    let (_clipboard_watcher_session, mut clipboard_events) = clipboard_watcher::start(&backend)?;
 
     let clipboard_service = Arc::new(Mutex::new(ClipboardService::new(
         backend,
@@ -173,6 +174,9 @@ async fn main() -> anyhow::Result<()> {
 
     info!("Pookie daemon running");
 
+    let migration_history = Arc::clone(&history_service);
+    let migration_task = tokio::spawn(run_background_migration(migration_history));
+
     loop {
         tokio::select! {
             event =
@@ -185,6 +189,17 @@ async fn main() -> anyhow::Result<()> {
                             event.id
                         );
 
+                        let (kind, byte_len) = match &event.content {
+                            ClipboardContent::Text(text) => ("Text", text.len()),
+                            ClipboardContent::Image(image) => ("Image", image.len()),
+                        };
+
+                        debug!(
+                            kind,
+                            bytes = byte_len,
+                            "clipboard event details"
+                        );
+
                         /*
                          * Both text and image clipboard
                          * writes performed by Pookie produce
@@ -194,45 +209,92 @@ async fn main() -> anyhow::Result<()> {
                          * content fingerprint before sending
                          * the event through processing/history.
                          */
-                        if clipboard_state
-                            .is_self_write(
-                                &event.content,
-                            )
-                            {
-                                info!(
-                                    "ignoring self-generated clipboard event"
+                        let is_self = clipboard_state.is_self_write(&event.content);
+                        debug!(
+                            matched = is_self,
+                            "clipboard event self-write check"
+                        );
+
+                        if is_self {
+                            info!(
+                                "ignoring self-generated clipboard event"
+                            );
+
+                            continue;
+                        }
+
+                        let core_event = ClipboardEvent {
+                            content: event.content,
+                            created_at: event.created_at,
+                        };
+
+                        match processor.process(core_event) {
+                            Some(item) => {
+                                debug!(
+                                    kind,
+                                    bytes = byte_len,
+                                    "clipboard processor accepted"
                                 );
 
-                                continue;
+                                match history_service.save(item).await {
+                                    Ok(HistorySaveOutcome::Inserted { id }) => {
+                                        info!(
+                                            id = %id,
+                                            kind,
+                                            "history item inserted"
+                                        );
+                                    }
+
+                                    Ok(HistorySaveOutcome::Promoted { id }) => {
+                                        info!(
+                                            id = %id,
+                                            kind,
+                                            "existing history item promoted"
+                                        );
+                                    }
+
+                                    Err(error) => {
+                                        error!(
+                                            error = %error,
+                                            kind,
+                                            "failed saving clipboard item to history"
+                                        );
+                                        return Err(error.into());
+                                    }
+                                }
                             }
 
-                            let core_event =
-                            ClipboardEvent {
-                                content:
-                                event.content,
+                            None => {
+                                let reason = if byte_len == 0 {
+                                    "content is empty"
+                                } else {
+                                    match kind {
+                                        "Text" => {
+                                            if byte_len > ClipboardPolicy::MAX_TEXT_SIZE {
+                                                "text exceeds maximum size"
+                                            } else {
+                                                "policy rejected text"
+                                            }
+                                        }
+                                        "Image" => {
+                                            if byte_len > ClipboardPolicy::MAX_IMAGE_SIZE {
+                                                "image exceeds maximum size"
+                                            } else {
+                                                "policy rejected image"
+                                            }
+                                        }
+                                        _ => "policy rejected content",
+                                    }
+                                };
 
-                                created_at:
-                                event.created_at,
-                            };
-
-                            if let Some(item) =
-                                processor.process(
-                                    core_event,
-                                )
-                                {
-                                    info!(
-                                        "Clipboard item created: {:?}",
-                                        item.id
-                                    );
-
-                                    history_service
-                                    .save(item)
-                                    .await?;
-
-                                    info!(
-                                        "Clipboard item saved"
-                                    );
-                                }
+                                debug!(
+                                    kind,
+                                    bytes = byte_len,
+                                    reason,
+                                    "clipboard processor rejected"
+                                );
+                            }
+                        }
                     }
 
                     None => {
@@ -348,9 +410,40 @@ async fn main() -> anyhow::Result<()> {
 
     info!("shutting down Pookie services");
 
+    migration_task.abort();
+    let _ = migration_task.await;
+
     activation_service.shutdown();
+    drop(_clipboard_watcher_session);
 
     info!("Pookie daemon stopped");
 
     Ok(())
+}
+
+async fn run_background_migration(history_service: Arc<ClipboardHistoryService>) {
+    tracing::debug!("legacy image identity migration started");
+
+    match history_service.migrate_legacy_image_identities().await {
+        Ok(summary) => {
+            if summary.candidates_found > 0 {
+                info!(
+                    candidates = summary.candidates_found,
+                    updated = summary.updated_in_place,
+                    consolidated = summary.consolidated,
+                    skipped_corrupt = summary.skipped_corrupt_or_missing,
+                    skipped_stale = summary.skipped_stale,
+                    "legacy image identity migration completed"
+                );
+            } else {
+                debug!("legacy image identity migration completed; no legacy candidates found");
+            }
+        }
+        Err(err) => {
+            warn!(
+                error = %err,
+                "legacy image identity migration encountered an error; daemon continuing normally"
+            );
+        }
+    }
 }

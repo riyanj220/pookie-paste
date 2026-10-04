@@ -76,6 +76,33 @@ pub(crate) fn preview_text(text: &str) -> String {
     preview
 }
 
+pub(crate) fn resolve_selection_after_update(
+    previous_items: Option<&[ipc::HistoryItem]>,
+    previous_selected_index: Option<usize>,
+    new_items: &[ipc::HistoryItem],
+) -> Option<usize> {
+    if new_items.is_empty() {
+        return None;
+    }
+
+    let Some(prev_idx) = previous_selected_index else {
+        return Some(0);
+    };
+
+    let prev_selected_id = previous_items
+        .and_then(|items| items.get(prev_idx))
+        .map(|it| &it.id);
+
+    if let Some(id) = prev_selected_id
+        && let Some(new_idx) = new_items.iter().position(|it| &it.id == id)
+    {
+        return Some(new_idx);
+    }
+
+    // Selected item was removed; select the nearest valid index deterministically
+    Some(prev_idx.min(new_items.len() - 1))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -154,5 +181,55 @@ mod tests {
         };
 
         assert_eq!(history_row_kind(&item), HistoryRowKind::Invalid);
+    }
+
+    #[test]
+    fn selection_preserved_by_stable_id_on_item_prepend() {
+        let a = text_item("item A");
+        let mut b = text_item("item B");
+        b.id = "id-b".to_string();
+
+        let initial = vec![a.clone(), b.clone()];
+        // Currently selecting B (index 1)
+        let selected = Some(1);
+
+        let mut c = text_item("item C (newest)");
+        c.id = "id-c".to_string();
+        let updated = vec![c, a, b];
+
+        // Item B is now at index 2
+        let new_selection = resolve_selection_after_update(Some(&initial), selected, &updated);
+        assert_eq!(new_selection, Some(2));
+    }
+
+    #[test]
+    fn selection_adjusted_on_item_deletion() {
+        let a = text_item("item A");
+        let mut b = text_item("item B");
+        b.id = "id-b".to_string();
+        let mut c = text_item("item C");
+        c.id = "id-c".to_string();
+
+        let initial = vec![a.clone(), b.clone(), c.clone()];
+        // Currently selecting B (index 1)
+        let selected = Some(1);
+
+        // B is deleted, leaving A and C
+        let updated = vec![a, c];
+
+        // Should clamp to nearest valid index (index 1, which is now C)
+        let new_selection = resolve_selection_after_update(Some(&initial), selected, &updated);
+        assert_eq!(new_selection, Some(1));
+    }
+
+    #[test]
+    fn selection_cleared_on_empty_history() {
+        let a = text_item("item A");
+        let initial = vec![a];
+        let selected = Some(0);
+
+        let updated = Vec::new();
+        let new_selection = resolve_selection_after_update(Some(&initial), selected, &updated);
+        assert_eq!(new_selection, None);
     }
 }

@@ -7,7 +7,7 @@ use chrono::{Duration, Utc};
 
 use history::{ClipboardHistoryService, HistoryConfig};
 
-use pookie_clipboard::{ClipboardContent, canonicalize_rgba};
+use pookie_clipboard::{CanonicalImage, ClipboardContent, canonicalize_rgba};
 
 use pookie_core::ClipboardItem;
 
@@ -85,7 +85,7 @@ async fn create_file_service(
         .with_image_store(ImageStore::new(data_directory))
 }
 
-fn canonical_image(variant: u8) -> Vec<u8> {
+fn canonical_image(variant: u8) -> CanonicalImage {
     let pixels = match variant {
         1 => {
             vec![
@@ -122,7 +122,11 @@ fn text_item(text: &str, hash: &str, created_at: chrono::DateTime<Utc>) -> Clipb
     }
 }
 
-fn image_item(image: Vec<u8>, hash: &str, created_at: chrono::DateTime<Utc>) -> ClipboardItem {
+fn image_item(
+    image: CanonicalImage,
+    hash: &str,
+    created_at: chrono::DateTime<Utc>,
+) -> ClipboardItem {
     ClipboardItem {
         id: uuid::Uuid::new_v4(),
 
@@ -533,7 +537,7 @@ async fn mixed_history_survives_database_restart_with_image_reference_intact() {
         .expect("persisted image read failed")
         .expect("image store unexpectedly unavailable");
 
-    assert_eq!(restored_bytes, canonical,);
+    assert_eq!(restored_bytes, canonical.png_bytes(),);
 
     let removed = restarted
         .reconcile_image_store()
@@ -605,7 +609,7 @@ async fn startup_reconciliation_removes_orphan_but_keeps_referenced_image() {
     let orphan_id = uuid::Uuid::new_v4();
 
     let orphan_path = image_store
-        .write_image(&orphan_id.to_string(), &canonical_image(2))
+        .write_image(&orphan_id.to_string(), canonical_image(2).png_bytes())
         .await
         .expect("orphan image write failed");
 

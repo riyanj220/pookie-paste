@@ -84,7 +84,7 @@ impl ClipboardState {
 
 #[cfg(test)]
 mod tests {
-    use pookie_clipboard::ClipboardContent;
+    use pookie_clipboard::{ClipboardContent, canonicalize_rgba};
 
     use super::ClipboardState;
 
@@ -105,7 +105,8 @@ mod tests {
     fn matching_image_write_is_suppressed_once() {
         let state = ClipboardState::default();
 
-        let content = ClipboardContent::Image(vec![1, 2, 3, 4]);
+        let image = canonicalize_rgba(1, 1, &[1, 2, 3, 255]).unwrap();
+        let content = ClipboardContent::Image(image);
 
         state.mark_written(&content);
 
@@ -127,9 +128,12 @@ mod tests {
     fn different_image_is_not_suppressed() {
         let state = ClipboardState::default();
 
-        state.mark_written(&ClipboardContent::Image(vec![1, 2, 3]));
+        let first = ClipboardContent::Image(canonicalize_rgba(1, 1, &[1, 2, 3, 255]).unwrap());
+        let second = ClipboardContent::Image(canonicalize_rgba(1, 1, &[4, 5, 6, 255]).unwrap());
 
-        assert!(!state.is_self_write(&ClipboardContent::Image(vec![4, 5, 6],),));
+        state.mark_written(&first);
+
+        assert!(!state.is_self_write(&second,));
     }
 
     #[test]
@@ -151,7 +155,7 @@ mod tests {
 
         let text = ClipboardContent::Text("abc".to_string());
 
-        let image = ClipboardContent::Image(b"abc".to_vec());
+        let image = ClipboardContent::Image(canonicalize_rgba(1, 1, &[1, 2, 3, 255]).unwrap());
 
         state.mark_written(&text);
 
@@ -166,7 +170,7 @@ mod tests {
 
         let first = ClipboardContent::Text("first".to_string());
 
-        let second = ClipboardContent::Image(vec![1, 2, 3]);
+        let second = ClipboardContent::Image(canonicalize_rgba(1, 1, &[2, 3, 4, 255]).unwrap());
 
         state.mark_written(&first);
 

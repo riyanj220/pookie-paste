@@ -10,7 +10,7 @@ For comprehensive implementation details, see the modular guides in [Platform Do
 
 | Platform / Desktop | Session Type | Clipboard Support | Focus Restoration | Paste Injection | Shortcut Mechanism | Support Status |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **X11** | X11 | `X11Clipboard` (polling watcher) | `X11FocusBackend` (`_NET_ACTIVE_WINDOW`) | `X11PasteBackend` (XTest fake input) | `Native` (passive root-window key grabs) | **Verified** |
+| **X11** | X11 | `X11Clipboard` (event-driven watcher) | `X11FocusBackend` (`_NET_ACTIVE_WINDOW`) | `X11PasteBackend` (XTest fake input) | `Native` (passive root-window key grabs) | **Verified** |
 | **KDE Plasma** | Wayland | `WaylandClipboard` (`ext`/`wlr` data-control) | `KdeFocusBackend` (KWin D-Bus helper) | `PortalEisPasteBackend` (RemoteDesktop + EIS) | `Portal` (XDG GlobalShortcuts D-Bus) | **Verified** (tested on Plasma 6) |
 | **Sway** | Wayland | `WaylandClipboard` (`ext`/`wlr` data-control) | `SwayFocusBackend` (`$SWAYSOCK` IPC) | `WlrootsPasteBackend` (`zwp_virtual_keyboard_v1`) | `CompositorManaged` (Sway `bindsym` + IPC inspection) | **Verified** (tested on Sway 1.9) |
 | **Hyprland** | Wayland | `WaylandClipboard` (`ext`/`wlr` data-control) | `HyprlandFocusBackend` (Hyprland IPC) | `WlrootsPasteBackend` (`zwp_virtual_keyboard_v1`) | `CompositorManaged` (Hyprland `bind` + IPC inspection) | **Verified** (tested on Hyprland 0.56+) |
@@ -22,7 +22,7 @@ For comprehensive implementation details, see the modular guides in [Platform Do
 
 ### 1. X11
 * **Architecture**: Direct display server interaction using `x11rb`.
-* **Clipboard**: Continuous monitoring via periodic polling (`POLL_INTERVAL = 500ms`) and `arboard` read/write access.
+* **Clipboard**: Continuous monitoring via XFixes event-driven selection notifications (with lightweight owner/`TIMESTAMP` generation fallback polling) and `arboard` read/write access.
 * **Focus & Paste**: Window capture and restoration via EWMH `_NET_ACTIVE_WINDOW` root-window messages; synthetic Ctrl+V keystroke injection via the `XTest` extension.
 * **Popup Lifecycle**: Focus loss is treated as a dismissal signal (`FocusLossDismissalPolicy::Dismiss`); when focus transfers away from the popup, the popup closes.
 * **Shortcuts**: Pookie directly owns the global keybinding using transactional passive root-window grabs (`XGrabKey`) covering all `NumLock` and `CapsLock` modifier mask permutations.

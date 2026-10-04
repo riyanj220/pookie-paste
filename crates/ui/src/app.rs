@@ -43,12 +43,16 @@ enum PendingShortcutAction {
     ConfigurePortal,
 }
 
+type HistorySnapshotResult = Result<(Vec<ipc::HistoryItem>, u64), String>;
+
 pub(crate) struct PookieApp {
     view_mode: ViewMode,
 
     history: HistoryState,
 
-    history_receiver: Option<oneshot::Receiver<Result<Vec<ipc::HistoryItem>, String>>>,
+    history_receiver: Option<std::sync::mpsc::Receiver<HistorySnapshotResult>>,
+
+    tracked_revision: u64,
 
     selected_index: Option<usize>,
 
@@ -127,28 +131,95 @@ impl PookieApp {
         initial_view_mode: ViewMode,
         repaint_context: egui::Context,
     ) -> Self {
-        let (sender, receiver) = oneshot::channel();
+        let (history_tx, history_rx) = std::sync::mpsc::channel();
 
         /*
-         * History loading happens off the UI thread.
+         * Live history updates happen over a persistent, event-driven watch loop.
          *
-         * Explicitly wake egui when the worker finishes rather
-         * than relying on unrelated window/input events to cause
-         * another frame.
-         *
-         * This keeps background-to-UI communication event-driven
-         * and avoids continuous polling.
+         * 1. Fetches initial snapshot via GetHistory (items + revision).
+         * 2. Loops on WaitForHistoryChange { since_revision }.
+         * 3. On HistoryChanged: fetches new snapshot, updates UI, requests repaint.
+         * 4. On HistoryUnchanged: reissues wait with zero DB queries and zero repaints.
          */
         let history_repaint_ctx = repaint_context.clone();
         std::thread::spawn(move || {
-            let runtime =
-                tokio::runtime::Runtime::new().expect("failed to create UI Tokio runtime");
+            let runtime = match tokio::runtime::Runtime::new() {
+                Ok(rt) => rt,
+                Err(err) => {
+                    let _ =
+                        history_tx.send(Err(format!("failed to create UI Tokio runtime: {err}")));
+                    history_repaint_ctx.request_repaint();
+                    return;
+                }
+            };
 
-            let result = runtime.block_on(ipc_client::get_history());
+            runtime.block_on(async move {
+                // 1. Initial snapshot fetch
+                let (items, mut tracked_revision) = match ipc_client::get_history().await {
+                    Ok((items, rev)) => (items, rev),
+                    Err(err) => {
+                        let _ = history_tx.send(Err(err));
+                        history_repaint_ctx.request_repaint();
+                        return;
+                    }
+                };
 
-            if sender.send(result).is_ok() {
+                if history_tx.send(Ok((items, tracked_revision))).is_err() {
+                    return;
+                }
                 history_repaint_ctx.request_repaint();
-            }
+
+                // 2. Persistent watch loop
+                loop {
+                    match ipc_client::wait_for_history_change(tracked_revision).await {
+                        Ok(ipc::IpcResponse::HistoryChanged { revision: _ }) => {
+                            // Authoritative mutation committed: fetch fresh consistent snapshot
+                            match ipc_client::get_history().await {
+                                Ok((new_items, snapshot_rev)) => {
+                                    tracked_revision = snapshot_rev;
+                                    if history_tx.send(Ok((new_items, tracked_revision))).is_err() {
+                                        break;
+                                    }
+                                    history_repaint_ctx.request_repaint();
+                                }
+                                Err(err) => {
+                                    tracing::warn!(error = %err, "failed to fetch history snapshot after change");
+                                }
+                            }
+                        }
+                        Ok(ipc::IpcResponse::HistoryUnchanged { revision }) => {
+                            // Timeout with zero mutations:
+                            // ZERO DB queries, ZERO list updates, ZERO repaints!
+                            if revision == tracked_revision {
+                                // Reissue wait with the exact same tracked revision
+                            } else {
+                                // Anomaly or daemon restart: resync full history
+                                if let Ok((new_items, snapshot_rev)) = ipc_client::get_history().await {
+                                    tracked_revision = snapshot_rev;
+                                    if history_tx.send(Ok((new_items, tracked_revision))).is_err() {
+                                        break;
+                                    }
+                                    history_repaint_ctx.request_repaint();
+                                }
+                            }
+                        }
+                        Ok(other) => {
+                            tracing::warn!(response = ?other, "unexpected watch response; re-syncing");
+                            if let Ok((new_items, snapshot_rev)) = ipc_client::get_history().await {
+                                tracked_revision = snapshot_rev;
+                                if history_tx.send(Ok((new_items, tracked_revision))).is_err() {
+                                    break;
+                                }
+                                history_repaint_ctx.request_repaint();
+                            }
+                        }
+                        Err(err) => {
+                            tracing::debug!(error = %err, "history watch connection disconnected or exiting");
+                            break;
+                        }
+                    }
+                }
+            });
         });
 
         let (shortcut_tx, shortcut_rx) = oneshot::channel();
@@ -169,7 +240,9 @@ impl PookieApp {
 
             history: HistoryState::Loading,
 
-            history_receiver: Some(receiver),
+            history_receiver: Some(history_rx),
+
+            tracked_revision: 0,
 
             selected_index: None,
 
@@ -286,43 +359,48 @@ impl PookieApp {
     }
 
     fn poll_history(&mut self) {
-        let result = match self.history_receiver.as_mut() {
-            Some(receiver) => match receiver.try_recv() {
-                Ok(result) => Some(result),
-
-                Err(tokio::sync::oneshot::error::TryRecvError::Empty) => None,
-
-                Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
-                    self.history =
-                        HistoryState::Failed("history loader stopped unexpectedly".to_string());
-
-                    self.history_receiver = None;
-
-                    self.selected_index = None;
-
-                    return;
-                }
-            },
-
-            None => None,
+        let Some(receiver) = self.history_receiver.as_ref() else {
+            return;
         };
 
-        if let Some(result) = result {
-            match result {
-                Ok(items) => {
-                    self.selected_index = if items.is_empty() { None } else { Some(0) };
+        let mut latest = None;
+        while let Ok(msg) = receiver.try_recv() {
+            latest = Some(msg);
+        }
 
-                    self.history = HistoryState::Loaded(items);
+        let Some(result) = latest else {
+            return;
+        };
+
+        match result {
+            Ok((new_items, revision)) => {
+                let prev_items = match &self.history {
+                    HistoryState::Loaded(items) => Some(items.as_slice()),
+                    _ => None,
+                };
+
+                self.selected_index = crate::history::resolve_selection_after_update(
+                    prev_items,
+                    self.selected_index,
+                    &new_items,
+                );
+
+                if let Some(ref menu) = self.active_menu
+                    && !new_items.iter().any(|item| item.id == menu.item_id)
+                {
+                    self.active_menu = None;
                 }
 
-                Err(error) => {
+                self.tracked_revision = revision;
+                self.history = HistoryState::Loaded(new_items);
+            }
+            Err(error) => {
+                // If we already have loaded items, do NOT transition back to Failed/Loading
+                if !matches!(self.history, HistoryState::Loaded(_)) {
                     self.history = HistoryState::Failed(error);
-
                     self.selected_index = None;
                 }
             }
-
-            self.history_receiver = None;
         }
     }
 
@@ -496,25 +574,6 @@ impl PookieApp {
         }
     }
 
-    fn reload_history(&mut self, ctx: &egui::Context) {
-        let (sender, receiver) = oneshot::channel();
-
-        let repaint_context = ctx.clone();
-
-        std::thread::spawn(move || {
-            let runtime =
-                tokio::runtime::Runtime::new().expect("failed to create UI Tokio runtime");
-
-            let result = runtime.block_on(ipc_client::get_history());
-
-            if sender.send(result).is_ok() {
-                repaint_context.request_repaint();
-            }
-        });
-
-        self.history_receiver = Some(receiver);
-    }
-
     fn start_toggle_pin(&mut self, ctx: &egui::Context, id: String) {
         if self.action_in_progress {
             return;
@@ -602,7 +661,7 @@ impl PookieApp {
         self.action_receiver = Some(receiver);
     }
 
-    fn poll_action(&mut self, ctx: &egui::Context) {
+    fn poll_action(&mut self, _ctx: &egui::Context) {
         let result = match self.action_receiver.as_mut() {
             Some(receiver) => match receiver.try_recv() {
                 Ok(result) => Some(result),
@@ -627,31 +686,18 @@ impl PookieApp {
 
         match result {
             Ok(UiActionOutcome::PinToggled { .. }) => {
-                self.reload_history(ctx);
+                // Daemon mutation advances revision, which automatically wakes
+                // the persistent watch loop and updates history.
             }
 
-            Ok(UiActionOutcome::Deleted { id }) => {
-                if let HistoryState::Loaded(ref mut items) = self.history {
-                    items.retain(|i| i.id != id);
-
-                    if items.is_empty() {
-                        self.selected_index = None;
-                    } else {
-                        self.selected_index = self.selected_index.map(|s| s.min(items.len() - 1));
-                    }
-                }
+            Ok(UiActionOutcome::Deleted { .. }) => {
+                // Authoritative update is delivered by the watch loop.
             }
 
             Ok(UiActionOutcome::Cleared { count }) => {
                 tracing::debug!(count, "cleared clipboard history");
-
-                if let HistoryState::Loaded(ref mut items) = self.history {
-                    items.clear();
-                }
-
-                self.selected_index = None;
                 self.image_thumbnails = ImageThumbnailCache::new();
-                self.reload_history(ctx);
+                // Authoritative empty snapshot is delivered by the watch loop.
             }
 
             Err(error) => {

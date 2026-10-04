@@ -1,12 +1,31 @@
 use std::collections::HashSet;
+use std::sync::Arc;
 
-use pookie_clipboard::ClipboardContent;
+use pookie_clipboard::{
+    CanonicalImage, ClipboardContent, compute_image_identity, decode_canonical_png_to_rgba,
+};
 use pookie_core::ClipboardItem;
-use storage::{ImageStore, StorageRepository, StoredClipboardItem};
+use storage::{ImageMigrationOutcome, ImageStore, StorageRepository, StoredClipboardItem};
 
 use crate::config::HistoryConfig;
-use crate::error::HistoryError;
+use crate::error::{CandidateDecodeError, HistoryError};
 use crate::mapper::{to_stored_image_item, to_stored_text_item};
+use crate::notifier::HistoryRevisionNotifier;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HistorySaveOutcome {
+    Inserted { id: String },
+    Promoted { id: String },
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct MigrationSummary {
+    pub candidates_found: usize,
+    pub updated_in_place: usize,
+    pub consolidated: usize,
+    pub skipped_corrupt_or_missing: usize,
+    pub skipped_stale: usize,
+}
 
 pub struct ClipboardHistoryService {
     repository: StorageRepository,
@@ -14,6 +33,10 @@ pub struct ClipboardHistoryService {
     config: HistoryConfig,
 
     image_store: Option<ImageStore>,
+
+    notifier: HistoryRevisionNotifier,
+
+    image_mutation_gate: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl ClipboardHistoryService {
@@ -22,7 +45,15 @@ impl ClipboardHistoryService {
             repository,
             config,
             image_store: None,
+            notifier: HistoryRevisionNotifier::default(),
+            image_mutation_gate: Arc::new(tokio::sync::Mutex::new(())),
         }
+    }
+
+    /// Attach a custom revision notifier (e.g. for testing).
+    pub fn with_notifier(mut self, notifier: HistoryRevisionNotifier) -> Self {
+        self.notifier = notifier;
+        self
     }
 
     /// Attach filesystem-backed image persistence.
@@ -36,7 +67,7 @@ impl ClipboardHistoryService {
         self
     }
 
-    pub async fn save(&self, item: ClipboardItem) -> Result<(), HistoryError> {
+    pub async fn save(&self, item: ClipboardItem) -> Result<HistorySaveOutcome, HistoryError> {
         let ClipboardItem {
             id,
             content,
@@ -57,36 +88,48 @@ impl ClipboardHistoryService {
         text: String,
         hash: String,
         created_at: chrono::DateTime<chrono::Utc>,
-    ) -> Result<(), HistoryError> {
-        let mut pinned_at = None;
-
+    ) -> Result<HistorySaveOutcome, HistoryError> {
         if let Some(existing) = self.repository.find_by_hash_and_type(&hash, "text").await? {
-            pinned_at = existing.pinned_at;
-            self.repository.delete_by_id(&existing.id).await?;
+            let updated = self
+                .repository
+                .update_created_at(&existing.id, &created_at.to_rfc3339())
+                .await?;
+
+            if updated {
+                self.notifier.advance();
+                return Ok(HistorySaveOutcome::Promoted { id: existing.id });
+            }
         }
 
-        let mut stored_item = to_stored_text_item(id, text, hash, created_at);
-        stored_item.pinned_at = pinned_at;
+        let stored_item = to_stored_text_item(id, text, hash, created_at);
 
         self.repository.insert(&stored_item).await?;
 
-        self.enforce_limit().await
+        let enforce_result = self.enforce_limit().await;
+
+        self.notifier.advance();
+
+        enforce_result?;
+
+        Ok(HistorySaveOutcome::Inserted { id: id.to_string() })
     }
 
     async fn save_image(
         &self,
         id: uuid::Uuid,
-        image: Vec<u8>,
+        image: CanonicalImage,
         hash: String,
         created_at: chrono::DateTime<chrono::Utc>,
-    ) -> Result<(), HistoryError> {
+    ) -> Result<HistorySaveOutcome, HistoryError> {
+        let _guard = self.image_mutation_gate.lock().await;
+
         let mut pinned_at = None;
 
         /*
-         * A duplicate image already has exactly the same
-         * canonical PNG bytes.
+         * Matching rgba-v1 identity means identical dimensions and
+         * RGBA pixels.
          *
-         * Reuse its owned file and simply move the existing
+         * Reuse the existing owned file and simply move the existing
          * history row to the most-recent position.
          */
         if let Some(existing) = self
@@ -98,26 +141,36 @@ impl ClipboardHistoryService {
                 if let Some(file_path) = existing.file_path.as_deref()
                     && image_store.image_exists(file_path).await?
                 {
-                    self.repository
+                    let updated = self
+                        .repository
                         .update_created_at(&existing.id, &created_at.to_rfc3339())
                         .await?;
 
-                    return Ok(());
-                }
+                    if updated {
+                        self.notifier.advance();
+                        return Ok(HistorySaveOutcome::Promoted { id: existing.id });
+                    }
+                } else {
+                    pinned_at = existing.pinned_at;
 
-                pinned_at = existing.pinned_at;
+                    /*
+                     * The database row is malformed or its image
+                     * file disappeared.
+                     *
+                     * Remove the stale row and allow this fresh
+                     * clipboard event to repair it.
+                     */
+                    self.repository.delete_by_id(&existing.id).await?;
 
-                /*
-                 * The database row is malformed or its image
-                 * file disappeared.
-                 *
-                 * Remove the stale row and allow this fresh
-                 * clipboard event to repair it.
-                 */
-                self.repository.delete_by_id(&existing.id).await?;
-
-                if let Some(file_path) = existing.file_path.as_deref() {
-                    let _ = image_store.delete_image(file_path).await?;
+                    if let Some(file_path) = existing.file_path.as_deref()
+                        && let Err(cleanup_err) = image_store.delete_image(file_path).await
+                    {
+                        tracing::warn!(
+                            %cleanup_err,
+                            stale_file = file_path,
+                            "failed removing stale image file during repair; startup reconciliation will reclaim it"
+                        );
+                    }
                 }
             } else {
                 pinned_at = existing.pinned_at;
@@ -145,14 +198,18 @@ impl ClipboardHistoryService {
 
             self.repository.insert(&stored_item).await?;
 
-            self.enforce_limit().await?;
+            let enforce_result = self.enforce_limit().await;
 
-            return Ok(());
+            self.notifier.advance();
+
+            enforce_result?;
+
+            return Ok(HistorySaveOutcome::Inserted { id: id.to_string() });
         };
 
         let item_id = id.to_string();
 
-        let file_path = image_store.write_image(&item_id, &image).await?;
+        let file_path = image_store.write_image(&item_id, image.png_bytes()).await?;
 
         let mut stored_item = to_stored_image_item(id, Some(file_path.clone()), hash, created_at);
         stored_item.pinned_at = pinned_at;
@@ -172,7 +229,13 @@ impl ClipboardHistoryService {
             }
         }
 
-        self.enforce_limit().await
+        let enforce_result = self.enforce_limit().await;
+
+        self.notifier.advance();
+
+        enforce_result?;
+
+        Ok(HistorySaveOutcome::Inserted { id: item_id })
     }
 
     async fn enforce_limit(&self) -> Result<(), HistoryError> {
@@ -199,11 +262,52 @@ impl ClipboardHistoryService {
          */
         self.repository.delete_by_ids(ids).await?;
 
-        self.cleanup_item_files(&oldest_items).await
+        if let Err(cleanup_error) = self.cleanup_item_files(&oldest_items).await {
+            tracing::warn!(
+                %cleanup_error,
+                "failed to clean up image files for pruned history items; startup reconciliation will reclaim orphan files"
+            );
+        }
+
+        Ok(())
     }
 
     pub async fn get_all(&self) -> Result<Vec<StoredClipboardItem>, HistoryError> {
         Ok(self.repository.get_all().await?)
+    }
+
+    /// Read an authoritative snapshot of all history items paired with the exact
+    /// revision they represent.
+    ///
+    /// Verifies `before_revision == after_revision`. If a concurrent revision-advancing
+    /// mutation committed during the database read, it retries automatically until a
+    /// provably consistent snapshot is obtained.
+    pub async fn get_all_snapshot(&self) -> Result<(Vec<StoredClipboardItem>, u64), HistoryError> {
+        loop {
+            let before = self.current_revision();
+            let items = self.repository.get_all().await?;
+            let after = self.current_revision();
+
+            if before == after {
+                return Ok((items, after));
+            }
+
+            tracing::debug!(
+                before,
+                after,
+                "concurrent history mutation detected during GetHistory snapshot; retrying"
+            );
+        }
+    }
+
+    /// Return the current authoritative revision.
+    pub fn current_revision(&self) -> u64 {
+        self.notifier.current()
+    }
+
+    /// Subscribe to live history revision updates.
+    pub fn subscribe_revision(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.notifier.subscribe()
     }
 
     pub async fn delete(&self, id: &str) -> Result<bool, HistoryError> {
@@ -217,7 +321,15 @@ impl ClipboardHistoryService {
             return Ok(false);
         }
 
-        self.cleanup_item_file(&item).await?;
+        self.notifier.advance();
+
+        if let Err(cleanup_error) = self.cleanup_item_file(&item).await {
+            tracing::warn!(
+                id,
+                %cleanup_error,
+                "failed to clean up image file after SQLite deletion; startup reconciliation will reclaim orphan file"
+            );
+        }
 
         Ok(true)
     }
@@ -227,7 +339,16 @@ impl ClipboardHistoryService {
 
         let deleted = self.repository.clear().await?;
 
-        self.cleanup_item_files(&items).await?;
+        if deleted > 0 {
+            self.notifier.advance();
+        }
+
+        if let Err(cleanup_error) = self.cleanup_item_files(&items).await {
+            tracing::warn!(
+                %cleanup_error,
+                "failed to clean up image files after clearing history; startup reconciliation will reclaim orphan files"
+            );
+        }
 
         Ok(deleted)
     }
@@ -264,15 +385,30 @@ impl ClipboardHistoryService {
     pub async fn promote(&self, id: &str) -> Result<bool, HistoryError> {
         let created_at = chrono::Utc::now().to_rfc3339();
 
-        Ok(self.repository.update_created_at(id, &created_at).await?)
+        let updated = self.repository.update_created_at(id, &created_at).await?;
+        if updated {
+            self.notifier.advance();
+        }
+
+        Ok(updated)
     }
 
     pub async fn pin(&self, id: &str) -> Result<bool, HistoryError> {
-        Ok(self.repository.pin(id).await?)
+        let changed = self.repository.pin(id).await?;
+        if changed {
+            self.notifier.advance();
+        }
+
+        Ok(changed)
     }
 
     pub async fn unpin(&self, id: &str) -> Result<bool, HistoryError> {
-        Ok(self.repository.unpin(id).await?)
+        let changed = self.repository.unpin(id).await?;
+        if changed {
+            self.notifier.advance();
+        }
+
+        Ok(changed)
     }
 
     pub async fn toggle_pin(&self, id: &str) -> Result<Option<bool>, HistoryError> {
@@ -281,11 +417,21 @@ impl ClipboardHistoryService {
         };
 
         if item.pinned_at.is_some() {
-            self.repository.unpin(id).await?;
-            Ok(Some(false))
+            let changed = self.repository.unpin(id).await?;
+            if changed {
+                self.notifier.advance();
+                Ok(Some(false))
+            } else {
+                Ok(None)
+            }
         } else {
-            self.repository.pin(id).await?;
-            Ok(Some(true))
+            let changed = self.repository.pin(id).await?;
+            if changed {
+                self.notifier.advance();
+                Ok(Some(true))
+            } else {
+                Ok(None)
+            }
         }
     }
 
@@ -346,5 +492,159 @@ impl ClipboardHistoryService {
         }
 
         Ok(())
+    }
+
+    /// Migrate legacy image history rows to versioned rgba-v1 identity.
+    ///
+    /// The migration is background-safe, sequential (concurrency = 1),
+    /// idempotent, and crash-safe. Backing PNG files are decoded to calculate
+    /// their rgba-v1 identity but are never re-encoded or modified.
+    pub async fn migrate_legacy_image_identities(&self) -> Result<MigrationSummary, HistoryError> {
+        let Some(image_store) = self.image_store.as_ref() else {
+            return Ok(MigrationSummary::default());
+        };
+
+        let candidates = self.repository.get_legacy_image_candidates().await?;
+        let mut summary = MigrationSummary {
+            candidates_found: candidates.len(),
+            ..Default::default()
+        };
+
+        for candidate in candidates {
+            let Some(ref file_path) = candidate.file_path else {
+                tracing::warn!(id = %candidate.id, "legacy image candidate has no file_path; skipping");
+                summary.skipped_corrupt_or_missing += 1;
+                continue;
+            };
+
+            let absolute_path = match image_store.resolve_relative_path(file_path) {
+                Ok(p) => p,
+                Err(err) => {
+                    tracing::warn!(id = %candidate.id, %err, "invalid relative image path; skipping");
+                    summary.skipped_corrupt_or_missing += 1;
+                    continue;
+                }
+            };
+
+            // 1. Candidate decode and identity computation outside image_mutation_gate
+            let decode_res = tokio::task::spawn_blocking(move || {
+                let bytes = std::fs::read(&absolute_path).map_err(CandidateDecodeError::Io)?;
+                let (width, height, rgba) =
+                    decode_canonical_png_to_rgba(&bytes).map_err(CandidateDecodeError::Codec)?;
+                let identity = compute_image_identity(width, height, &rgba);
+                Ok::<_, CandidateDecodeError>(identity.to_versioned_string())
+            })
+            .await;
+
+            let target_rgba_v1_hash = match decode_res {
+                Ok(Ok(h)) => h,
+                Ok(Err(err)) => {
+                    tracing::warn!(id = %candidate.id, %err, "failed reading/decoding legacy image; skipping row");
+                    summary.skipped_corrupt_or_missing += 1;
+                    continue;
+                }
+                Err(join_err) => {
+                    tracing::error!(id = %candidate.id, %join_err, "spawn_blocking failed during migration");
+                    summary.skipped_corrupt_or_missing += 1;
+                    continue;
+                }
+            };
+
+            // 2. Acquire image_mutation_gate before querying collision rows
+            let _guard = self.image_mutation_gate.lock().await;
+
+            let colliding_rows = self
+                .repository
+                .find_all_by_hash_and_type(&target_rgba_v1_hash, "image")
+                .await?;
+
+            let mut known_healthy_ids = HashSet::new();
+            // Candidate itself is already verified healthy above
+            known_healthy_ids.insert(candidate.id.clone());
+
+            // 3. Verify colliding row file health while gate is held
+            for colliding in colliding_rows {
+                if colliding.id == candidate.id {
+                    continue;
+                }
+
+                let Some(ref coll_file_path) = colliding.file_path else {
+                    continue;
+                };
+
+                let Ok(coll_abs_path) = image_store.resolve_relative_path(coll_file_path) else {
+                    continue;
+                };
+
+                let target_hash_clone = target_rgba_v1_hash.clone();
+                let verify_res = tokio::task::spawn_blocking(move || {
+                    let bytes = std::fs::read(&coll_abs_path).map_err(CandidateDecodeError::Io)?;
+                    let (width, height, rgba) = decode_canonical_png_to_rgba(&bytes)
+                        .map_err(CandidateDecodeError::Codec)?;
+                    let identity = compute_image_identity(width, height, &rgba);
+                    let computed = identity.to_versioned_string();
+                    if computed != target_hash_clone {
+                        return Err(CandidateDecodeError::IdentityMismatch {
+                            expected: target_hash_clone,
+                            actual: computed,
+                        });
+                    }
+                    Ok::<_, CandidateDecodeError>(())
+                })
+                .await;
+
+                if let Ok(Ok(())) = verify_res {
+                    known_healthy_ids.insert(colliding.id);
+                } else {
+                    tracing::warn!(
+                        id = %colliding.id,
+                        "colliding image backing file is missing, corrupt, or identity mismatched; excluded from healthy set"
+                    );
+                }
+            }
+
+            // 4. Transactional consolidation
+            let outcome = self
+                .repository
+                .consolidate_legacy_image_row(
+                    &candidate.id,
+                    &candidate.content_hash,
+                    &target_rgba_v1_hash,
+                    &known_healthy_ids,
+                )
+                .await?;
+
+            drop(_guard);
+
+            // 5. Post-commit cleanup and selective revision notification
+            match outcome {
+                ImageMigrationOutcome::SkippedStale => {
+                    summary.skipped_stale += 1;
+                }
+                ImageMigrationOutcome::UpdatedInPlace { .. } => {
+                    summary.updated_in_place += 1;
+                    // Hash-only update: do NOT advance revision
+                }
+                ImageMigrationOutcome::Consolidated {
+                    redundant_file_paths,
+                    ..
+                } => {
+                    summary.consolidated += 1;
+                    for redundant_path in redundant_file_paths {
+                        if let Err(cleanup_err) = image_store.delete_image(&redundant_path).await {
+                            tracing::warn!(
+                                %cleanup_err,
+                                file = %redundant_path,
+                                "failed to clean up redundant image file after migration consolidation; startup reconciliation will reclaim it"
+                            );
+                        }
+                    }
+                    // Consolidation alters visible history -> advance revision once
+                    self.notifier.advance();
+                }
+            }
+        }
+
+        Ok(summary)
     }
 }

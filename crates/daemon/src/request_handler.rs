@@ -17,6 +17,8 @@ use crate::reload_coordinator::ReloadCoordinator;
 use crate::shortcut_config::{KeyBindingConfig, ModifiersConfig};
 use crate::ui_launcher::{UiLaunchOutcome, UiLauncher, UiStartupMode};
 
+pub const DEFAULT_HISTORY_WATCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(25);
+
 pub async fn handle_request<B, P, F>(
     request: IpcRequest,
     history_service: &ClipboardHistoryService,
@@ -31,20 +33,86 @@ where
     P: PasteBackend,
     F: FocusBackend,
 {
+    handle_request_with_timeout(
+        request,
+        history_service,
+        activation_service,
+        clipboard_service,
+        ui_launcher,
+        shortcut_status,
+        reload_coordinator,
+        DEFAULT_HISTORY_WATCH_TIMEOUT,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn handle_request_with_timeout<B, P, F>(
+    request: IpcRequest,
+    history_service: &ClipboardHistoryService,
+    activation_service: &ClipboardActivationService<B, P, F>,
+    clipboard_service: &Mutex<ClipboardService<B>>,
+    ui_launcher: &UiLauncher,
+    shortcut_status: &Arc<RwLock<ShortcutStatusInfo>>,
+    reload_coordinator: &Arc<ReloadCoordinator>,
+    history_watch_timeout: std::time::Duration,
+) -> IpcResponse
+where
+    B: ClipboardBackend,
+    P: PasteBackend,
+    F: FocusBackend,
+{
     match request {
         IpcRequest::Ping => IpcResponse::Pong,
 
-        IpcRequest::GetHistory => match history_service.get_all().await {
-            Ok(items) => {
+        IpcRequest::GetHistory => match history_service.get_all_snapshot().await {
+            Ok((items, revision)) => {
                 let items = items.into_iter().map(to_history_item).collect();
 
-                IpcResponse::History { items }
+                IpcResponse::History { items, revision }
             }
 
             Err(error) => IpcResponse::Error {
                 message: format!("failed to load clipboard history: {error}"),
             },
         },
+
+        IpcRequest::WaitForHistoryChange { since_revision } => {
+            let mut rx = history_service.subscribe_revision();
+            let initial_current = *rx.borrow_and_update();
+
+            if since_revision != initial_current {
+                return IpcResponse::HistoryChanged {
+                    revision: initial_current,
+                };
+            }
+
+            tokio::select! {
+                result = rx.changed() => {
+                    match result {
+                        Ok(()) => {
+                            let new_rev = *rx.borrow_and_update();
+                            IpcResponse::HistoryChanged { revision: new_rev }
+                        }
+                        Err(_) => IpcResponse::Error {
+                            message: "history revision watcher closed".to_string(),
+                        },
+                    }
+                }
+                _ = tokio::time::sleep(history_watch_timeout) => {
+                    let current_at_timeout = *rx.borrow_and_update();
+                    if current_at_timeout != since_revision {
+                        IpcResponse::HistoryChanged {
+                            revision: current_at_timeout,
+                        }
+                    } else {
+                        IpcResponse::HistoryUnchanged {
+                            revision: since_revision,
+                        }
+                    }
+                }
+            }
+        }
 
         IpcRequest::ActivateItem { id, target_id } => {
             let ipc_target_for_log = target_id.clone();
@@ -529,12 +597,11 @@ mod tests {
         .await;
 
         match response {
-            IpcResponse::History { items } => {
-                assert_eq!(items.len(), 2,);
-
-                assert_eq!(items[0].text_content.as_deref(), Some("Second"),);
-
-                assert_eq!(items[1].text_content.as_deref(), Some("First"),);
+            IpcResponse::History { items, revision } => {
+                assert_eq!(items.len(), 2);
+                assert_eq!(revision, 3);
+                assert_eq!(items[0].text_content.as_deref(), Some("Second"));
+                assert_eq!(items[1].text_content.as_deref(), Some("First"));
             }
 
             other => {
@@ -961,5 +1028,161 @@ mod tests {
 
         // Verify it was marked as a self-write
         assert!(clipboard_state.is_self_write(&ClipboardContent::Text(directive)));
+    }
+
+    #[tokio::test]
+    async fn wait_for_history_change_returns_immediately_when_stale() {
+        let service = create_history_service().await;
+        // Service starts at revision 1. Add an item -> revision becomes 2.
+        service
+            .save(ClipboardItem {
+                id: uuid::Uuid::new_v4(),
+                content: ClipboardContent::Text("one".to_string()),
+                hash: "h-1".to_string(),
+                created_at: Utc::now(),
+            })
+            .await
+            .expect("save failed");
+        assert_eq!(service.current_revision(), 2);
+
+        let (activation_service, _backend_handle) = create_activation_service(Arc::clone(&service));
+
+        // Client asks with stale revision 1
+        let response = handle_test_request(
+            IpcRequest::WaitForHistoryChange { since_revision: 1 },
+            service.as_ref(),
+            &activation_service,
+        )
+        .await;
+
+        assert_eq!(response, IpcResponse::HistoryChanged { revision: 2 });
+    }
+
+    #[tokio::test]
+    async fn wait_for_history_change_returns_immediately_on_daemon_restart_future_revision() {
+        let service = create_history_service().await;
+        assert_eq!(service.current_revision(), 1);
+
+        let (activation_service, _backend_handle) = create_activation_service(Arc::clone(&service));
+
+        // Client thinks daemon is at revision 99 (e.g. before restart)
+        let response = handle_test_request(
+            IpcRequest::WaitForHistoryChange { since_revision: 99 },
+            service.as_ref(),
+            &activation_service,
+        )
+        .await;
+
+        // Daemon responds immediately with current revision 1
+        assert_eq!(response, IpcResponse::HistoryChanged { revision: 1 });
+    }
+
+    #[tokio::test]
+    async fn wait_for_history_change_blocks_and_wakes_on_mutation() {
+        let service = create_history_service().await;
+        let (activation_service, _backend_handle) = create_activation_service(Arc::clone(&service));
+
+        let svc_clone = Arc::clone(&service);
+
+        let wait_handle = tokio::spawn(async move {
+            handle_test_request(
+                IpcRequest::WaitForHistoryChange { since_revision: 1 },
+                svc_clone.as_ref(),
+                &activation_service,
+            )
+            .await
+        });
+
+        // Give the task a brief moment to enter wait
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        // Perform mutation
+        service
+            .save(ClipboardItem {
+                id: uuid::Uuid::new_v4(),
+                content: ClipboardContent::Text("wake up".to_string()),
+                hash: "h-wake".to_string(),
+                created_at: Utc::now(),
+            })
+            .await
+            .expect("save failed");
+
+        let response = wait_handle.await.expect("wait task failed");
+        assert_eq!(response, IpcResponse::HistoryChanged { revision: 2 });
+    }
+
+    #[tokio::test]
+    async fn wait_for_history_change_timeout_returns_history_unchanged() {
+        let service = create_history_service().await;
+        let (activation_service, _backend_handle) = create_activation_service(Arc::clone(&service));
+
+        let ui_launcher = UiLauncher::new();
+        let shortcut_status = create_test_shortcut_status();
+        let reload_coordinator = create_test_reload_coordinator(Arc::clone(&shortcut_status));
+
+        // Use a short 30ms timeout for deterministic testing
+        let response = handle_request_with_timeout(
+            IpcRequest::WaitForHistoryChange { since_revision: 1 },
+            service.as_ref(),
+            &activation_service,
+            activation_service.clipboard_service().as_ref(),
+            &ui_launcher,
+            &shortcut_status,
+            &reload_coordinator,
+            std::time::Duration::from_millis(30),
+        )
+        .await;
+
+        // Revision has not changed; must return HistoryUnchanged with since_revision (1)
+        assert_eq!(response, IpcResponse::HistoryUnchanged { revision: 1 });
+    }
+
+    #[tokio::test]
+    async fn mutation_at_timeout_boundary_never_returns_newer_revision_as_unchanged() {
+        let service = create_history_service().await;
+        let (activation_service, _backend_handle) = create_activation_service(Arc::clone(&service));
+
+        let ui_launcher = UiLauncher::new();
+        let shortcut_status = create_test_shortcut_status();
+        let reload_coordinator = create_test_reload_coordinator(Arc::clone(&shortcut_status));
+
+        let svc_clone = Arc::clone(&service);
+        // Mutate right around the timeout boundary
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(15)).await;
+            let _ = svc_clone
+                .save(ClipboardItem {
+                    id: uuid::Uuid::new_v4(),
+                    content: ClipboardContent::Text("boundary mutation".to_string()),
+                    hash: "h-boundary".to_string(),
+                    created_at: Utc::now(),
+                })
+                .await;
+        });
+
+        let response = handle_request_with_timeout(
+            IpcRequest::WaitForHistoryChange { since_revision: 1 },
+            service.as_ref(),
+            &activation_service,
+            activation_service.clipboard_service().as_ref(),
+            &ui_launcher,
+            &shortcut_status,
+            &reload_coordinator,
+            std::time::Duration::from_millis(25),
+        )
+        .await;
+
+        // If the mutation committed, it MUST return HistoryChanged with revision 2,
+        // and NEVER HistoryUnchanged with revision 2!
+        match response {
+            IpcResponse::HistoryChanged { revision } => {
+                assert_eq!(revision, 2);
+            }
+            IpcResponse::HistoryUnchanged { revision } => {
+                // If it timed out before mutation committed, revision MUST be 1, never 2
+                assert_eq!(revision, 1);
+            }
+            other => panic!("unexpected response: {other:?}"),
+        }
     }
 }

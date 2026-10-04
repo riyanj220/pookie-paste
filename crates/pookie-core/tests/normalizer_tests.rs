@@ -34,13 +34,14 @@ fn normalizes_line_endings() {
 
 #[test]
 fn keeps_images_unchanged() {
-    let content = ClipboardContent::Image(vec![1, 2, 3]);
+    let canonical = pookie_clipboard::canonicalize_rgba(1, 1, &[255, 0, 0, 255]).unwrap();
+    let content = ClipboardContent::Image(canonical.clone());
 
     let normalized = ContentNormalizer::normalize(content);
 
     match normalized {
         ClipboardContent::Image(value) => {
-            assert_eq!(value, vec![1, 2, 3]);
+            assert_eq!(value, canonical);
         }
 
         _ => panic!("Expected image"),
