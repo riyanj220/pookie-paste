@@ -335,7 +335,7 @@ pub(crate) fn canonicalize_image_format(
 
     let decoded = decode_encoded_image(encoded, format)?;
 
-    encode_canonical_png(decoded.to_rgba8())
+    encode_canonical_png(decoded.into_rgba8())
 }
 
 ///
@@ -391,15 +391,7 @@ pub fn canonicalize_rgba(
         });
     }
 
-    let identity = compute_image_identity(width, height, rgba);
-
-    let mut output = Vec::new();
-
-    PngEncoder::new(&mut output)
-        .write_image(rgba, width, height, ExtendedColorType::Rgba8)
-        .map_err(|error| ImageCodecError::EncodeFailed(error.to_string()))?;
-
-    Ok(CanonicalImage::new(output, identity))
+    canonicalize_rgba_internal(width, height, rgba)
 }
 
 ///
@@ -423,7 +415,7 @@ pub fn decode_canonical_png_to_rgba(
 
     let decoded = decode_encoded_image(encoded, ImageFormat::Png)?;
 
-    let rgba = decoded.to_rgba8();
+    let rgba = decoded.into_rgba8();
 
     let width = rgba.width();
 
@@ -557,26 +549,58 @@ fn encode_canonical_png(rgba: RgbaImage) -> Result<CanonicalImage, ImageCodecErr
 
     let height = rgba.height();
 
+    canonicalize_rgba_internal(width, height, rgba.as_raw())
+}
+
+///
+/// Internal shared canonicalization kernel.
+///
+/// Executes SHA-256 `rgba-v1` identity hashing and Fast+Adaptive PNG
+/// encoding concurrently across scoped threads using `std::thread::scope`
+/// from the exact same immutable borrowed RGBA slice.
+///
+fn canonicalize_rgba_internal(
+    width: u32,
+    height: u32,
+    rgba: &[u8],
+) -> Result<CanonicalImage, ImageCodecError> {
     validate_dimensions(width, height)?;
 
-    let identity = compute_image_identity(width, height, rgba.as_raw());
+    std::thread::scope(|scope| {
+        let hash_handle = std::thread::Builder::new()
+            .name("pookie-img-hash".to_string())
+            .spawn_scoped(scope, || compute_image_identity(width, height, rgba))
+            .map_err(|error| {
+                ImageCodecError::EncodeFailed(format!(
+                    "failed spawning image identity worker thread: {error}"
+                ))
+            })?;
 
-    let mut output = Vec::new();
+        let mut output = Vec::new();
+        let encode_res = PngEncoder::new(&mut output)
+            .write_image(rgba, width, height, ExtendedColorType::Rgba8)
+            .map(|()| output);
 
-    PngEncoder::new(&mut output)
-        .write_image(rgba.as_raw(), width, height, ExtendedColorType::Rgba8)
-        .map_err(|error| ImageCodecError::EncodeFailed(error.to_string()))?;
+        let identity_res = hash_handle.join();
 
-    drop(rgba);
+        let identity = identity_res.map_err(|_| {
+            ImageCodecError::EncodeFailed(
+                "image identity hashing worker thread panicked".to_string(),
+            )
+        })?;
 
-    Ok(CanonicalImage::new(output, identity))
+        let output =
+            encode_res.map_err(|error| ImageCodecError::EncodeFailed(error.to_string()))?;
+
+        Ok(CanonicalImage::new(output, identity))
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use std::io::Cursor;
 
-    use image::{DynamicImage, ImageFormat, ImageReader, Rgba, RgbaImage};
+    use image::{DynamicImage, ImageFormat, ImageReader, Rgb, RgbImage, Rgba, RgbaImage};
 
     use super::{
         ImageCodecError, ImageIdentity, MAX_IMAGE_DIMENSION, MAX_IMAGE_PIXELS,
@@ -963,5 +987,95 @@ mod tests {
             identity.to_versioned_string(),
             "rgba-v1:0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
         );
+    }
+
+    #[test]
+    fn parallel_canonicalization_produces_exact_golden_identity_and_reconstructs_pixels() {
+        let rgba = [
+            255, 0, 0, 255, // (0,0) Red
+            0, 255, 0, 255, // (1,0) Green
+            0, 0, 255, 255, // (0,1) Blue
+            255, 255, 0, 128, // (1,1) Semi-transparent Yellow
+        ];
+        // 1. Golden identity matches sequential computation
+        let golden_id = compute_image_identity(2, 2, &rgba);
+        assert_eq!(
+            golden_id.to_hex(),
+            "434c6661a2c15303ccca6a7244c78b3e90b558b73da9f3fd22a2f0c1a864a8c4"
+        );
+
+        // 2. Parallel canonicalization produces identical identity
+        let canonical = canonicalize_rgba(2, 2, &rgba).expect("canonicalize_rgba failed");
+        assert_eq!(canonical.identity(), golden_id);
+        assert_eq!(
+            canonical.identity().to_hex(),
+            "434c6661a2c15303ccca6a7244c78b3e90b558b73da9f3fd22a2f0c1a864a8c4"
+        );
+
+        // 3. Resulting PNG decodes to the exact original RGBA pixels
+        let (width, height, decoded_rgba) =
+            decode_canonical_png_to_rgba(canonical.png_bytes()).expect("decode PNG failed");
+        assert_eq!(width, 2);
+        assert_eq!(height, 2);
+        assert_eq!(decoded_rgba.as_slice(), &rgba);
+    }
+
+    #[test]
+    fn deterministic_png_repeated_canonicalization_produces_identical_bytes() {
+        let rgba = [
+            12, 34, 56, 255, 78, 90, 123, 200, 210, 220, 230, 180, 11, 22, 33, 255,
+        ];
+
+        let first = canonicalize_rgba(2, 2, &rgba).expect("first canonicalization failed");
+        let second = canonicalize_rgba(2, 2, &rgba).expect("second canonicalization failed");
+
+        assert_eq!(first.identity(), second.identity());
+        assert_eq!(first.png_bytes(), second.png_bytes());
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn into_rgba8_preserves_exact_rgba_pixels() {
+        let original_rgba = RgbaImage::from_fn(3, 2, |x, y| {
+            Rgba([
+                (x * 50) as u8,
+                (y * 80) as u8,
+                ((x + y) * 30) as u8,
+                255 - (x as u8 * 40),
+            ])
+        });
+        let expected_raw = original_rgba.as_raw().clone();
+
+        let dynamic_rgba = DynamicImage::ImageRgba8(original_rgba);
+        let converted = dynamic_rgba.into_rgba8();
+
+        assert_eq!(converted.width(), 3);
+        assert_eq!(converted.height(), 2);
+        assert_eq!(converted.as_raw(), &expected_raw);
+    }
+
+    #[test]
+    fn into_rgba8_converts_rgb_to_exact_rgba_pixels() {
+        let original_rgb = RgbImage::from_fn(3, 2, |x, y| {
+            Rgb([(x * 70) as u8, (y * 90) as u8, ((x + y) * 40) as u8])
+        });
+
+        let dynamic_rgb = DynamicImage::ImageRgb8(original_rgb.clone());
+        let converted = dynamic_rgb.into_rgba8();
+
+        assert_eq!(converted.width(), 3);
+        assert_eq!(converted.height(), 2);
+
+        for y in 0..2 {
+            for x in 0..3 {
+                let rgb_pixel = original_rgb.get_pixel(x, y);
+                let rgba_pixel = converted.get_pixel(x, y);
+                assert_eq!(
+                    rgba_pixel,
+                    &Rgba([rgb_pixel[0], rgb_pixel[1], rgb_pixel[2], 255]),
+                    "pixel at ({x}, {y}) mismatch after into_rgba8 conversion"
+                );
+            }
+        }
     }
 }
