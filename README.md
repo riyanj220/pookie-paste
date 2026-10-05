@@ -4,8 +4,6 @@
 
 <h1 align="center">Pookie Paste</h1>
 
----
-
 <p align="center">
   <a href="#documentation">Documentation</a> &bull;
   <a href="https://github.com/riyanj220/pookie-paste/issues/new?labels=bug">Report Bug</a> &bull;
