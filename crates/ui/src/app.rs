@@ -1108,9 +1108,6 @@ impl eframe::App for PookieApp {
                 shortcut_view::ShortcutViewAction::ConfigurePortal => {
                     self.start_configure_portal(ui.ctx());
                 }
-                shortcut_view::ShortcutViewAction::RecheckStatus => {
-                    self.start_recheck_shortcut_status(ui.ctx());
-                }
                 shortcut_view::ShortcutViewAction::CopySnippet(text) => {
                     self.start_copy_text(ui.ctx(), text);
                 }

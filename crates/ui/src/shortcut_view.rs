@@ -42,7 +42,6 @@ pub enum ShortcutViewAction {
     SwitchToHistory,
     SaveShortcut { modifiers: Vec<String>, key: String },
     ConfigurePortal,
-    RecheckStatus,
     CopySnippet(String),
     OpenConfig,
     ReloadSway,
@@ -643,40 +642,10 @@ fn render_hyprland_section(
         ui.add_space(4.0);
 
         if let IpcShortcutState::CompositorManaged {
-            snippet,
-            binding_status,
-            conflict,
-            ..
+            snippet, conflict, ..
         } = &status.state
         {
             render_snippet_surface(ui, state, snippet, status, palette, action);
-
-            // Actionable check only when unconfigured
-            if *binding_status == IpcCompositorBindingStatus::Unconfigured {
-                ui.add_space(6.0);
-                ui.horizontal(|ui| {
-                    ui.label(
-                        egui::RichText::new("Binding not active yet")
-                            .size(ui_style::BODY_TEXT_SIZE - 1.0)
-                            .color(palette.text_secondary),
-                    );
-
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let check_btn = egui::Button::new(
-                            egui::RichText::new("Check")
-                                .size(ui_style::BODY_TEXT_SIZE - 2.0)
-                                .color(palette.accent),
-                        );
-                        if ui
-                            .add(check_btn)
-                            .on_hover_cursor(egui::CursorIcon::PointingHand)
-                            .clicked()
-                        {
-                            *action = ShortcutViewAction::RecheckStatus;
-                        }
-                    });
-                });
-            }
 
             // Actionable conflict notice if conflict exists
             if let Some(conf) = conflict {
